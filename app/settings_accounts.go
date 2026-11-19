@@ -21,6 +21,7 @@ import (
 	"github.com/godwit-email/godwit/internal/i18n"
 	"github.com/godwit-email/godwit/internal/icons"
 	"github.com/godwit-email/godwit/internal/kit"
+	"github.com/godwit-email/godwit/internal/smime"
 	"github.com/godwit-email/godwit/internal/theme"
 )
 
@@ -539,6 +540,19 @@ func (p *settingsPage) accountView(c *ui.Context, acc core.Account) {
 		return
 	}
 	p.accountSignatureView(c, acc)
+	if smime.Supported() && !acc.ReceiveOnly {
+		settingsSection(c, "S/MIME", "", func() {
+			sign := acc.SMIMESign
+			if kit.SwitchRow(c, &sign, smimeText("smime.sign"), smimeText("smime.sign.help")).Changed() {
+				p.patch(acc.ID, core.AccountPatch{SMIMESign: &sign}, nil)
+			}
+		}, func() {
+			encrypt := acc.SMIMEEncrypt
+			if kit.SwitchRow(c, &encrypt, smimeText("smime.encrypt"), smimeText("smime.encrypt.help")).Changed() {
+				p.patch(acc.ID, core.AccountPatch{SMIMEEncrypt: &encrypt}, nil)
+			}
+		})
+	}
 	// The text area is the section's body, with no card around it, as macOS shows a long text.
 	ui.Column(c).Gap(theme.SectionGap).Children(func() {
 		sectionTitle(c, i18n.T("settings.account.ai"))

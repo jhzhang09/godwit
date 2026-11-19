@@ -40,7 +40,12 @@ func find(c *imapclient.Client, folder backend.FolderRef, messageID string, size
 }
 
 func findSelected(c *imapclient.Client, validity uint32, messageID string, size int64) ([]backend.MessageRef, error) {
-	crit := &imap.SearchCriteria{Header: []imap.SearchCriteriaHeaderField{{Key: "Message-ID", Value: messageID}}}
+	id := strings.Trim(strings.TrimSpace(messageID), "<>")
+	if id == "" {
+		return nil, nil
+	}
+	// 263Mail 等服务器按完整头部值匹配 Message-ID，搜索不带尖括号的裸 ID 会漏匹配。
+	crit := &imap.SearchCriteria{Header: []imap.SearchCriteriaHeaderField{{Key: "Message-ID", Value: "<" + id + ">"}}}
 	if size > 0 {
 		crit.Larger, crit.Smaller = size-1, size+1
 	}
@@ -60,7 +65,7 @@ func findSelected(c *imapclient.Client, validity uint32, messageID string, size 
 	var refs []backend.MessageRef
 	for _, m := range msgs {
 		h, err := netmail.ReadMessage(bytes.NewReader(append(m.FindBodySection(sec), "\r\n\r\n"...)))
-		if err == nil && strings.Trim(strings.TrimSpace(h.Header.Get("Message-Id")), "<>") == messageID {
+		if err == nil && strings.Trim(strings.TrimSpace(h.Header.Get("Message-Id")), "<>") == id {
 			refs = append(refs, backend.MessageRef(Encode(validity, uint32(m.UID))))
 		}
 	}

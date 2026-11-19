@@ -11,7 +11,8 @@ if (Boolean(provisioningProfile) !== Boolean(entitlements)) {
 export default {
   name: "Godwit",
   identifier: "email.godwit.app",
-  version: "1.39.3", // x-release-please-version
+  // 本地功能预览版使用独立版本号，避免界面连接到已安装版本的旧后端。
+  version: env.GODWIT_BUILD_VERSION || "1.39.3", // x-release-please-version
   copyright: "© 2026 The Godwit Authors",
   icon: "assets/icon.png",
   main: "./cmd/godwit",

@@ -500,7 +500,9 @@ func b2i(b bool) int {
 const accountCols = `id, email, name, alias, COALESCE((SELECT html FROM signatures WHERE id = signature_id), ''), username, is_default, sync_limit, recv_auth, status,
 	recv_host, recv_port, recv_security, send_host, send_port, send_security, smtp_reauth, provider, status_detail,
 	sync_since_months, (SELECT count(*) FROM folders WHERE account_id = accounts.id), signature_id, icon, ai_instructions, oauth_client_id, label_keywords, kind, receive_only,
-	recv_protocol, send_protocol, features, recv_path, send_auth, position`
+	recv_protocol, send_protocol, features, recv_path, send_auth, position,
+ EXISTS(SELECT 1 FROM settings WHERE key='smime.sign.' || accounts.id),
+ EXISTS(SELECT 1 FROM settings WHERE key='smime.encrypt.' || accounts.id)`
 
 // ErrAccountNotFound is returned for an account id that does not exist.
 var ErrAccountNotFound = errors.New("account not found")
@@ -529,7 +531,7 @@ func scanAccount(r []any) Account {
 		Sending:   Server{store.Str(r[29]), store.Str(r[13]), int(store.Int(r[14])), Security(store.Str(r[15])), "", store.Str(r[32])},
 		Provider:  store.Str(r[17]), StatusDetail: store.Str(r[18]), SignatureID: store.Int(r[21]), Icon: store.Str(r[22]),
 		AIInstructions: store.Str(r[23]), OAuthClientID: store.Str(r[24]), LabelKeywords: store.Int(r[25]) == 1, Kind: store.Str(r[26]),
-		ReceiveOnly: store.Int(r[27]) == 1, Position: int(store.Int(r[33])),
+		ReceiveOnly: store.Int(r[27]) == 1, Position: int(store.Int(r[33])), SMIMESign: store.Int(r[34]) != 0, SMIMEEncrypt: store.Int(r[35]) != 0,
 	}
 	if sendsViaReceiving(a.Receiving.Protocol) {
 		// EWS, JMAP, Graph and Gmail API send through the receiving server, whose
@@ -627,7 +629,10 @@ func (s *Service) RemoveAccount(ctx context.Context, id int64) error {
 	if err != nil {
 		return err
 	}
-	if _, err := s.db.DurableExecute(ctx, "DELETE FROM accounts WHERE id = ?", id); err != nil { // cascades to its address book
+	if _, err := s.db.DurableTransaction(ctx, []sqlite.Statement{
+		{SQL: "DELETE FROM settings WHERE key IN ('smime.sign.' || ?, 'smime.encrypt.' || ?)", Args: []any{id, id}},
+		{SQL: "DELETE FROM accounts WHERE id = ?", Args: []any{id}},
+	}); err != nil {
 		return err
 	}
 	var abErrs []error
@@ -955,6 +960,20 @@ func (s *Service) UpdateAccount(ctx context.Context, id int64, p AccountPatch) (
 		set("smtp_reauth", 0)
 	}
 	var stmts []sqlite.Statement
+	for _, setting := range []struct {
+		prefix  string
+		enabled *bool
+	}{{"smime.sign.", p.SMIMESign}, {"smime.encrypt.", p.SMIMEEncrypt}} {
+		if setting.enabled == nil {
+			continue
+		}
+		key := setting.prefix + strconv.FormatInt(id, 10)
+		stmt := sqlite.Statement{SQL: "DELETE FROM settings WHERE key=?", Args: []any{key}}
+		if *setting.enabled {
+			stmt.SQL = "INSERT OR IGNORE INTO settings(key,value) VALUES (?, 'true')"
+		}
+		stmts = append(stmts, stmt)
+	}
 	if p.IsDefault != nil && *p.IsDefault {
 		stmts = append(stmts, sqlite.Statement{SQL: "UPDATE accounts SET is_default = 0 WHERE id <> ?", Args: []any{id}})
 		set("is_default", 1)
@@ -985,6 +1004,11 @@ func (s *Service) UpdateAccount(ctx context.Context, id int64, p AccountPatch) (
 			return Account{}, err
 		}
 		defer unlock()
+	}
+	if p.SMIMESign != nil || p.SMIMEEncrypt != nil {
+		// 入队与策略变更串行，已开始制信的任务须重新检查策略。
+		s.editMu.Lock()
+		defer s.editMu.Unlock()
 	}
 	if p.Servers != nil {
 		// Under credMu, like credentialsUpdated: refusals by the old servers still

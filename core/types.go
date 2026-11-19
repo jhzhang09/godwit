@@ -73,6 +73,9 @@ type Account struct {
 	// the add-account check, a server change and each sign-in (ADR 0034);
 	// nil before the first. See Unsupported.
 	Features map[backend.Feature]backend.Support
+
+	// 发信账户的 S/MIME 策略，两项独立配置。
+	SMIMESign, SMIMEEncrypt bool
 }
 
 // KindLocalArchive is an account with no servers or credentials: it never
@@ -151,6 +154,9 @@ type AccountPatch struct {
 	IconImage              []byte  // an uploaded png, jpeg, gif, webp or svg: Icon becomes image:<n>
 	AIInstructions         *string // trimmed, at most MaxAIInstructions runes
 	LabelKeywords          *bool   // turning it on imports the server's keywords at once
+
+	// 发信账户的 S/MIME 策略，两项独立配置。
+	SMIMESign, SMIMEEncrypt *bool
 }
 
 // AccountIcon is an account's uploaded icon image.

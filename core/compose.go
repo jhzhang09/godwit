@@ -719,15 +719,15 @@ func (s *Service) send(ctx context.Context, draftID, want int64, rs *ruleSend) e
 // queued already is ErrStaleDraft. A rule's send (rs) carries its marker
 // header and writes rs.stmts with the item, in one transaction.
 func (s *Service) enqueue(ctx context.Context, draftID, rev int64, checked []string, rs *ruleSend) error {
-	release, err := s.stopDraftRuns(ctx, draftID) // Wit proposes nothing for the queued draft
+	unlock, err := s.lockForEnqueue(ctx, draftID)
 	if err != nil {
 		return err
 	}
-	defer release()
-	s.editMu.Lock() // enters the outbox once, with the draft as it is now
-	defer s.editMu.Unlock()
-	s.pluginsMu.RLock()
-	defer s.pluginsMu.RUnlock()
+	defer func() {
+		if unlock != nil {
+			unlock()
+		}
+	}()
 	d, err := s.GetDraft(ctx, draftID)
 	if err != nil {
 		return err
@@ -821,6 +821,32 @@ func (s *Service) enqueue(ctx context.Context, draftID, rev int64, checked []str
 	raw, messageID, err := mail.Build(o, date)
 	if err != nil {
 		return err
+	}
+	if acc.SMIMESign || acc.SMIMEEncrypt {
+		// 不在持有草稿、插件和运行记录锁时下载名片或等待用户输入 PIN。
+		if uiSessionFromContext(ctx) == nil || rs != nil && rs.ruleID != 0 {
+			return errors.New("请在 Godwit 中手动发送启用了 S/MIME 的邮件")
+		}
+		unlock()
+		unlock = nil
+		raw, err = s.protectOutgoing(ctx, acc, d, rcpts, raw)
+		if err != nil {
+			return err
+		}
+		unlock, err = s.lockForEnqueue(ctx, draftID)
+		if err != nil {
+			return err
+		}
+		if err = s.checkRevision(ctx, draftID, d.Revision); err != nil {
+			return err
+		}
+		current, err := s.account(ctx, d.AccountID)
+		if err != nil {
+			return err
+		}
+		if current.SMIMESign != acc.SMIMESign || current.SMIMEEncrypt != acc.SMIMEEncrypt || !slices.Equal(checkerIDs(s.sendCheckersLocked()), checked) {
+			return ErrStaleDraft
+		}
 	}
 	if int64(len(raw)) > attachLimit { // encoding, headers and the text part count too
 		return ErrTooLarge

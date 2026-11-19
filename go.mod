@@ -9,6 +9,7 @@ require (
 	github.com/clipperhouse/uax29/v2 v2.7.0
 	github.com/ebitengine/purego v0.11.3
 	github.com/egoist/mygo v0.9.1
+	github.com/emmansun/gmsm v0.45.3
 	github.com/emersion/go-imap/v2 v2.0.0-beta.8
 	github.com/emersion/go-message v0.18.2
 	github.com/emersion/go-msgauth v0.7.0
@@ -68,6 +69,6 @@ ignore ./web/node_modules
 
 tool github.com/egoist/mygo/cmd/mygo
 
-replace github.com/emersion/go-imap/v2 => github.com/godwit-email/go-imap/v2 v2.0.0-beta.8.godwit.8
+replace github.com/emersion/go-imap/v2 => ../go-imap
 
 replace git.sr.ht/~rockorager/go-jmap => github.com/godwit-email/go-jmap v0.5.4-godwit.3

@@ -36,10 +36,12 @@ type Config struct {
 // keeps until Close. It is not safe for concurrent use, and Watch holds the
 // connection while it runs.
 type Receiver struct {
-	cfg   Config
-	c     *imapclient.Client
-	abort func() // cuts the connection without waiting for a literal
-	caps  imap.CapSet
+	cfg         Config
+	c           *imapclient.Client
+	abort       func() // cuts the connection without waiting for a literal
+	caps        imap.CapSet
+	selFolder   string
+	selValidity uint32
 	// updates is Watch's while it runs: the server reported a change.
 	updates atomic.Pointer[chan struct{}]
 }
@@ -91,10 +93,24 @@ func (r *Receiver) trace(err *error) { conn.LogTrace(r.c, *err) }
 
 // Close closes the connection; a second Close is harmless.
 func (r *Receiver) Close() error {
+	r.selFolder, r.selValidity = "", 0
 	if r.c == nil {
 		return nil
 	}
 	return r.c.Close()
+}
+
+func (r *Receiver) selectReadOnly(c *imapclient.Client, folder string) (validity uint32, reused bool, err error) {
+	if mbox := c.Mailbox(); mbox != nil && mbox.ReadOnly && mbox.Name == folder && r.selFolder == folder && r.selValidity != 0 {
+		return r.selValidity, true, nil
+	}
+	sel, err := c.Select(folder, &imap.SelectOptions{ReadOnly: true}).Wait()
+	if err != nil {
+		r.selFolder, r.selValidity = "", 0
+		return 0, false, err
+	}
+	r.selFolder, r.selValidity = folder, sel.UIDValidity
+	return sel.UIDValidity, false, nil
 }
 
 // Fetch streams the content req names. Closing the stream before its end cuts
@@ -107,13 +123,6 @@ func (r *Receiver) Fetch(ctx context.Context, req backend.ContentRequest) (_ io.
 		return nil, err
 	}
 	validity, uid := Decode(string(req.Ref))
-	sel, err := c.Select(string(req.Folder), &imap.SelectOptions{ReadOnly: true}).Wait()
-	if err != nil {
-		return nil, err
-	}
-	if sel.UIDValidity != validity { // recreated since the sync
-		return nil, backend.ErrFolderReset
-	}
 	sec := &imap.FetchItemBodySection{Peek: true}
 	switch {
 	case req.HeaderFields != nil:
@@ -121,20 +130,38 @@ func (r *Receiver) Fetch(ctx context.Context, req backend.ContentRequest) (_ io.
 	case req.Part != "":
 		sec.Part = partPath(req.Part)
 	}
-	cmd := c.Fetch(imap.UIDSetNum(imap.UID(uid)), &imap.FetchOptions{UID: true, BodySection: []*imap.FetchItemBodySection{sec}})
-	for m := cmd.Next(); m != nil; m = cmd.Next() {
-		for item := m.Next(); item != nil; item = m.Next() {
-			if bs, ok := item.(imapclient.FetchItemDataBodySection); ok {
-				if bs.Literal == nil { // IMAP allows NIL
-					cmd.Close()
-					return nil, errors.New("imap: the part is not available on the server")
+	for range 2 {
+		selValidity, reused, err := r.selectReadOnly(c, string(req.Folder))
+		if err != nil {
+			return nil, err
+		}
+		if selValidity != validity { // recreated since the sync
+			if reused {
+				r.selFolder, r.selValidity = "", 0
+				continue
+			}
+			return nil, backend.ErrFolderReset
+		}
+		cmd := c.Fetch(imap.UIDSetNum(imap.UID(uid)), &imap.FetchOptions{UID: true, BodySection: []*imap.FetchItemBodySection{sec}})
+		for m := cmd.Next(); m != nil; m = cmd.Next() {
+			for item := m.Next(); item != nil; item = m.Next() {
+				if bs, ok := item.(imapclient.FetchItemDataBodySection); ok {
+					if bs.Literal == nil { // IMAP allows NIL
+						cmd.Close()
+						return nil, errors.New("imap: the part is not available on the server")
+					}
+					return &literal{Reader: bs.Literal, cmd: cmd, abort: r.abort}, nil
 				}
-				return &literal{Reader: bs.Literal, cmd: cmd, abort: r.abort}, nil
 			}
 		}
-	}
-	if err := cmd.Close(); err != nil {
-		return nil, err
+		if err := cmd.Close(); err != nil {
+			r.selFolder, r.selValidity = "", 0
+			return nil, err
+		}
+		if !reused {
+			return nil, backend.ErrNotFound
+		}
+		r.selFolder, r.selValidity = "", 0
 	}
 	return nil, backend.ErrNotFound
 }
@@ -148,7 +175,7 @@ func (r *Receiver) Headers(ctx context.Context, folder backend.FolderRef, refs [
 	if err != nil {
 		return nil, err
 	}
-	sel, err := c.Select(string(folder), &imap.SelectOptions{ReadOnly: true}).Wait()
+	selValidity, _, err := r.selectReadOnly(c, string(folder))
 	if err != nil {
 		var refused *imap.Error
 		if errors.As(err, &refused) {
@@ -158,7 +185,7 @@ func (r *Receiver) Headers(ctx context.Context, folder backend.FolderRef, refs [
 	}
 	var uids imap.UIDSet
 	for _, ref := range refs {
-		if v, uid := Decode(string(ref)); v == sel.UIDValidity && uid != 0 {
+		if v, uid := Decode(string(ref)); v == selValidity && uid != 0 {
 			uids.AddNum(imap.UID(uid))
 		}
 	}
@@ -169,10 +196,11 @@ func (r *Receiver) Headers(ctx context.Context, folder backend.FolderRef, refs [
 	sec := &imap.FetchItemBodySection{Specifier: imap.PartSpecifierHeader, HeaderFields: fields, Peek: true}
 	msgs, err := c.Fetch(uids, &imap.FetchOptions{UID: true, BodySection: []*imap.FetchItemBodySection{sec}}).Collect()
 	if err != nil {
+		r.selFolder, r.selValidity = "", 0
 		return nil, err
 	}
 	for _, m := range msgs {
-		out[backend.MessageRef(Encode(sel.UIDValidity, uint32(m.UID)))] = m.FindBodySection(sec)
+		out[backend.MessageRef(Encode(selValidity, uint32(m.UID)))] = m.FindBodySection(sec)
 	}
 	return out, nil
 }

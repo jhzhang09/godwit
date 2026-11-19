@@ -19,6 +19,7 @@ import (
 	"github.com/godwit-email/godwit/core/events"
 	"github.com/godwit-email/godwit/core/mail"
 	"github.com/godwit-email/godwit/core/store"
+	"github.com/godwit-email/godwit/internal/smime"
 )
 
 const (
@@ -234,6 +235,14 @@ func (f *attachmentFetcher) get(id int64) (string, AttachmentInfo, error) {
 		}
 		p, err := s.archivePart(a)
 		return p, a.info, err
+	}
+	if smime.IsCMSPart(a.info.ContentType, a.info.Filename) {
+		if p, ok, err := s.cachedSMIME(f.ctx, a); ok || err != nil {
+			return p, a.info, err
+		}
+		if p, ok, err := s.fetchSMIMEDirect(f.ctx, a); ok || err != nil {
+			return p, a.info, err
+		}
 	}
 	if p, ok, err := s.cached(f.ctx, a); ok || err != nil {
 		return p, a.info, err

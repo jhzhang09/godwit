@@ -482,6 +482,10 @@ func (p *platform) TranslateBody(message int64, texts map[string]string) {
 	p.reader.Translate(message, texts)
 }
 
+func (p *platform) ShowSecureBody(id int64, html, text string, truncated bool) {
+	p.reader.ShowSecureBody(id, html, text, truncated)
+}
+
 func (p *platform) Print(message int64) {
 	for page, v := range p.bodies {
 		if id, ok := p.reader.Bound(page); ok && id == message {

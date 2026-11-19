@@ -92,6 +92,7 @@ func (s *Service) ListThreads(ctx context.Context, v View, cursor string, limit 
 	if err := s.fillThreads(ctx, page.Items, ""); err != nil {
 		return ThreadPage{}, err
 	}
+	s.prioritizeSMIMEThreads(page.Items)
 	return page, nil
 }
 
@@ -226,5 +227,6 @@ func (s *Service) GetThread(ctx context.Context, id int64) (Thread, error) {
 		}
 		t.Drafts = append(t.Drafts, s.approvalView(ctx, d))
 	}
+	s.prioritizeSMIMEThread(id)
 	return t, nil
 }

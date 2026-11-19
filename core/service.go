@@ -239,6 +239,7 @@ type Service struct {
 	securityTotal     int
 	securityWake      chan struct{} // wakes the security scanner
 	reclaimWake       chan struct{} // wakes the free-space reclaimer (reclaimSoon)
+	smime             *smimeState
 	labelJudge        func(context.Context) (ai.Judge, error)
 	securityJudge     func(context.Context) (ai.Judge, error)
 	securityRaw       func(context.Context, int64) ([]byte, error)
@@ -432,6 +433,7 @@ func New(ctx context.Context, opts Options) (*Service, error) {
 		s.startSecurityScanner()
 	}
 	s.startImagePrefetch()
+	s.initSMIME()
 	if opts.Registry != nil {
 		s.startRegistryRefresh()
 	}
@@ -466,6 +468,7 @@ func (s *Service) Close() error {
 		s.callsClosed = true
 		s.callsMu.Unlock()
 		s.stopCalls(func(int64) bool { return true })
+		s.closeSMIME()
 		s.stopPlugins()
 		s.stopMCP()    // after stopCalls: nothing connects any more
 		s.endStreams() // every run, resumes included, has published its end

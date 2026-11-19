@@ -19,6 +19,7 @@ import (
 	"github.com/godwit-email/godwit/internal/i18n"
 	"github.com/godwit-email/godwit/internal/kit"
 	"github.com/godwit-email/godwit/internal/mcpclients"
+	"github.com/godwit-email/godwit/internal/smime"
 )
 
 // Platform is what the App needs from the operating system. OpenFiles,
@@ -71,6 +72,7 @@ type Platform interface {
 	BodyGlass(view ui.NativeWebView, top, bottom int)
 	// TranslateBody replaces only the body's text nodes; nil shows the original.
 	TranslateBody(message int64, texts map[string]string)
+	ShowSecureBody(message int64, html, text string, truncated bool)
 	// Print prints the message's body page. UI thread only.
 	Print(message int64)
 	// NewSignatureView makes the signature page (a signature's rich-text
@@ -129,6 +131,8 @@ func (o serviceOAuth) Cancel(flowID string) { o.svc.CancelOAuth(flowID) }
 // Deps are the App's collaborators. Post runs a function on the UI thread
 // (win.Update in production). Clock and OAuth default to the real ones.
 type Deps struct {
+	SmartCardReader bool
+
 	Svc      Service
 	Settings core.Settings
 	Platform Platform
@@ -191,6 +195,9 @@ type syncBatch struct {
 
 // App is the interface's state. Every field is read and written on the UI thread.
 type App struct {
+	cards         *smime.Session
+	cardsPrepared bool
+
 	svc   Service
 	plat  Platform
 	post  func(func())
@@ -341,6 +348,9 @@ func New(d Deps) *App {
 	a.syncing, a.syncAsked, a.syncErr, a.syncedAtBy = map[int64]bool{}, map[int64]bool{}, map[int64]syncFail{}, map[int64]time.Time{}
 	a.undoToasts = map[int64]bool{}
 	a.ctx, a.cancel = context.WithCancel(context.Background())
+	if d.SmartCardReader {
+		a.cards = smime.NewSession(a.ctx)
+	}
 	a.quit = d.Quit
 	a.pumpDone = make(chan struct{})
 	return a
@@ -467,6 +477,19 @@ func (a *App) load() {
 			}
 		}
 		a.accounts, a.accountsGen, a.unread, a.loaded = accs, a.loads.Gen(), unread, true
+		if a.cards != nil && !a.cardsPrepared && len(accs) > 0 {
+			var emails []string
+			for _, acc := range accs {
+				if acc.Kind != core.KindLocalArchive {
+					emails = append(emails, acc.Email)
+				}
+			}
+			if len(emails) > 0 {
+				a.cardsPrepared = true
+				// 启动预授权失败时，具体原因在用户打开受保护邮件时显示。
+				go func() { _ = a.cards.Prepare(emails) }()
+			}
+		}
 		if b := a.syncBatch; b != nil { // a removed account no longer holds up or fails the batch
 			for id := range b.pending {
 				if !slices.ContainsFunc(accs, func(acc core.Account) bool { return acc.ID == id }) {

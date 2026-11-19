@@ -42,6 +42,8 @@ type reader struct {
 
 // readerPane is what the reading pane keeps whichever thread it shows.
 type readerPane struct {
+	openedSecure []cachedSecure
+
 	p *mailPage
 
 	read latest // the thread's read: the one shown again, or the one to switch to
@@ -67,6 +69,7 @@ type readerPane struct {
 	getThread  func(ctx context.Context, id int64) (core.Thread, error)                       // tests wrap it
 	getMessage func(ctx context.Context, id int64, remote bool) (core.Message, error)         // tests wrap it
 	getAvatar  func(context.Context, int64, bool) (core.Avatar, error)                        // tests wrap it
+	openCMS    func(ctx context.Context, fromHeader string, der []byte) (entity []byte, encrypted bool, signer string, err error) // tests wrap it
 	runSkill   func(ctx context.Context, name string, t core.Target) (<-chan ai.Event, error) // tests wrap it
 	cardsFn    func(ctx context.Context, messageID int64) ([]core.Card, error)                // tests wrap it
 	tagsFn     func(ctx context.Context, messageID int64) ([]core.Tag, error)
@@ -147,11 +150,15 @@ func (r *reader) has(s *session) bool { return r.session == s && !s.closed }
 // attachments; its body shows in a page of its own (Platform.NewBodyView)
 // while the message is expanded.
 type msgBody struct {
-	msg   core.Message
-	cut   bool   // the page's body is only the start (ReaderBody.Cut, told by BodyBuilt)
-	read  latest // reading it; a read again (a same-message folder move) drops the one before
-	ready bool
-	err   error // the last read, or making the page, failed; a retry reads again
+	msg         core.Message
+	cut         bool   // the page's body is only the start (ReaderBody.Cut, told by BodyBuilt)
+	read        latest // reading it; a read again (a same-message folder move) drops the one before
+	ready       bool
+	err         error // the last read, or making the page, failed; a retry reads again
+	smimeRead    latest
+	smimeResult  *secureMessage
+	smimePending *secureBody
+	smimeErr     error
 
 	view        ui.NativeWebView // the body's page; nil while folded, not read yet, or when it could not be made
 	close       func()           // closes view: unbinds and destroys it
@@ -498,20 +505,26 @@ func (r *reader) openView(id int64) {
 	if pb := r.prev; pb != nil && pb.bodies[id] != nil && pb.bodies[id].view != nil {
 		r.dropPrev() // a message has one page: a second would share, and outlive, the first's grants
 	}
+	r.prepareSMIMEView(id, b)
 	s, made := r.session, time.Now()
 	v, closeView, err := r.p.a.plat.NewBodyView(id)
 	if !r.has(s) || r.bodies[id] != b || !r.open[id] || b.view != nil || r.p.a.ctx.Err() != nil {
+		b.smimeRead.Stop()
+		b.smimePending = nil
 		if err == nil {
 			closeView()
 		}
 		return
 	}
 	if err != nil {
+		b.smimeRead.Stop()
+		b.smimePending = nil
 		b.err = err
 		return
 	}
 	b.view, b.close = v, closeView
 	b.timing.viewMade(made)
+	r.flushSMIMEView(id, b)
 	if b.allow {
 		r.p.a.plat.AllowImages(id)
 	}
@@ -528,6 +541,10 @@ func (b *msgBody) drop() {
 
 // it (the user's 加载图片 stays).
 func (b *msgBody) closeView() {
+	b.smimeRead.Stop()
+	b.smimeResult = nil
+	b.smimePending = nil
+	b.smimeErr = nil
 	if b.close != nil {
 		b.close()
 	}
@@ -1803,6 +1820,7 @@ func (r *reader) message(c *ui.Context, m core.MessageSummary) {
 				return
 			}
 			bodyReady = true
+			r.smimeNotice(c, m.ID, b)
 			bodyBlocked := b.msg.RemoteImagesBlocked > 0 && !b.remote && !b.trusted
 			if b.allowErr != nil && (bodyBlocked || addr != "" && b.avatarBlocked && !b.avatarAllow) {
 				kit.Alert(c, kit.Danger, humanize(b.allowErr), func() {
@@ -1836,7 +1854,11 @@ func (r *reader) message(c *ui.Context, m core.MessageSummary) {
 						OnClick(func() { r.viewInBrowser(m.ID) })
 				})
 			}
-			r.attachments(c, b)
+			if b.smimeResult == nil {
+				r.attachments(c, b)
+			} else {
+				r.secureAttachments(c, b.smimeResult)
+			}
 		})
 	})
 }

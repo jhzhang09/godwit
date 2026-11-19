@@ -30,11 +30,12 @@ type CardPhoto struct {
 
 // ParsedCard holds the subset of vCard 3.0 / 4.0 fields Godwit caches (ADR 0040).
 type ParsedCard struct {
-	FN     string
-	Org    string
-	Title  string
-	Emails []CardEmail
-	Photos []CardPhoto
+	FN           string
+	Org          string
+	Title        string
+	Emails       []CardEmail
+	Photos       []CardPhoto
+	Certificates [][]byte
 }
 
 type rawEmail struct {
@@ -118,6 +119,22 @@ func ParseVCard(raw string) ParsedCard {
 			}
 			if !merged {
 				emails = append(emails, rawEmail{addrKey: key, address: addr, rank: rank})
+			}
+		case "KEY":
+			// 只读取内嵌的公钥证书，不访问名片内的 URL。
+			encoded := strings.TrimSpace(val)
+			if strings.HasPrefix(strings.ToLower(encoded), "data:") {
+				head, data, ok := strings.Cut(encoded, ",")
+				if !ok || !strings.HasSuffix(strings.ToLower(head), ";base64") {
+					continue
+				}
+				encoded = data
+			}
+			if len(encoded) > 0 && len(encoded) <= 128<<10 {
+				der, err := base64.StdEncoding.DecodeString(strings.Join(strings.Fields(encoded), ""))
+				if err == nil {
+					out.Certificates = append(out.Certificates, der)
+				}
 			}
 		case "PHOTO":
 			if p, ok := parsePhotoValue(val, params); ok {

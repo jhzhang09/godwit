@@ -21,6 +21,7 @@ import (
 	"github.com/godwit-email/godwit/app"
 	"github.com/godwit-email/godwit/core"
 	"github.com/godwit-email/godwit/internal/i18n"
+	"github.com/godwit-email/godwit/internal/smime"
 	"github.com/godwit-email/godwit/internal/theme"
 	"github.com/godwit-email/godwit/ownerlock"
 	"github.com/godwit-email/godwit/uiclient"
@@ -329,7 +330,7 @@ func gui(ctx context.Context, dataDir, open string) int {
 				sig:     sig,
 			}
 			var win *mygo.Window
-			a = app.New(app.Deps{Svc: client, Platform: plat, Settings: st, Post: func(f func()) { win.Update(f) },
+			a = app.New(app.Deps{SmartCardReader: smime.Supported(), Svc: client, Platform: plat, Settings: st, Post: func(f func()) { win.Update(f) },
 				SystemLanguage: lang, SetLanguage: setLanguage, Quit: mygo.App.Quit, ExternalAlways: !client.RPC().Hello().UIStarted,
 				Vibrancy: opts.Vibrancy != mygo.VibrancyNone, Dev: mygo.IsDev()})
 			var composeMu sync.Mutex

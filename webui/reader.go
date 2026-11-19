@@ -130,7 +130,8 @@ type Reader struct {
 
 // bodyOf is a bound message's state.
 type bodyOf struct {
-	pages      int // bound to it
+	secure     *core.Message // 解封后的正文仅与已绑定的阅读页同寿命。
+	pages      int           // bound to it
 	allowed    bool
 	generation int64
 	body       *ReaderBody       // the current displayed body, once built
@@ -254,6 +255,14 @@ func (r *Reader) Allow(message int64) {
 			svc.ForgetImageFailure(urls)
 		}
 	})
+}
+
+// ShowSecureBody 接收阅读器在前台解封并清洗的正文，最后一个页面关闭时释放。
+func (r *Reader) ShowSecureBody(id int64, html, text string, truncated bool) {
+	r.reload(id, func(st *bodyOf) {
+		st.secure = &core.Message{HTML: html, Text: text, Truncated: truncated}
+		st.translations = nil
+	}, nil)
 }
 
 // Translate displays translated text in the original body; nil restores the original.
@@ -390,9 +399,21 @@ func (r *Reader) reload(message int64, change func(*bodyOf), prep func(Service))
 
 // build keeps the body only while its build generation v is current.
 func (r *Reader) build(ctx context.Context, svc Service, message, v int64, allowed bool) (ReaderBody, error) {
-	m, err := r.getMessage(ctx, svc, message, allowed)
-	if err != nil {
-		return ReaderBody{}, err
+	var m core.Message
+	r.mu.Lock()
+	state := r.msgs[message]
+	secure := state != nil && state.secure != nil
+	if secure {
+		m = *state.secure
+		allowed = false
+	}
+	r.mu.Unlock()
+	if !secure {
+		var err error
+		m, err = r.getMessage(ctx, svc, message, allowed)
+		if err != nil {
+			return ReaderBody{}, err
+		}
 	}
 	st, err := svc.GetSettings(ctx)
 	if err != nil {
@@ -496,9 +517,9 @@ func (p *ReaderPage) Load(ctx context.Context) (ReaderBody, error) {
 		p.r.mu.Unlock()
 		return b, nil
 	}
-	v, allowed := st.generation, st.allowed
+	v, allowed, secure := st.generation, st.allowed, st.secure != nil
 	p.r.mu.Unlock()
-	if !allowed { // the setting may let them load at once (core decides)
+	if !allowed && !secure { // the setting may let them load at once (core decides)
 		ok, err := svc.ImagesAllowed(ctx, message)
 		if err != nil {
 			return ReaderBody{}, err

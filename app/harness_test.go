@@ -543,6 +543,10 @@ func (p *fakePlatform) TranslateBody(message int64, texts map[string]string) {
 	}
 }
 
+func (p *fakePlatform) ShowSecureBody(id int64, html, text string, truncated bool) {
+	p.record("ShowSecureBody", fmt.Sprint(id))
+}
+
 func (p *fakePlatform) Print(message int64) {
 	p.record("Print", fmt.Sprint(message))
 }

@@ -1280,3 +1280,20 @@ func TestReaderBodyCarriesCollapseQuotes(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, b.CollapseQuotes)
 }
+
+func TestSecureBodyOnlyLivesInBoundReader(t *testing.T) {
+	f := newReaderFixture(t)
+	m := f.deliverOne(t, coretest.Msg("bob@example.com", f.acc.Email, "Protected", "outer body"))
+	k := f.page(m.ID)
+	_, err := f.p.Load(pageCtx(k))
+	require.NoError(t, err)
+	f.r.ShowSecureBody(m.ID, "<p>decrypted</p>", "", false)
+	opened := f.waitEmitted(t, k)
+	assert.Contains(t, opened.HTML, "decrypted")
+	assert.False(t, opened.Remote)
+	f.r.Unbind(k)
+	again, err := f.p.Load(pageCtx(f.page(m.ID)))
+	require.NoError(t, err)
+	assert.NotContains(t, again.HTML, "decrypted")
+	assert.Contains(t, again.Plain, "outer body")
+}
