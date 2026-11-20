@@ -83,6 +83,7 @@ type darwinAPI struct {
 	kCFTypeArrayCB               uintptr
 	kSecClass                    uintptr
 	kSecClassIdentity            uintptr
+	kSecClassCertificate         uintptr
 	kSecReturnRef                uintptr
 	kSecMatchLimit               uintptr
 	kSecMatchLimitAll            uintptr
@@ -193,6 +194,7 @@ var loadDarwinAPI = sync.OnceValues(func() (*darwinAPI, error) {
 	for dst, name := range map[*uintptr]string{
 		&d.kSecClass:                    "kSecClass",
 		&d.kSecClassIdentity:            "kSecClassIdentity",
+		&d.kSecClassCertificate:         "kSecClassCertificate",
 		&d.kSecReturnRef:                "kSecReturnRef",
 		&d.kSecMatchLimit:               "kSecMatchLimit",
 		&d.kSecMatchLimitAll:            "kSecMatchLimitAll",
@@ -216,7 +218,7 @@ var loadDarwinAPI = sync.OnceValues(func() (*darwinAPI, error) {
 	d.clsLAContext = objc.GetClass("LAContext")
 	d.clsTokenWatcher = objc.GetClass("TKTokenWatcher")
 	if d.clsPool == 0 || d.clsLAContext == 0 || d.clsTokenWatcher == 0 {
-		return nil, errors.New("缺少 macOS LocalAuthentication / CryptoTokenKit 运行时类")
+		return nil, errors.New("missing macOS LocalAuthentication / CryptoTokenKit runtime classes")
 	}
 	d.selNew = objc.RegisterName("new")
 	d.selDrain = objc.RegisterName("drain")
@@ -230,6 +232,7 @@ func platformSupported() bool { return true }
 type darwinIdentity struct {
 	der        []byte
 	key        uintptr // SecKeyRef, retained
+	hardware   bool
 	canDecrypt bool
 }
 
@@ -427,74 +430,89 @@ func (p *darwinProvider) ensureKeys(d *darwinAPI) ([]darwinIdentity, error) {
 		}
 	})
 	if p.laCtx == 0 {
-		return nil, errors.New("无法创建系统认证上下文")
+		return nil, errors.New("unable to create system authentication context")
 	}
-	query := d.cfDict(
-		[]uintptr{d.kSecClass, d.kSecReturnRef, d.kSecMatchLimit, d.kSecUseDataProtectionKC, d.kSecUseAuthenticationContext},
-		[]uintptr{d.kSecClassIdentity, d.kCFBooleanTrue, d.kSecMatchLimitAll, d.kCFBooleanTrue, uintptr(p.laCtx)},
-	)
-	if query == 0 {
-		return nil, errors.New("无法构造钥匙串查询")
+	seen := map[string]int{}
+	var items []darwinIdentity
+	releaseAll := func() {
+		for _, it := range items {
+			d.release(it.key)
+		}
 	}
-	defer d.release(query)
-
-	var result uintptr
-	status := d.secItemCopyMatching(query, &result)
-	if status == errSecItemNotFound {
-		return nil, nil
-	}
-	if status != errSecSuccess {
-		return nil, d.secErr(status)
-	}
-	if result == 0 {
-		return nil, nil
-	}
-	defer d.release(result)
-
-	n := d.cfArrayGetCount(result)
-	items := make([]darwinIdentity, 0, n)
-	for i := range n {
-		ident := d.cfArrayGetValueAtIndex(result, i)
-		if ident == 0 {
+	for _, useDP := range []bool{true, false} {
+		keys := []uintptr{d.kSecClass, d.kSecReturnRef, d.kSecMatchLimit, d.kSecUseAuthenticationContext}
+		vals := []uintptr{d.kSecClassIdentity, d.kCFBooleanTrue, d.kSecMatchLimitAll, uintptr(p.laCtx)}
+		if useDP {
+			keys = append(keys, d.kSecUseDataProtectionKC)
+			vals = append(vals, d.kCFBooleanTrue)
+		}
+		query := d.cfDict(keys, vals)
+		if query == 0 {
+			releaseAll()
+			return nil, errors.New("unable to build keychain query")
+		}
+		var result uintptr
+		status := d.secItemCopyMatching(query, &result)
+		d.release(query)
+		if status == errSecItemNotFound || result == 0 {
 			continue
 		}
-		var cert, privKey uintptr
-		if st := d.secIdentityCopyCertificate(ident, &cert); st != errSecSuccess {
-			d.release(cert)
-			for _, it := range items {
-				d.release(it.key)
+		if status != errSecSuccess {
+			releaseAll()
+			return nil, d.secErr(status)
+		}
+		n := d.cfArrayGetCount(result)
+		for i := range n {
+			ident := d.cfArrayGetValueAtIndex(result, i)
+			if ident == 0 {
+				continue
 			}
-			return nil, d.secErr(st)
-		}
-		if st := d.secIdentityCopyPrivateKey(ident, &privKey); st != errSecSuccess {
-			d.release(cert)
-			d.release(privKey)
-			for _, it := range items {
-				d.release(it.key)
+			var cert, privKey uintptr
+			if st := d.secIdentityCopyCertificate(ident, &cert); st != errSecSuccess {
+				d.release(cert)
+				continue
 			}
-			return nil, d.secErr(st)
-		}
-		attrs := d.secKeyCopyAttributes(privKey)
-		hasToken := attrs != 0 && d.cfDictionaryGetValue(attrs, d.kSecAttrTokenID) != 0
-		d.release(attrs)
-		if !hasToken {
+			if st := d.secIdentityCopyPrivateKey(ident, &privKey); st != errSecSuccess {
+				d.release(cert)
+				d.release(privKey)
+				continue
+			}
+			attrs := d.secKeyCopyAttributes(privKey)
+			hasToken := attrs != 0 && d.cfDictionaryGetValue(attrs, d.kSecAttrTokenID) != 0
+			d.release(attrs)
+			certData := d.secCertificateCopyData(cert)
+			der := d.goBytes(certData)
+			d.release(certData)
 			d.release(cert)
-			d.release(privKey)
-			continue
+			if len(der) == 0 {
+				d.release(privKey)
+				continue
+			}
+			sum := CertSHA256(der)
+			if idx, dup := seen[sum]; dup {
+				// Prefer the hardware-token identity handle if present in both queries.
+				if hasToken && !items[idx].hardware {
+					d.release(items[idx].key)
+					items[idx] = darwinIdentity{
+						der:        der,
+						key:        privKey,
+						hardware:   true,
+						canDecrypt: d.secKeyIsAlgorithmSupported(privKey, kSecKeyOperationTypeDecrypt, d.kSecKeyAlgDecryptPKCS1),
+					}
+				} else {
+					d.release(privKey)
+				}
+				continue
+			}
+			seen[sum] = len(items)
+			items = append(items, darwinIdentity{
+				der:        der,
+				key:        privKey,
+				hardware:   hasToken,
+				canDecrypt: d.secKeyIsAlgorithmSupported(privKey, kSecKeyOperationTypeDecrypt, d.kSecKeyAlgDecryptPKCS1),
+			})
 		}
-		certData := d.secCertificateCopyData(cert)
-		der := d.goBytes(certData)
-		d.release(certData)
-		d.release(cert)
-		if len(der) == 0 {
-			d.release(privKey)
-			continue
-		}
-		items = append(items, darwinIdentity{
-			der:        der,
-			key:        privKey,
-			canDecrypt: d.secKeyIsAlgorithmSupported(privKey, kSecKeyOperationTypeDecrypt, d.kSecKeyAlgDecryptPKCS1),
-		})
+		d.release(result)
 	}
 	p.items = items
 	return p.items, nil
@@ -510,10 +528,10 @@ func (p *darwinProvider) findKey(d *darwinAPI, certDER []byte) (darwinIdentity, 
 			return it, nil
 		}
 	}
-	return darwinIdentity{}, errors.New("请插入与邮件证书匹配的硬件 Key")
+	return darwinIdentity{}, errors.New("matching personal S/MIME certificate or security key not found")
 }
 
-func (p *darwinProvider) Identities(context.Context) ([][]byte, error) {
+func (p *darwinProvider) Identities(context.Context) ([]RawIdentity, error) {
 	d, err := loadDarwinAPI()
 	if err != nil {
 		return nil, err
@@ -522,9 +540,60 @@ func (p *darwinProvider) Identities(context.Context) ([][]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := make([][]byte, len(items))
+	out := make([]RawIdentity, len(items))
 	for i, it := range items {
-		out[i] = bytes.Clone(it.der)
+		out[i] = RawIdentity{DER: bytes.Clone(it.der), Hardware: it.hardware}
+	}
+	return out, nil
+}
+
+func (p *darwinProvider) FindCertificates(_ context.Context, email string) ([][]byte, error) {
+	d, err := loadDarwinAPI()
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	var out [][]byte
+	for _, useDP := range []bool{false, true} {
+		keys := []uintptr{d.kSecClass, d.kSecReturnRef, d.kSecMatchLimit}
+		vals := []uintptr{d.kSecClassCertificate, d.kCFBooleanTrue, d.kSecMatchLimitAll}
+		if useDP {
+			keys = append(keys, d.kSecUseDataProtectionKC)
+			vals = append(vals, d.kCFBooleanTrue)
+		}
+		query := d.cfDict(keys, vals)
+		if query == 0 {
+			continue
+		}
+		var result uintptr
+		status := d.secItemCopyMatching(query, &result)
+		d.release(query)
+		if status != errSecSuccess || result == 0 {
+			continue
+		}
+		n := d.cfArrayGetCount(result)
+		for i := range n {
+			ref := d.cfArrayGetValueAtIndex(result, i)
+			if ref == 0 {
+				continue
+			}
+			certData := d.secCertificateCopyData(ref)
+			der := d.goBytes(certData)
+			d.release(certData)
+			if len(der) == 0 {
+				continue
+			}
+			cert, err := ParseCertificate(der)
+			if err != nil || !MatchesMailbox(cert, email) {
+				continue
+			}
+			sum := CertSHA256(cert.Raw)
+			if !seen[sum] {
+				seen[sum] = true
+				out = append(out, der)
+			}
+		}
+		d.release(result)
 	}
 	return out, nil
 }
@@ -546,17 +615,17 @@ func (p *darwinProvider) Prepare(_ context.Context, certDER, sealed []byte) erro
 		return errors.New(reason)
 	}
 	if !id.canDecrypt {
-		return errors.New("硬件 Key 不支持 RSA PKCS#1 解密")
+		return errors.New("selected S/MIME private key does not support RSA PKCS#1 decryption")
 	}
 	cfIn := d.cfData(sealed)
 	if cfIn == 0 {
-		return errors.New("缺少硬件操作数据")
+		return errors.New("missing input data")
 	}
 	defer d.release(cfIn)
 	var cfErr uintptr
 	out := d.secKeyCreateDecryptedData(id.key, d.kSecKeyAlgDecryptPKCS1, cfIn, &cfErr)
 	if out == 0 {
-		code, e := d.cfErr(cfErr, "硬件操作失败")
+		code, e := d.cfErr(cfErr, "private key operation failed")
 		d.release(cfErr)
 		if p.session && isDarwinAuthFailure(code) {
 			p.failures[idKey] = e.Error()
@@ -590,7 +659,7 @@ func (p *darwinProvider) DigestAlgorithm(_ context.Context, certDER []byte) (cry
 	if d.secKeyIsAlgorithmSupported(id.key, kSecKeyOperationTypeSign, d.kSecKeyAlgSignSHA1) {
 		return crypto.SHA1, nil
 	}
-	return 0, errors.New("硬件 Key 没有可用的签名算法")
+	return 0, errors.New("selected S/MIME certificate has no usable signing algorithm")
 }
 
 func (p *darwinProvider) Sign(_ context.Context, certDER []byte, hash crypto.Hash, digest []byte) ([]byte, error) {
@@ -614,20 +683,20 @@ func (p *darwinProvider) Sign(_ context.Context, certDER []byte, hash crypto.Has
 	case crypto.SHA1:
 		alg, digestLen = d.kSecKeyAlgSignSHA1, 20
 	default:
-		return nil, errors.New("不支持的硬件签名摘要")
+		return nil, errors.New("unsupported signature digest algorithm")
 	}
 	if len(digest) != digestLen || !d.secKeyIsAlgorithmSupported(id.key, kSecKeyOperationTypeSign, alg) {
-		return nil, errors.New("硬件 Key 不支持所选签名算法")
+		return nil, errors.New("selected S/MIME certificate does not support this signing algorithm")
 	}
 	cfIn := d.cfData(digest)
 	if cfIn == 0 {
-		return nil, errors.New("缺少硬件操作数据")
+		return nil, errors.New("missing digest to sign")
 	}
 	defer d.release(cfIn)
 	var cfErr uintptr
 	out := d.secKeyCreateSignature(id.key, alg, cfIn, &cfErr)
 	if out == 0 {
-		code, e := d.cfErr(cfErr, "硬件操作失败")
+		code, e := d.cfErr(cfErr, "signing failed")
 		d.release(cfErr)
 		if p.session && isDarwinAuthFailure(code) {
 			p.failures[idKey] = e.Error()
@@ -657,17 +726,17 @@ func (p *darwinProvider) Decrypt(_ context.Context, certDER, ciphertext []byte) 
 		return nil, errors.New(reason)
 	}
 	if !id.canDecrypt {
-		return nil, errors.New("硬件 Key 不支持 RSA PKCS#1 解密")
+		return nil, errors.New("security key does not support RSA PKCS#1 decryption")
 	}
 	cfIn := d.cfData(ciphertext)
 	if cfIn == 0 {
-		return nil, errors.New("缺少硬件操作数据")
+		return nil, errors.New("missing ciphertext data")
 	}
 	defer d.release(cfIn)
 	var cfErr uintptr
 	out := d.secKeyCreateDecryptedData(id.key, d.kSecKeyAlgDecryptPKCS1, cfIn, &cfErr)
 	if out == 0 {
-		code, e := d.cfErr(cfErr, "硬件操作失败")
+		code, e := d.cfErr(cfErr, "decryption failed")
 		d.release(cfErr)
 		if p.session && isDarwinAuthFailure(code) {
 			p.failures[idKey] = e.Error()
@@ -689,7 +758,7 @@ func (p *darwinProvider) VerifyTrust(_ context.Context, usage, email string, cer
 		return err
 	}
 	if email == "" || len(certsDER) == 0 {
-		return errors.New("缺少 S/MIME 证书或邮箱地址")
+		return errors.New("missing S/MIME certificate or email address")
 	}
 	var usageKey uintptr
 	switch usage {
@@ -698,11 +767,11 @@ func (p *darwinProvider) VerifyTrust(_ context.Context, usage, email string, cer
 	case "encrypt":
 		usageKey = d.kSecPolicyKUKeyEncipherment
 	default:
-		return errors.New("未知的证书用途")
+		return errors.New("unknown certificate usage")
 	}
 	cfEmail := d.cfString(email)
 	if cfEmail == 0 {
-		return errors.New("无法创建邮箱字符串")
+		return errors.New("unable to create email string")
 	}
 	defer d.release(cfEmail)
 
@@ -717,25 +786,25 @@ func (p *darwinProvider) VerifyTrust(_ context.Context, usage, email string, cer
 		cert := d.secCertificateCreateWithData(0, data)
 		d.release(data)
 		if cert == 0 {
-			return errors.New("无效的 X.509 证书")
+			return errors.New("invalid X.509 certificate")
 		}
 		certs = append(certs, cert)
 	}
 	cfCerts := d.cfArrayCreate(0, unsafe.Pointer(&certs[0]), len(certs), d.kCFTypeArrayCB)
 	if cfCerts == 0 {
-		return errors.New("无法创建证书列表")
+		return errors.New("unable to build certificate list")
 	}
 	defer d.release(cfCerts)
 
 	props := d.cfDict([]uintptr{d.kSecPolicyName, usageKey}, []uintptr{cfEmail, d.kCFBooleanTrue})
 	if props == 0 {
-		return errors.New("无法创建系统 S/MIME 证书策略")
+		return errors.New("unable to create S/MIME trust policy")
 	}
 	defer d.release(props)
 
 	policy := d.secPolicyCreateWithProperties(d.kSecPolicyAppleSMIME, props)
 	if policy == 0 {
-		return errors.New("无法创建系统 S/MIME 证书策略")
+		return errors.New("unable to create S/MIME trust policy")
 	}
 	defer d.release(policy)
 
@@ -745,7 +814,7 @@ func (p *darwinProvider) VerifyTrust(_ context.Context, usage, email string, cer
 		if st != errSecSuccess {
 			return d.secErr(st)
 		}
-		return errors.New("无法评估证书")
+		return errors.New("unable to evaluate certificate trust")
 	}
 	defer d.release(trust)
 
@@ -754,7 +823,7 @@ func (p *darwinProvider) VerifyTrust(_ context.Context, usage, email string, cer
 	}
 	var cfErr uintptr
 	if !d.secTrustEvaluateWithError(trust, &cfErr) {
-		_, e := d.cfErr(cfErr, "证书不受信任")
+		_, e := d.cfErr(cfErr, "certificate is not trusted")
 		d.release(cfErr)
 		return e
 	}
@@ -762,142 +831,169 @@ func (p *darwinProvider) VerifyTrust(_ context.Context, usage, email string, cer
 	return nil
 }
 
-func (p *darwinProvider) VerifyCMS(_ context.Context, email string, cmsDER, detached []byte) ([]byte, error) {
+func (p *darwinProvider) VerifyCMS(_ context.Context, email string, cmsDER, detached []byte) (cmsVerifyResult, error) {
 	d, err := loadDarwinAPI()
 	if err != nil {
-		return nil, err
+		return cmsVerifyResult{}, err
 	}
-	if len(cmsDER) == 0 || email == "" {
-		return nil, errors.New("缺少签名或发件人")
+	if len(cmsDER) == 0 {
+		return cmsVerifyResult{}, errors.New("missing signature data")
 	}
-	cfEmail := d.cfString(email)
-	if cfEmail == 0 {
-		return nil, errors.New("无法创建邮箱字符串")
-	}
-	defer d.release(cfEmail)
-
-	props := d.cfDict([]uintptr{d.kSecPolicyName, d.kSecPolicyKUDigitalSig}, []uintptr{cfEmail, d.kCFBooleanTrue})
-	if props == 0 {
-		return nil, errors.New("无法创建系统 S/MIME 证书策略")
-	}
-	defer d.release(props)
-
-	policy := d.secPolicyCreateWithProperties(d.kSecPolicyAppleSMIME, props)
-	if policy == 0 {
-		return nil, errors.New("无法创建系统 S/MIME 证书策略")
-	}
-	defer d.release(policy)
 
 	var decoder uintptr
 	if st := d.cmsDecoderCreate(&decoder); st != errSecSuccess || decoder == 0 {
 		d.release(decoder)
-		return nil, d.secErr(st)
+		return cmsVerifyResult{}, d.secErr(st)
 	}
 	defer d.release(decoder)
 
 	if st := d.cmsDecoderUpdateMessage(decoder, unsafe.Pointer(&cmsDER[0]), uintptr(len(cmsDER))); st != errSecSuccess {
-		return nil, d.secErr(st)
+		return cmsVerifyResult{}, d.secErr(st)
 	}
 	if st := d.cmsDecoderFinalizeMessage(decoder); st != errSecSuccess {
-		return nil, d.secErr(st)
+		return cmsVerifyResult{}, d.secErr(st)
 	}
+
 	var signers uintptr
+	signerErr := error(nil)
 	if st := d.cmsDecoderGetNumSigners(decoder, &signers); st != errSecSuccess {
-		return nil, d.secErr(st)
+		signerErr = d.secErr(st)
+	} else if signers != 1 {
+		signerErr = errors.New("unable to identify unique S/MIME signer")
 	}
-	if signers != 1 {
-		return nil, errors.New("无法确定唯一的 S/MIME 签名人")
-	}
-	var status uint32
+
 	if detached != nil {
-		if st := d.cmsDecoderCopySignerStatus(decoder, 0, policy, false, &status, nil, nil); st != errSecSuccess {
-			return nil, d.secErr(st)
-		}
-		if status != kCMSSignerNeedsDetachedContent {
-			return nil, errors.New("分离签名中含有另一份正文")
+		var preStatus uint32
+		if st := d.cmsDecoderCopySignerStatus(decoder, 0, 0, false, &preStatus, nil, nil); st == errSecSuccess && preStatus != kCMSSignerNeedsDetachedContent {
+			return cmsVerifyResult{}, errors.New("detached signature unexpectedly contains embedded content")
 		}
 		cfDetached := d.cfData(detached)
 		if cfDetached == 0 {
-			return nil, errors.New("无法读取分离签名正文")
+			return cmsVerifyResult{}, errors.New("unable to read detached signature content")
 		}
 		st := d.cmsDecoderSetDetachedContent(decoder, cfDetached)
 		d.release(cfDetached)
 		if st != errSecSuccess {
-			return nil, d.secErr(st)
+			return cmsVerifyResult{}, d.secErr(st)
 		}
 	}
-	var trust uintptr
-	if st := d.cmsDecoderCopySignerStatus(decoder, 0, policy, false, &status, &trust, nil); st != errSecSuccess {
-		d.release(trust)
-		return nil, d.secErr(st)
-	}
-	defer d.release(trust)
-	if status != kCMSSignerValid || trust == 0 {
-		return nil, errors.New("S/MIME 签名无效")
-	}
-	if st := d.secTrustSetNetworkFetchAllowed(trust, false); st != errSecSuccess {
-		return nil, d.secErr(st)
-	}
-	var cfErr uintptr
-	if !d.secTrustEvaluateWithError(trust, &cfErr) {
-		_, e := d.cfErr(cfErr, "证书不受信任")
-		d.release(cfErr)
-		return nil, e
-	}
-	d.release(cfErr)
 
-	var signer uintptr
-	if st := d.cmsDecoderCopySignerCert(decoder, 0, &signer); st != errSecSuccess {
-		d.release(signer)
-		return nil, d.secErr(st)
-	}
-	if signer == 0 {
-		return nil, errors.New("缺少签名证书")
-	}
-	defer d.release(signer)
-
-	var addrs uintptr
-	if st := d.secCertificateCopyEmailAddresses(signer, &addrs); st != errSecSuccess {
-		d.release(addrs)
-		return nil, d.secErr(st)
-	}
-	matched := false
-	if addrs != 0 {
-		n := d.cfArrayGetCount(addrs)
-		for i := range n {
-			if strings.EqualFold(d.goString(d.cfArrayGetValueAtIndex(addrs, i)), email) {
-				matched = true
-				break
-			}
-		}
-		d.release(addrs)
-	}
-	if !matched {
-		certData := d.secCertificateCopyData(signer)
-		der := d.goBytes(certData)
-		d.release(certData)
-		if len(der) > 0 {
-			if cert, err := ParseCertificate(der); err == nil && MatchesMailbox(cert, email) {
-				matched = true
-			}
-		}
-	}
-	if !matched {
-		return nil, errors.New("签名证书邮箱与发件人不匹配")
-	}
+	var contentBytes []byte
 	if detached != nil {
-		return detached, nil
-	}
-	var content uintptr
-	if st := d.cmsDecoderCopyContent(decoder, &content); st != errSecSuccess {
+		contentBytes = detached
+	} else {
+		var content uintptr
+		if st := d.cmsDecoderCopyContent(decoder, &content); st != errSecSuccess {
+			d.release(content)
+			return cmsVerifyResult{}, d.secErr(st)
+		}
+		if content == 0 {
+			return cmsVerifyResult{}, errors.New("signature contains no content")
+		}
+		contentBytes = d.goBytes(content)
 		d.release(content)
-		return nil, d.secErr(st)
 	}
-	defer d.release(content)
-	if content == 0 {
-		return nil, errors.New("签名中没有正文")
+
+	var signerDER []byte
+	if signers == 1 {
+		var signerRef uintptr
+		if st := d.cmsDecoderCopySignerCert(decoder, 0, &signerRef); st == errSecSuccess && signerRef != 0 {
+			certData := d.secCertificateCopyData(signerRef)
+			signerDER = d.goBytes(certData)
+			d.release(certData)
+			d.release(signerRef)
+		} else {
+			d.release(signerRef)
+		}
 	}
-	return d.goBytes(content), nil
+
+	verifyErr := signerErr
+	if verifyErr == nil && email == "" {
+		verifyErr = errors.New("signed message lacks a unique sender address")
+	}
+	if verifyErr == nil {
+		cfEmail := d.cfString(email)
+		if cfEmail == 0 {
+			return cmsVerifyResult{content: contentBytes, signerDER: signerDER, verifyErr: errors.New("unable to create email string")}, nil
+		}
+		defer d.release(cfEmail)
+
+		props := d.cfDict([]uintptr{d.kSecPolicyName, d.kSecPolicyKUDigitalSig}, []uintptr{cfEmail, d.kCFBooleanTrue})
+		if props == 0 {
+			return cmsVerifyResult{content: contentBytes, signerDER: signerDER, verifyErr: errors.New("unable to create S/MIME trust policy")}, nil
+		}
+		defer d.release(props)
+
+		policy := d.secPolicyCreateWithProperties(d.kSecPolicyAppleSMIME, props)
+		if policy == 0 {
+			return cmsVerifyResult{content: contentBytes, signerDER: signerDER, verifyErr: errors.New("unable to create S/MIME trust policy")}, nil
+		}
+		defer d.release(policy)
+
+		var status uint32
+		var trust uintptr
+		if st := d.cmsDecoderCopySignerStatus(decoder, 0, policy, false, &status, &trust, nil); st != errSecSuccess {
+			d.release(trust)
+			verifyErr = d.secErr(st)
+		} else {
+			defer d.release(trust)
+			if status != kCMSSignerValid || trust == 0 {
+				verifyErr = errors.New("invalid S/MIME signature")
+			} else if st := d.secTrustSetNetworkFetchAllowed(trust, false); st != errSecSuccess {
+				verifyErr = d.secErr(st)
+			} else {
+				var cfErr uintptr
+				if !d.secTrustEvaluateWithError(trust, &cfErr) {
+					_, e := d.cfErr(cfErr, "certificate is not trusted")
+					d.release(cfErr)
+					verifyErr = e
+				} else {
+					d.release(cfErr)
+					var signer uintptr
+					if st := d.cmsDecoderCopySignerCert(decoder, 0, &signer); st != errSecSuccess {
+						d.release(signer)
+						verifyErr = d.secErr(st)
+					} else if signer == 0 {
+						verifyErr = errors.New("missing signer certificate")
+					} else {
+						defer d.release(signer)
+						if len(signerDER) == 0 {
+							certData := d.secCertificateCopyData(signer)
+							signerDER = d.goBytes(certData)
+							d.release(certData)
+						}
+
+						var addrs uintptr
+						if st := d.secCertificateCopyEmailAddresses(signer, &addrs); st != errSecSuccess {
+							d.release(addrs)
+							verifyErr = d.secErr(st)
+						} else {
+							matched := false
+							if addrs != 0 {
+								n := d.cfArrayGetCount(addrs)
+								for i := range n {
+									if strings.EqualFold(d.goString(d.cfArrayGetValueAtIndex(addrs, i)), email) {
+										matched = true
+										break
+									}
+								}
+								d.release(addrs)
+							}
+							if !matched && len(signerDER) > 0 {
+								if cert, err := ParseCertificate(signerDER); err == nil && MatchesMailbox(cert, email) {
+									matched = true
+								}
+							}
+							if !matched {
+								verifyErr = errors.New("signer certificate email does not match sender")
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return cmsVerifyResult{content: contentBytes, signerDER: signerDER, verifyErr: verifyErr}, nil
 }
 
 func (p *darwinProvider) Retry(context.Context) error {

@@ -257,6 +257,10 @@ func (cl *Client) DraftFromQuickReply(ctx context.Context, messageID int64, r co
 	return call[core.Draft](cl, ctx, "DraftFromQuickReply", messageID, r)
 }
 
+func (cl *Client) DraftSMIMEStatus(ctx context.Context, draftID int64) (core.DraftSMIMEStatus, error) {
+	return call[core.DraftSMIMEStatus](cl, ctx, "DraftSMIMEStatus", draftID)
+}
+
 func (cl *Client) EditProposedRule(ctx context.Context, id int64) (core.Rule, error) {
 	return call[core.Rule](cl, ctx, "EditProposedRule", id)
 }
@@ -341,6 +345,10 @@ func (cl *Client) ImportAccountsFile(ctx context.Context, path string, digest st
 	return call[core.AccountImportResult](cl, ctx, "ImportAccountsFile", path, digest)
 }
 
+func (cl *Client) ImportContactCertificateFile(ctx context.Context, address string, path string) ([]core.SMIMECertificate, error) {
+	return call[[]core.SMIMECertificate](cl, ctx, "ImportContactCertificateFile", address, path)
+}
+
 func (cl *Client) ImportEML(ctx context.Context, accountID int64, folderID int64, paths []string) (core.ImportSummary, error) {
 	return call[core.ImportSummary](cl, ctx, "ImportEML", accountID, folderID, paths)
 }
@@ -381,6 +389,10 @@ func (cl *Client) ListApprovals(ctx context.Context, conversationID int64) ([]co
 	return call[[]core.Approval](cl, ctx, "ListApprovals", conversationID)
 }
 
+func (cl *Client) ListContactCertificates(ctx context.Context, addresses []string) ([]core.RecipientSMIMEStatus, error) {
+	return call[[]core.RecipientSMIMEStatus](cl, ctx, "ListContactCertificates", addresses)
+}
+
 func (cl *Client) ListConversations(ctx context.Context, kind string) ([]core.Conversation, error) {
 	return call[[]core.Conversation](cl, ctx, "ListConversations", kind)
 }
@@ -411,6 +423,10 @@ func (cl *Client) ListModelServices(ctx context.Context) ([]core.ModelService, e
 
 func (cl *Client) ListOutbox(ctx context.Context, accountID int64) ([]core.OutboxItem, error) {
 	return call[[]core.OutboxItem](cl, ctx, "ListOutbox", accountID)
+}
+
+func (cl *Client) ListOwnSMIMECertificates(ctx context.Context, email string) ([]core.SMIMEIdentity, error) {
+	return call[[]core.SMIMEIdentity](cl, ctx, "ListOwnSMIMECertificates", email)
 }
 
 func (cl *Client) ListPluginModels(ctx context.Context) ([]core.PluginModels, error) {
@@ -601,6 +617,10 @@ func (cl *Client) RecordCapStatus(ctx context.Context, id int64, version int64, 
 	return callErr(cl, ctx, "RecordCapStatus", id, version, c, st)
 }
 
+func (cl *Client) RecordSMIMESignerCert(ctx context.Context, address string, der []byte) error {
+	return callErr(cl, ctx, "RecordSMIMESignerCert", address, der)
+}
+
 func (cl *Client) RefreshMCPTools(ctx context.Context, id int64) error {
 	return callErr(cl, ctx, "RefreshMCPTools", id)
 }
@@ -619,6 +639,10 @@ func (cl *Client) RemoveAddressBook(ctx context.Context, id int64) error {
 
 func (cl *Client) RemoveAttachmentAt(ctx context.Context, draftID int64, attachmentID int64, revision int64) (int64, error) {
 	return call[int64](cl, ctx, "RemoveAttachmentAt", draftID, attachmentID, revision)
+}
+
+func (cl *Client) RemoveContactCertificate(ctx context.Context, address string, sha256 string) error {
+	return callErr(cl, ctx, "RemoveContactCertificate", address, sha256)
 }
 
 func (cl *Client) RemoveMCPServer(ctx context.Context, id int64) error {
@@ -753,6 +777,10 @@ func (cl *Client) SecurityProgress(ctx context.Context) (core.SecurityScanProgre
 	return call[core.SecurityScanProgress](cl, ctx, "SecurityProgress")
 }
 
+func (cl *Client) SelectContactCertificate(ctx context.Context, address string, sha256 string) error {
+	return callErr(cl, ctx, "SelectContactCertificate", address, sha256)
+}
+
 func (cl *Client) SendAcknowledgedRevision(ctx context.Context, draftID int64, revision int64, digest string) error {
 	return callErr(cl, ctx, "SendAcknowledgedRevision", draftID, revision, digest)
 }
@@ -787,6 +815,10 @@ func (cl *Client) SetDraftAccount(ctx context.Context, id int64, accountID int64
 
 func (cl *Client) SetDraftModel(ctx context.Context, draftID int64, model string) error {
 	return callErr(cl, ctx, "SetDraftModel", draftID, model)
+}
+
+func (cl *Client) SetDraftSMIME(ctx context.Context, draftID int64, sign *bool, encrypt *bool, pinnedCerts map[string]string) (core.DraftSMIMEStatus, error) {
+	return call[core.DraftSMIMEStatus](cl, ctx, "SetDraftSMIME", draftID, sign, encrypt, pinnedCerts)
 }
 
 func (cl *Client) SetFlags(ctx context.Context, ids []int64, add []string, remove []string) error {

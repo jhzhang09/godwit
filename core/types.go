@@ -76,6 +76,7 @@ type Account struct {
 
 	// 发信账户的 S/MIME 策略，两项独立配置。
 	SMIMESign, SMIMEEncrypt bool
+	SMIMECert               string // 选用的个人证书 SHA-256（空串表示自动选用最新有效证书）
 }
 
 // KindLocalArchive is an account with no servers or credentials: it never
@@ -157,6 +158,7 @@ type AccountPatch struct {
 
 	// 发信账户的 S/MIME 策略，两项独立配置。
 	SMIMESign, SMIMEEncrypt *bool
+	SMIMECert               *string
 }
 
 // AccountIcon is an account's uploaded icon image.

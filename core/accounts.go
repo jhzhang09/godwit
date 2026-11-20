@@ -502,7 +502,8 @@ const accountCols = `id, email, name, alias, COALESCE((SELECT html FROM signatur
 	sync_since_months, (SELECT count(*) FROM folders WHERE account_id = accounts.id), signature_id, icon, ai_instructions, oauth_client_id, label_keywords, kind, receive_only,
 	recv_protocol, send_protocol, features, recv_path, send_auth, position,
  EXISTS(SELECT 1 FROM settings WHERE key='smime.sign.' || accounts.id),
- EXISTS(SELECT 1 FROM settings WHERE key='smime.encrypt.' || accounts.id)`
+ EXISTS(SELECT 1 FROM settings WHERE key='smime.encrypt.' || accounts.id),
+ COALESCE((SELECT value FROM settings WHERE key='smime.cert.' || accounts.id), '')`
 
 // ErrAccountNotFound is returned for an account id that does not exist.
 var ErrAccountNotFound = errors.New("account not found")
@@ -531,7 +532,7 @@ func scanAccount(r []any) Account {
 		Sending:   Server{store.Str(r[29]), store.Str(r[13]), int(store.Int(r[14])), Security(store.Str(r[15])), "", store.Str(r[32])},
 		Provider:  store.Str(r[17]), StatusDetail: store.Str(r[18]), SignatureID: store.Int(r[21]), Icon: store.Str(r[22]),
 		AIInstructions: store.Str(r[23]), OAuthClientID: store.Str(r[24]), LabelKeywords: store.Int(r[25]) == 1, Kind: store.Str(r[26]),
-		ReceiveOnly: store.Int(r[27]) == 1, Position: int(store.Int(r[33])), SMIMESign: store.Int(r[34]) != 0, SMIMEEncrypt: store.Int(r[35]) != 0,
+		ReceiveOnly: store.Int(r[27]) == 1, Position: int(store.Int(r[33])), SMIMESign: store.Int(r[34]) != 0, SMIMEEncrypt: store.Int(r[35]) != 0, SMIMECert: store.Str(r[36]),
 	}
 	if sendsViaReceiving(a.Receiving.Protocol) {
 		// EWS, JMAP, Graph and Gmail API send through the receiving server, whose
@@ -974,6 +975,15 @@ func (s *Service) UpdateAccount(ctx context.Context, id int64, p AccountPatch) (
 		}
 		stmts = append(stmts, stmt)
 	}
+	if p.SMIMECert != nil {
+		key := "smime.cert." + strconv.FormatInt(id, 10)
+		sha := strings.ToLower(strings.TrimSpace(*p.SMIMECert))
+		if sha == "" {
+			stmts = append(stmts, sqlite.Statement{SQL: "DELETE FROM settings WHERE key=?", Args: []any{key}})
+		} else {
+			stmts = append(stmts, sqlite.Statement{SQL: "INSERT OR REPLACE INTO settings(key,value) VALUES (?, ?)", Args: []any{key, sha}})
+		}
+	}
 	if p.IsDefault != nil && *p.IsDefault {
 		stmts = append(stmts, sqlite.Statement{SQL: "UPDATE accounts SET is_default = 0 WHERE id <> ?", Args: []any{id}})
 		set("is_default", 1)
@@ -1005,7 +1015,7 @@ func (s *Service) UpdateAccount(ctx context.Context, id int64, p AccountPatch) (
 		}
 		defer unlock()
 	}
-	if p.SMIMESign != nil || p.SMIMEEncrypt != nil {
+	if p.SMIMESign != nil || p.SMIMEEncrypt != nil || p.SMIMECert != nil {
 		// 入队与策略变更串行，已开始制信的任务须重新检查策略。
 		s.editMu.Lock()
 		defer s.editMu.Unlock()

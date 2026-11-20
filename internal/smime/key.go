@@ -1,15 +1,18 @@
-// Package smime 处理 S/MIME 收发；硬件私钥和系统信任通过各操作系统原生安全接口在进程内直接完成。
+// Package smime 处理 S/MIME 收发；本地证书、安全 Key 私钥操作与系统信任通过各操作系统原生安全接口在进程内直接完成。
 package smime
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto"
 	"crypto/rsa"
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
+	"time"
 
 	"github.com/emmansun/gmsm/smx509"
 )
@@ -26,7 +29,7 @@ func (k key) Sign(_ io.Reader, digest []byte, opts crypto.SignerOpts) ([]byte, e
 	switch hash {
 	case crypto.SHA1, crypto.SHA256:
 	default:
-		return nil, errors.New("不支持的硬件签名摘要")
+		return nil, errors.New("unsupported signature digest algorithm")
 	}
 	var sig []byte
 	err := withProvider(k.ctx, func(p provider) error {
@@ -57,36 +60,147 @@ func digestAlgorithm(ctx context.Context, certDER []byte) (crypto.Hash, error) {
 	return hash, err
 }
 
-func verifyCMS(ctx context.Context, email string, der, detached []byte) ([]byte, error) {
-	var content []byte
+func verifyCMS(ctx context.Context, email string, der, detached []byte) (cmsVerifyResult, error) {
+	var res cmsVerifyResult
 	err := withVerifyProvider(ctx, func(p provider) error {
 		var err error
-		content, err = p.VerifyCMS(ctx, email, der, detached)
+		res, err = p.VerifyCMS(ctx, email, der, detached)
 		return err
 	})
-	return content, err
+	return res, err
+}
+
+// IdentityInfo describes one personal S/MIME identity available in the OS certificate store.
+type IdentityInfo struct {
+	SHA256        string
+	Subject       string
+	SubjectDN     string
+	Issuer        string
+	IssuerDN      string
+	Emails        []string
+	SerialNumber  string
+	NotBefore     time.Time
+	NotAfter      time.Time
+	PublicKeyAlgo string
+	SignatureAlgo string
+	KeyUsages     []string
+	ExtKeyUsages  []string
+	SHA1          string
+	Hardware      bool
+	CanSign       bool
+	CanEncrypt    bool
+}
+
+type parsedIdentity struct {
+	cert     *smx509.Certificate
+	sha256   string
+	hardware bool
 }
 
 func identities(ctx context.Context) ([]*smx509.Certificate, error) {
-	var ders [][]byte
+	items, err := parsedIdentities(ctx)
+	if err != nil {
+		return nil, err
+	}
+	certs := make([]*smx509.Certificate, len(items))
+	for i, it := range items {
+		certs[i] = it.cert
+	}
+	return certs, nil
+}
+
+func parsedIdentities(ctx context.Context) ([]parsedIdentity, error) {
+	var raw []RawIdentity
 	if err := withProvider(ctx, func(p provider) error {
 		var err error
-		ders, err = p.Identities(ctx)
+		raw, err = p.Identities(ctx)
 		return err
 	}); err != nil {
 		return nil, err
 	}
-	var certs []*smx509.Certificate
-	for _, der := range ders {
-		cert, err := ParseCertificate(der)
+	seen := map[string]bool{}
+	var out []parsedIdentity
+	for _, r := range raw {
+		cert, err := ParseCertificate(r.DER)
 		if err != nil {
 			continue
 		}
-		if _, ok := cert.PublicKey.(*rsa.PublicKey); ok {
-			certs = append(certs, cert)
+		if _, ok := cert.PublicKey.(*rsa.PublicKey); !ok {
+			continue
 		}
+		sum := CertSHA256(cert.Raw)
+		if seen[sum] {
+			continue
+		}
+		seen[sum] = true
+		out = append(out, parsedIdentity{cert: cert, sha256: sum, hardware: r.Hardware})
 	}
-	return certs, nil
+	return out, nil
+}
+
+// VerifyTrust verifies cert via the OS S/MIME trust policy for usage ("sign" or "encrypt") and email.
+func VerifyTrust(ctx context.Context, usage, email string, cert *smx509.Certificate) error {
+	if cert == nil {
+		return errors.New("invalid X.509 certificate")
+	}
+	return trust(ctx, usage, email, cert, nil)
+}
+
+// ListIdentities returns personal S/MIME certificates matching email (or all when email == "").
+func ListIdentities(ctx context.Context, email string) ([]IdentityInfo, error) {
+	items, err := parsedIdentities(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var out []IdentityInfo
+	for _, it := range items {
+		if email != "" && !MatchesMailbox(it.cert, email) {
+			continue
+		}
+		checkEmail := email
+		if checkEmail == "" {
+			if emails := CertEmails(it.cert); len(emails) > 0 {
+				checkEmail = emails[0]
+			}
+		}
+		canSign := checkEmail != "" && trust(ctx, "sign", checkEmail, it.cert, nil) == nil
+		canEnc := checkEmail != "" && trust(ctx, "encrypt", checkEmail, it.cert, nil) == nil
+		meta := InspectCertificate(it.cert)
+		out = append(out, IdentityInfo{
+			SHA256:        it.sha256,
+			Subject:       meta.Subject,
+			SubjectDN:     meta.SubjectDN,
+			Issuer:        meta.Issuer,
+			IssuerDN:      meta.IssuerDN,
+			Emails:        meta.Emails,
+			SerialNumber:  meta.SerialNumber,
+			NotBefore:     meta.NotBefore,
+			NotAfter:      meta.NotAfter,
+			PublicKeyAlgo: meta.PublicKeyAlgo,
+			SignatureAlgo: meta.SignatureAlgo,
+			KeyUsages:     meta.KeyUsages,
+			ExtKeyUsages:  meta.ExtKeyUsages,
+			SHA1:          meta.SHA1,
+			Hardware:      it.hardware,
+			CanSign:       canSign,
+			CanEncrypt:    canEnc,
+		})
+	}
+	slices.SortFunc(out, func(a, b IdentityInfo) int {
+		av := a.CanSign || a.CanEncrypt
+		bv := b.CanSign || b.CanEncrypt
+		if av != bv {
+			if av {
+				return -1
+			}
+			return 1
+		}
+		if c := b.NotBefore.Compare(a.NotBefore); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.SHA256, b.SHA256)
+	})
+	return out, nil
 }
 
 // MatchesMailbox 同时识别 subjectAltName 和早期证书主题中的 emailAddress。
@@ -108,7 +222,7 @@ func MatchesMailbox(cert *smx509.Certificate, email string) bool {
 
 func trust(ctx context.Context, usage, email string, cert *smx509.Certificate, chain []*smx509.Certificate) error {
 	if !MatchesMailbox(cert, email) {
-		return fmt.Errorf("证书邮箱与 %s 不匹配", email)
+		return fmt.Errorf("certificate email does not match %s", email)
 	}
 	ders := [][]byte{cert.Raw}
 	for _, c := range chain {
@@ -121,31 +235,41 @@ func trust(ctx context.Context, usage, email string, cert *smx509.Certificate, c
 	})
 }
 
-func ownCertificate(ctx context.Context, email, usage string) (*smx509.Certificate, error) {
+func ownCertificate(ctx context.Context, email, usage, preferredSHA256 string) (*smx509.Certificate, error) {
 	certs, err := identities(ctx)
 	if err != nil {
 		return nil, err
 	}
+	preferredSHA256 = strings.ToLower(strings.TrimSpace(preferredSHA256))
 	var selected *smx509.Certificate
 	var lastErr error
+	matchedPreferred := false
 	for _, cert := range certs {
 		if !MatchesMailbox(cert, email) {
 			continue
 		}
+		sum := CertSHA256(cert.Raw)
+		if preferredSHA256 != "" && sum != preferredSHA256 {
+			continue
+		}
+		matchedPreferred = matchedPreferred || preferredSHA256 == "" || sum == preferredSHA256
 		if err := trust(ctx, usage, email, cert, nil); err != nil {
 			lastErr = err
 			continue
 		}
-		if selected != nil && !bytes.Equal(selected.Raw, cert.Raw) {
-			return nil, fmt.Errorf("%s 有多个匹配的硬件证书，请只连接所需的 Key", email)
+		if selected == nil || cert.NotBefore.After(selected.NotBefore) ||
+			(cert.NotBefore.Equal(selected.NotBefore) && sum < CertSHA256(selected.Raw)) {
+			selected = cert
 		}
-		selected = cert
 	}
 	if selected == nil {
 		if lastErr != nil {
 			return nil, lastErr
 		}
-		return nil, fmt.Errorf("没有找到 %s 的硬件证书，请插入对应的 Key", email)
+		if preferredSHA256 != "" && !matchedPreferred {
+			return nil, fmt.Errorf("selected personal S/MIME certificate for %s not found; choose another in Account Settings", email)
+		}
+		return nil, fmt.Errorf("no matching personal S/MIME certificate found for %s", email)
 	}
 	return selected, nil
 }

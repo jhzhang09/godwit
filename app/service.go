@@ -74,6 +74,7 @@ type Service interface {
 	ImageCacheSize() int64
 	ImagesAllowed(ctx context.Context, message int64) (bool, error)
 	ImportAccountsFile(ctx context.Context, path, digest string) (core.AccountImportResult, error)
+	ImportContactCertificateFile(ctx context.Context, address, path string) ([]core.SMIMECertificate, error)
 	ImportEML(ctx context.Context, accountID, folderID int64, paths []string) (core.ImportSummary, error)
 	InlineSignatureImages(ctx context.Context, html string) (string, error)
 	InstallPlugin(ctx context.Context, srcDir string) (core.PluginInfo, error)
@@ -82,6 +83,7 @@ type Service interface {
 	LabelModelReady(ctx context.Context) bool
 	ListAccounts(ctx context.Context) ([]core.Account, error)
 	ListActions(ctx context.Context, kind string) ([]core.ActionInfo, error)
+	ListContactCertificates(ctx context.Context, addresses []string) ([]core.RecipientSMIMEStatus, error)
 	ListConversations(ctx context.Context, kind string) ([]core.Conversation, error)
 	ListDrafts(ctx context.Context, accountID int64) ([]core.Draft, error)
 	ListFolders(ctx context.Context, accountID int64) ([]core.Folder, error)
@@ -90,6 +92,7 @@ type Service interface {
 	ListMessages(ctx context.Context, v core.View, cursor string, limit int) (core.MessagePage, error)
 	ListModelServices(ctx context.Context) ([]core.ModelService, error)
 	ListOutbox(ctx context.Context, accountID int64) ([]core.OutboxItem, error)
+	ListOwnSMIMECertificates(ctx context.Context, email string) ([]core.SMIMEIdentity, error)
 	ListPluginModels(ctx context.Context) ([]core.PluginModels, error)
 	ListPluginRegistry(ctx context.Context) (core.RegistryView, error)
 	ListPlugins(ctx context.Context) ([]core.PluginInfo, error)
@@ -133,9 +136,11 @@ type Service interface {
 	RecognitionModelError() error
 	RecognitionModelInstalled() bool
 	RecordCapStatus(ctx context.Context, id, version int64, c string, st core.CapStatus) error
+	RecordSMIMESignerCert(ctx context.Context, address string, der []byte) error
 	RefreshMCPTools(ctx context.Context, id int64) error
 	RefreshPluginRegistry(ctx context.Context) error
 	RemoveAccount(ctx context.Context, id int64) error
+	RemoveContactCertificate(ctx context.Context, address, sha256 string) error
 	RemoveMCPServer(ctx context.Context, id int64) error
 	RemoveModelFiles(ctx context.Context, ref string) error
 	RemoveModelService(ctx context.Context, id int64) error
@@ -162,6 +167,7 @@ type Service interface {
 	SavedViews(ctx context.Context) ([]core.SavedView, error)
 	SearchWith(ctx context.Context, q core.SearchQuery, limit int) ([]core.MessageSummary, error)
 	SecurityProgress(ctx context.Context) (core.SecurityScanProgress, error)
+	SelectContactCertificate(ctx context.Context, address, sha256 string) error
 	SendAcknowledgedRevision(ctx context.Context, draftID, revision int64, digest string) error
 	SendRevision(ctx context.Context, draftID, revision int64) error
 	ApproveDraft(ctx context.Context, draftID, revision int64) error

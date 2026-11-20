@@ -1,17 +1,28 @@
 package app
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
+	"encoding/pem"
 	"errors"
 	"fmt"
+	"math/big"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/emmansun/gmsm/pkcs7"
 	"github.com/godwit-email/godwit/core"
 	"github.com/godwit-email/godwit/core/coretest"
+	"github.com/godwit-email/godwit/internal/i18n"
 	"github.com/godwit-email/godwit/internal/smime"
 )
 
@@ -307,4 +318,264 @@ func TestReaderSMIMEDefersAutoAIAndEnablesTranslateAndSummary(t *testing.T) {
 		return b != nil && b.smimeResult != nil && b.smimeSynced
 	})
 	h.see("Secret launch confirmed for Monday.")
+}
+
+func TestSMIMECopyAndStandardWorkflows(t *testing.T) {
+	// 1. All 15 catalog locales must translate standard S/MIME keys without legacy folder/hardware-only phrases.
+	prevLang := i18n.Language()
+	t.Cleanup(func() { i18n.SetLanguage(prevLang) })
+	keys := []string{
+		"smime.sign", "smime.sign.help", "smime.encrypt", "smime.encrypt.help",
+		"smime.cert", "smime.cert.help", "smime.cert.view", "smime.cert.detail_title",
+		"smime.contacts.title", "smime.contacts.empty", "smime.compose.sign", "smime.compose.encrypt",
+	}
+	forbidden := []string{"邮箱名片", "旧卡", "舊卡", "硬件 Key", "硬體金鑰", "hardware key"}
+	langs := i18n.Catalog.Languages()
+	if len(langs) < 15 {
+		t.Fatalf("expected all 15 locales in i18n.Catalog, got %v", langs)
+	}
+	for _, lang := range langs {
+		i18n.SetLanguage(lang)
+		for _, k := range keys {
+			txt := i18n.T(k)
+			if txt == "" || txt == k {
+				t.Fatalf("missing i18n.T(%q) for %q", k, lang)
+			}
+			low := strings.ToLower(txt)
+			for _, bad := range forbidden {
+				if strings.Contains(low, strings.ToLower(bad)) {
+					t.Fatalf("legacy copy %q found in i18n.T(%q) for %q: %q", bad, k, lang, txt)
+				}
+			}
+		}
+	}
+	i18n.SetLanguage("zh-Hans")
+
+	if !smime.Supported() {
+		t.Skip("S/MIME not supported on this platform")
+	}
+
+	h, accs := mailHarness(t, nil, "alice@example.com")
+	acc := accs[0]
+	h.app.cards = smime.NewSession(h.app.ctx)
+
+	// Deliver mail from bob@example.com so bob appears in Contacts and verify RecordSMIMESignerCert.
+	msg := h.deliverOne(acc, coretest.Msg("Bob <bob@example.com>", acc.Email, "Hello", "hi"))
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	requireReader := func(err error) {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	requireReader(err)
+	tmpl := &x509.Certificate{
+		SerialNumber:   big.NewInt(777),
+		Subject:        pkix.Name{CommonName: "Bob Signer"},
+		EmailAddresses: []string{"bob@example.com"},
+		NotBefore:      time.Now().Add(-time.Hour),
+		NotAfter:       time.Now().Add(24 * time.Hour),
+		KeyUsage:       x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+	}
+	bobDER, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	requireReader(err)
+	requireReader(h.env.Svc.RecordSMIMESignerCert(context.Background(), "Bob <bob@example.com>", bobDER))
+
+	// Open Settings > Account and verify standard S/MIME copy + personal cert selector.
+	h.openSettings(accountRoute(acc.ID))
+	h.see("个人 S/MIME 证书")
+	h.see("默认对发出邮件进行数字签名")
+	h.see("默认对发出邮件进行加密")
+
+	// Return to mail sidebar, open Contacts, and verify bob@example.com S/MIME certificate panel + import + select + remove.
+	h.resize(1440, 2000)
+	_ = msg
+	h.click("返回邮件")
+	h.click("联系人")
+	h.until("bob certs loaded", func() bool {
+		return h.app.contacts().certsOf == "bob@example.com" && !h.app.contacts().certsLoading
+	})
+	h.see("S/MIME 公钥证书")
+	h.see("Bob Signer")
+	h.see("签名邮件")
+
+	// View contact certificate details from Contacts and dismiss dialog.
+	h.click("查看证书")
+	h.until("contact cert dialog open", func() bool {
+		return h.tt.HasText("证书详情") && h.tt.HasText("RSA (2048 bit)")
+	})
+	h.see("03:09")
+	h.click("关闭")
+	h.until("contact cert dialog closed", func() bool {
+		return !h.app.smimeCertOpen && !h.tt.HasText("证书详情")
+	})
+
+	// Import another certificate file for bob via OpenFiles mock.
+	impKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	requireReader(err)
+	impTmpl := &x509.Certificate{
+		SerialNumber:   big.NewInt(778),
+		Subject:        pkix.Name{CommonName: "Bob Imported"},
+		EmailAddresses: []string{"bob@example.com"},
+		NotBefore:      time.Now().Add(-30 * time.Minute),
+		NotAfter:       time.Now().Add(24 * time.Hour),
+		KeyUsage:       x509.KeyUsageKeyEncipherment,
+	}
+	impDER, err := x509.CreateCertificate(rand.Reader, impTmpl, impTmpl, &impKey.PublicKey, impKey)
+	requireReader(err)
+	certFile := filepath.Join(t.TempDir(), "bob_imported.cer")
+	requireReader(os.WriteFile(certFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: impDER}), 0o600))
+	h.plat.mu.Lock()
+	h.plat.files = []string{certFile}
+	h.plat.mu.Unlock()
+
+	h.click("导入证书")
+	h.until("imported cert visible", func() bool {
+		return h.tt.HasText("Bob Imported")
+	})
+	h.see("手动导入")
+}
+
+func TestReaderSMIMEUnverifiedSignatureShowsDecryptedAndDetails(t *testing.T) {
+	if !smime.Supported() {
+		t.Skip("S/MIME not supported on this platform")
+	}
+	h, accs := mailHarness(t, nil, "alice@example.com")
+	h.app.cards = smime.NewSession(h.app.ctx)
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:   big.NewInt(901),
+		Subject:        pkix.Name{CommonName: "Bob Bad Sig"},
+		EmailAddresses: []string{"bob@example.com"},
+		NotBefore:      time.Now().Add(-time.Hour),
+		NotAfter:       time.Now().Add(24 * time.Hour),
+		KeyUsage:       x509.KeyUsageDigitalSignature,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := smime.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sd, err := pkcs7.NewSignedData([]byte("Content-Type: text/html; charset=utf-8\r\n\r\n<p>Body visible despite bad sig</p>"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sd.SetDigestAlgorithm(pkcs7.OIDDigestAlgorithmSHA256)
+	if err := sd.AddSigner(cert, key, pkcs7.SignerInfoConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	cms, err := sd.Finish()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tampered := bytes.ReplaceAll(cms, []byte("Body visible"), []byte("Text visible"))
+	msg := h.deliverOne(accs[0], makeRawSMIME("Bob <bob@example.com>", accs[0].Email, "bad-sig@x", "Signed Report", string(tampered)))
+
+	h.openThread(msg.ThreadID)
+	wantShow := fmt.Sprintf("ShowSecureBody %d", msg.ID)
+	h.until("unverified signed content displayed", func() bool {
+		return callIndex(h.plat.Calls(), wantShow) >= 0 && h.tt.HasText("无法验证邮件签名")
+	})
+
+	// Unverified signer certs must NOT be stored as trusted mail_sig certificates.
+	rcpts, err := h.env.Svc.ListContactCertificates(context.Background(), []string{"bob@example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rcpts) > 0 && len(rcpts[0].Certs) > 0 {
+		t.Fatalf("unverified signer cert was recorded: %+v", rcpts[0].Certs)
+	}
+
+	h.click("显示详细信息")
+	h.see("请谨慎核实发件人身份与内容完整性")
+	h.click("查看证书")
+	h.until("unverified cert dialog open", func() bool {
+		return h.tt.HasText("证书详情") && h.tt.HasText("Bob Bad Sig")
+	})
+	h.see("未通过系统信任验证")
+	h.see("03:85")
+	h.see("RSA (2048 bit)")
+	h.click("复制指纹")
+	h.until("copied fp", func() bool { return h.tt.Clipboard() != "" })
+	h.click("关闭")
+	h.until("unverified cert dialog closed", func() bool {
+		return !h.app.smimeCertOpen && !h.tt.HasText("证书详情")
+	})
+	h.see("隐藏详细信息")
+	h.click("隐藏详细信息")
+	h.see("显示详细信息")
+}
+
+func TestReaderSMIMEVerifiedSignatureViewCert(t *testing.T) {
+	if !smime.Supported() {
+		t.Skip("S/MIME not supported on this platform")
+	}
+	h, accs := mailHarness(t, nil, "alice@example.com")
+	h.app.cards = smime.NewSession(h.app.ctx)
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caTmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "Test Root CA"},
+	}
+	leafTmpl := &x509.Certificate{
+		SerialNumber:   big.NewInt(0x12AB),
+		Subject:        pkix.Name{CommonName: "Bob Verified"},
+		EmailAddresses: []string{"bob@example.com"},
+		NotBefore:      time.Now().Add(-time.Hour),
+		NotAfter:       time.Now().Add(24 * time.Hour),
+		KeyUsage:       x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:    []x509.ExtKeyUsage{x509.ExtKeyUsageEmailProtection},
+	}
+	bobDER, err := x509.CreateCertificate(rand.Reader, leafTmpl, caTmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	h.app.mail.reader.openCMSFull = func(ctx context.Context, fromHeader string, der []byte) (smime.Opened, error) {
+		return smime.Opened{
+			Entity:     []byte("Content-Type: text/html; charset=utf-8\r\n\r\n<p>Trusted verified content</p>"),
+			Encrypted:  true,
+			Signer:     "bob@example.com",
+			SignerCert: bobDER,
+		}, nil
+	}
+	msg := h.deliverOne(accs[0], makeRawSMIME("Bob <bob@example.com>", accs[0].Email, "verified@x", "Signed and Encrypted", "opaque-cms"))
+
+	h.openThread(msg.ThreadID)
+	wantShow := fmt.Sprintf("ShowSecureBody %d", msg.ID)
+	h.until("verified signature banner rendered", func() bool {
+		return callIndex(h.plat.Calls(), wantShow) >= 0 && h.tt.HasText("签名已验证 · bob@example.com")
+	})
+	h.see("已解密")
+	h.see("查看证书")
+
+	// Clicking the verified signature label directly opens Certificate Details (Mac Mail style).
+	h.click("签名已验证 · bob@example.com")
+	h.until("verified cert dialog open", func() bool {
+		return h.tt.HasText("证书详情") && h.tt.HasText("Bob Verified")
+	})
+	h.see("签名已验证且证书受信任")
+	h.see("Test Root CA")
+	h.see("12:AB")
+	h.see("RSA (2048 bit)")
+	h.click("复制指纹")
+	wantFP := strings.ToUpper(smime.CertSHA256(bobDER))
+	h.until("sha256 copied", func() bool {
+		return strings.ReplaceAll(h.tt.Clipboard(), ":", "") == wantFP
+	})
+	h.click("关闭")
+	h.until("verified cert dialog closed", func() bool {
+		return !h.app.smimeCertOpen && !h.tt.HasText("证书详情")
+	})
 }

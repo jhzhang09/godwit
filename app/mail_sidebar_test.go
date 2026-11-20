@@ -35,12 +35,38 @@ func TestSidebarFolders(t *testing.T) {
 		got = append(got, row)
 	}
 	want := []string{
-		"收件箱", "已标星", "草稿", "归档", "垃圾邮件", // drafts are local
-		"Projects +3", "  Expenses", "  Q4 (prefix) +2", "    Contracts", "Projects", "Projects Old",
+		"收件箱 +6",
+		"  Projects +3",
+		"    Expenses",
+		"    Q4 (prefix) +2",
+		"      Contracts",
+		"已标星", "草稿", "归档", "垃圾邮件", // drafts are local
+		"Projects", "Projects Old",
 		"[Gmail] (prefix) +0", "  Important", "flat",
 	}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("rows\n%q\nwant\n%q", got, want)
+	}
+
+	// Subfolders under role folders like 已归档/... must nest under 归档, while top-level 存档 stays at root.
+	fs2 := []core.Folder{
+		{ID: 1, Name: "INBOX", Role: "inbox", Delim: "/", Unread: 1},
+		{ID: 2, Name: "INBOX/罗飞", Delim: "/", Unread: 2},
+		{ID: 3, Name: "已归档", Role: "archive", Delim: "/"},
+		{ID: 4, Name: "已归档/帮助邮箱", Delim: "/", Unread: 1},
+		{ID: 5, Name: "存档", Delim: "/"},
+	}
+	var got2 []string
+	for _, f := range sidebarFolders(8, fs2) {
+		row := strings.Repeat("  ", f.depth-1) + f.name
+		if f.kids {
+			row += " +" + string(rune('0'+f.sum))
+		}
+		got2 = append(got2, row)
+	}
+	want2 := []string{"收件箱 +3", "  罗飞", "已标星", "草稿", "归档 +1", "  帮助邮箱", "存档"}
+	if strings.Join(got2, "|") != strings.Join(want2, "|") {
+		t.Fatalf("role subfolder tree\n%q\nwant\n%q", got2, want2)
 	}
 }
 

@@ -22,9 +22,12 @@ import (
 )
 
 type Opened struct {
-	Entity    []byte
-	Encrypted bool
-	Signer    string
+	Entity         []byte
+	Encrypted      bool
+	Signer         string
+	SignerCert     []byte
+	UnverifiedCert []byte
+	VerifyErr      string
 }
 
 func IsCMSPart(contentType, name string) bool {
@@ -53,7 +56,7 @@ func IsPart(contentType, name string) bool {
 // splitSigned 保留第一段的原始 MIME 头、折行、传输编码及正文；分隔线前的 CRLF 属于分隔线。
 func splitSigned(body []byte, boundary string) ([][]byte, error) {
 	if boundary == "" || len(boundary) > 70 {
-		return nil, errors.New("无效的 S/MIME 分隔符")
+		return nil, errors.New("invalid S/MIME boundary")
 	}
 	marker := []byte("--" + boundary)
 	end := append(bytes.Clone(marker), '-', '-')
@@ -84,7 +87,7 @@ func splitSigned(body []byte, boundary string) ([][]byte, error) {
 		}
 		pos += n
 	}
-	return nil, errors.New("分离签名必须包含正文与一个签名")
+	return nil, errors.New("detached signature must contain body and signature")
 }
 
 func readCMS(m *mail.Message) ([]byte, error) {
@@ -115,7 +118,7 @@ func readCMS(m *mail.Message) ([]byte, error) {
 		return decoded[:n], nil
 	case "", "binary", "7bit", "8bit":
 	default:
-		return nil, errors.New("不支持的 CMS 传输编码")
+		return nil, errors.New("unsupported CMS Content-Transfer-Encoding")
 	}
 	return io.ReadAll(r)
 }
@@ -136,21 +139,25 @@ func openEnvelope(ctx context.Context, p *pkcs7.PKCS7) ([]byte, error) {
 			}
 		}
 	}
-	return nil, errors.New("请插入此邮件收件人的硬件 Key")
+	return nil, errors.New("no matching personal S/MIME certificate or private key found for encrypted message")
 }
 
-func verify(ctx context.Context, p *pkcs7.PKCS7, from string) error {
-	if err := p.Verify(); err != nil {
-		return fmt.Errorf("S/MIME 签名无效: %w", err)
-	}
+func verify(ctx context.Context, p *pkcs7.PKCS7, from string) ([]byte, error) {
 	signer := p.GetOnlySigner()
+	var signerDER []byte
+	if signer != nil {
+		signerDER = bytes.Clone(signer.Raw)
+	}
+	if err := p.Verify(); err != nil {
+		return signerDER, fmt.Errorf("invalid S/MIME signature: %w", err)
+	}
 	if signer == nil {
-		return errors.New("无法确定唯一的 S/MIME 签名人")
+		return nil, errors.New("unable to identify unique S/MIME signer")
 	}
 	if err := trust(ctx, "sign", from, signer, p.Certificates); err != nil {
-		return fmt.Errorf("签名完整，但发件人证书未通过验证: %w", err)
+		return signerDER, fmt.Errorf("signature intact, but sender certificate failed verification: %w", err)
 	}
-	return nil
+	return signerDER, nil
 }
 
 var oidCMSSignedData = []byte{0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x07, 0x02}
@@ -182,6 +189,16 @@ func isCMSSignedData(der []byte) bool {
 
 // Open 只对用户正在查看的原件执行，所有签名层均验证成功后才交付正文。
 func Open(ctx context.Context, raw []byte) (Opened, error) {
+	return openRaw(ctx, raw, false)
+}
+
+// OpenForRead decrypts and unwraps raw for reading; signature/trust failures are recorded in
+// Opened.VerifyErr instead of discarding decrypted content.
+func OpenForRead(ctx context.Context, raw []byte) (Opened, error) {
+	return openRaw(ctx, raw, true)
+}
+
+func openRaw(ctx context.Context, raw []byte, allowUnverified bool) (Opened, error) {
 	outer, err := mail.ReadMessage(bytes.NewReader(raw))
 	if err != nil {
 		return Opened{}, err
@@ -190,21 +207,31 @@ func Open(ctx context.Context, raw []byte) (Opened, error) {
 	if fields := outer.Header["From"]; len(fields) == 1 {
 		from = singleSender(fields[0])
 	}
-	return openMIME(ctx, from, raw, 0, Opened{})
+	return openMIME(ctx, from, raw, 0, Opened{}, allowUnverified)
 }
 
 // OpenCMS 对已拆出的单层 application/pkcs7-mime 字节直接解封并验签，避免重复下载整封邮件。
 func OpenCMS(ctx context.Context, fromHeader string, der []byte) (Opened, error) {
+	return openCMSRaw(ctx, fromHeader, der, false)
+}
+
+// OpenCMSForRead unwraps and decrypts a single application/pkcs7-mime part for reading;
+// signature/trust failures are recorded in Opened.VerifyErr instead of discarding decrypted content.
+func OpenCMSForRead(ctx context.Context, fromHeader string, der []byte) (Opened, error) {
+	return openCMSRaw(ctx, fromHeader, der, true)
+}
+
+func openCMSRaw(ctx context.Context, fromHeader string, der []byte, allowUnverified bool) (Opened, error) {
 	from := singleSender(fromHeader)
 	var result Opened
-	inner, err := unwrapCMS(ctx, from, der, nil, &result)
+	inner, err := unwrapCMS(ctx, from, der, nil, &result, allowUnverified)
 	if err != nil {
 		return Opened{}, err
 	}
-	return openMIME(ctx, from, inner, 1, result)
+	return openMIME(ctx, from, inner, 1, result, allowUnverified)
 }
 
-func openMIME(ctx context.Context, from string, raw []byte, startDepth int, result Opened) (Opened, error) {
+func openMIME(ctx context.Context, from string, raw []byte, startDepth int, result Opened, allowUnverified bool) (Opened, error) {
 	for depth := startDepth; depth < 12; depth++ {
 		m, err := mail.ReadMessage(bytes.NewReader(raw))
 		if err != nil {
@@ -224,7 +251,7 @@ func openMIME(ctx context.Context, from string, raw []byte, startDepth int, resu
 		switch ct {
 		case "multipart/signed":
 			if !signatureType(params["protocol"]) {
-				return Opened{}, errors.New("不支持的分离签名协议")
+				return Opened{}, errors.New("unsupported detached signature protocol")
 			}
 			b, err := io.ReadAll(m.Body)
 			if err != nil {
@@ -240,7 +267,7 @@ func openMIME(ctx context.Context, from string, raw []byte, startDepth int, resu
 			}
 			st, _, _ := mime.ParseMediaType(sig.Header.Get("Content-Type"))
 			if !signatureType(st) {
-				return Opened{}, errors.New("无效的 S/MIME 签名部分")
+				return Opened{}, errors.New("invalid S/MIME signature part")
 			}
 			detached = parts[0]
 			der, err = readCMS(sig)
@@ -254,33 +281,59 @@ func openMIME(ctx context.Context, from string, raw []byte, startDepth int, resu
 			}
 		default:
 			if depth == 0 {
-				return Opened{}, errors.New("邮件最外层不是 S/MIME 信封或签名")
+				return Opened{}, errors.New("outer message is not an S/MIME envelope or signature")
 			}
 			result.Entity = raw
 			return result, nil
 		}
-		raw, err = unwrapCMS(ctx, from, der, detached, &result)
+		raw, err = unwrapCMS(ctx, from, der, detached, &result, allowUnverified)
 		if err != nil {
 			return Opened{}, err
 		}
 	}
-	return Opened{}, errors.New("S/MIME 嵌套过深")
+	return Opened{}, errors.New("S/MIME nesting too deep")
 }
 
-func unwrapCMS(ctx context.Context, from string, der, detached []byte, result *Opened) ([]byte, error) {
+func recordVerifyFailure(result *Opened, reason string, certDER []byte) {
+	if result.VerifyErr == "" {
+		result.VerifyErr = reason
+	}
+	result.Signer = ""
+	result.SignerCert = nil
+	if len(certDER) > 0 && len(result.UnverifiedCert) == 0 {
+		result.UnverifiedCert = bytes.Clone(certDER)
+	}
+}
+
+func unwrapCMS(ctx context.Context, from string, der, detached []byte, result *Opened, allowUnverified bool) ([]byte, error) {
 	readerSession := ctx.Value(sessionKey{}) != nil
-	// 系统解码器会拼齐 BER 分段的签名正文；部分 Apple 邮件含多个 OCTET STRING。
-	// 当会话启用且已识别为 SignedData 时直接交由系统验签，跳过 Go 侧全量 ASN.1 解析。
-	if readerSession && isCMSSignedData(der) {
-		if from == "" {
-			return nil, errors.New("签名邮件缺少唯一的发件邮箱")
+	runVerifyCMS := func() ([]byte, error) {
+		if !allowUnverified && from == "" {
+			return nil, errors.New("signed message lacks a unique sender address")
 		}
-		content, err := verifyCMS(ctx, from, der, detached)
+		res, err := verifyCMS(ctx, from, der, detached)
 		if err != nil {
 			return nil, err
 		}
-		result.Signer = from
-		return content, nil
+		if res.verifyErr != nil {
+			if !allowUnverified {
+				return nil, res.verifyErr
+			}
+			recordVerifyFailure(result, res.verifyErr.Error(), res.signerDER)
+			return res.content, nil
+		}
+		if result.VerifyErr == "" {
+			result.Signer = from
+			if len(res.signerDER) > 0 {
+				result.SignerCert = res.signerDER
+			}
+		}
+		return res.content, nil
+	}
+	// 系统解码器会拼齐 BER 分段的签名正文；部分 Apple 邮件含多个 OCTET STRING。
+	// 当会话启用且已识别为 SignedData 时直接交由系统验签，跳过 Go 侧全量 ASN.1 解析。
+	if readerSession && isCMSSignedData(der) {
+		return runVerifyCMS()
 	}
 	p, err := pkcs7.Parse(der)
 	// 名称和 MIME 参数都不能证明签名有效，仍须验证原始 CMS 及证书。
@@ -290,22 +343,14 @@ func unwrapCMS(ctx context.Context, from string, der, detached []byte, result *O
 		signed = envelopeErr != nil
 	}
 	if (readerSession && signed) || (err != nil && err.Error() == "x509: negative serial number") {
-		if from == "" {
-			return nil, errors.New("签名邮件缺少唯一的发件邮箱")
-		}
-		content, err := verifyCMS(ctx, from, der, detached)
-		if err != nil {
-			return nil, err
-		}
-		result.Signer = from
-		return content, nil
+		return runVerifyCMS()
 	}
 	if err != nil {
 		return nil, err
 	}
 	if _, e := p.GetRecipients(); e == nil {
 		if detached != nil {
-			return nil, errors.New("签名部分含有意外的加密信封")
+			return nil, errors.New("signed part unexpectedly contains an encrypted envelope")
 		}
 		raw, err := openEnvelope(ctx, p)
 		if err != nil {
@@ -314,23 +359,39 @@ func unwrapCMS(ctx context.Context, from string, der, detached []byte, result *O
 		result.Encrypted = true
 		if len(p.Signers) > 0 {
 			p.Content = raw
-			if err := verify(ctx, p, from); err != nil {
-				return nil, err
+			signerDER, err := verify(ctx, p, from)
+			if err != nil {
+				if !allowUnverified {
+					return nil, err
+				}
+				recordVerifyFailure(result, err.Error(), signerDER)
+				return raw, nil
 			}
-			result.Signer = from
+			if result.VerifyErr == "" {
+				result.Signer = from
+				result.SignerCert = signerDER
+			}
 		}
 		return raw, nil
 	}
 	if detached != nil {
 		if len(p.Content) > 0 {
-			return nil, errors.New("分离签名中含有另一份正文")
+			return nil, errors.New("detached signature unexpectedly contains embedded content")
 		}
 		p.Content = detached
 	}
-	if err := verify(ctx, p, from); err != nil {
-		return nil, err
+	signerDER, err := verify(ctx, p, from)
+	if err != nil {
+		if !allowUnverified {
+			return nil, err
+		}
+		recordVerifyFailure(result, err.Error(), signerDER)
+		return p.Content, nil
 	}
-	result.Signer = from
+	if result.VerifyErr == "" {
+		result.Signer = from
+		result.SignerCert = signerDER
+	}
 	return p.Content, nil
 }
 
@@ -342,12 +403,12 @@ func signatureType(s string) bool {
 func splitOutgoing(raw []byte) (outer, entity []byte, err error) {
 	headers, body, ok := bytes.Cut(raw, []byte("\r\n\r\n"))
 	if !ok {
-		return nil, nil, errors.New("邮件缺少 MIME 头")
+		return nil, nil, errors.New("message missing MIME headers")
 	}
 	var content bool
 	for line := range bytes.SplitSeq(headers, []byte("\r\n")) {
 		if len(line) == 0 {
-			return nil, nil, errors.New("空邮件头")
+			return nil, nil, errors.New("empty MIME header line")
 		}
 		if line[0] != ' ' && line[0] != '\t' {
 			content = strings.HasPrefix(strings.ToLower(string(line)), "content-")
@@ -378,8 +439,21 @@ func wrap(der []byte, kind string) []byte {
 
 type Lookup func(context.Context, []string) (map[string][]*smx509.Certificate, error)
 
+// ProtectOptions configures signing, encrypting, and explicit certificate selection.
+type ProtectOptions struct {
+	Sign        bool
+	Encrypt     bool
+	OwnCertSHA  string
+	PinnedCerts map[string]string // lower(addr) -> pinned SHA-256
+}
+
 // Protect 在入队之前完成签名和加密，重发直接使用同一份 MIME。
 func Protect(ctx context.Context, raw []byte, from string, rcpts []string, sign, encrypt bool, lookup Lookup) ([]byte, error) {
+	return ProtectWith(ctx, raw, from, rcpts, ProtectOptions{Sign: sign, Encrypt: encrypt}, lookup)
+}
+
+// ProtectWith signs and/or encrypts raw using standard OS/contact certificates and optional pinned SHA-256s.
+func ProtectWith(ctx context.Context, raw []byte, from string, rcpts []string, opts ProtectOptions, lookup Lookup) ([]byte, error) {
 	if ctx.Value(sessionKey{}) == nil && ctx.Value(providerKey{}) == nil {
 		p := newPlatformProvider(false)
 		defer p.Close()
@@ -390,7 +464,7 @@ func Protect(ctx context.Context, raw []byte, from string, rcpts []string, sign,
 		return nil, err
 	}
 	var recipients []*smx509.Certificate
-	if encrypt {
+	if opts.Encrypt {
 		var other []string
 		for _, recipient := range rcpts {
 			if !strings.EqualFold(recipient, from) {
@@ -398,7 +472,7 @@ func Protect(ctx context.Context, raw []byte, from string, rcpts []string, sign,
 			}
 		}
 		var cards map[string][]*smx509.Certificate
-		if len(other) > 0 {
+		if len(other) > 0 && lookup != nil {
 			cards, err = lookup(ctx, other)
 			if err != nil {
 				return nil, err
@@ -408,17 +482,24 @@ func Protect(ctx context.Context, raw []byte, from string, rcpts []string, sign,
 			if strings.EqualFold(addr, from) {
 				continue
 			}
+			lowerAddr := strings.ToLower(addr)
+			pinned := strings.ToLower(strings.TrimSpace(opts.PinnedCerts[lowerAddr]))
 			var found *smx509.Certificate
 			var reason error
-			for _, cert := range cards[strings.ToLower(addr)] {
+			for _, cert := range cards[lowerAddr] {
 				if _, ok := cert.PublicKey.(*rsa.PublicKey); !ok {
+					continue
+				}
+				sum := CertSHA256(cert.Raw)
+				if pinned != "" && sum != pinned {
 					continue
 				}
 				if err := trust(ctx, "encrypt", addr, cert, nil); err != nil {
 					reason = err
 					continue
 				}
-				if found == nil || cert.NotBefore.After(found.NotBefore) {
+				if found == nil || cert.NotBefore.After(found.NotBefore) ||
+					(cert.NotBefore.Equal(found.NotBefore) && sum < CertSHA256(found.Raw)) {
 					found = cert
 				}
 			}
@@ -426,18 +507,21 @@ func Protect(ctx context.Context, raw []byte, from string, rcpts []string, sign,
 				if reason != nil {
 					return nil, fmt.Errorf("%s: %w", addr, reason)
 				}
-				return nil, fmt.Errorf("邮箱名片中缺少 %s 的可用加密证书", addr)
+				if pinned != "" {
+					return nil, fmt.Errorf("selected S/MIME encryption certificate for %s not found or untrusted", addr)
+				}
+				return nil, fmt.Errorf("no usable S/MIME encryption certificate found for recipient %s", addr)
 			}
 			recipients = append(recipients, found)
 		}
-		self, err := ownCertificate(ctx, from, "encrypt")
+		self, err := ownCertificate(ctx, from, "encrypt", opts.OwnCertSHA)
 		if err != nil {
 			return nil, err
 		}
 		recipients = append(recipients, self)
 	}
-	if sign {
-		cert, err := ownCertificate(ctx, from, "sign")
+	if opts.Sign {
+		cert, err := ownCertificate(ctx, from, "sign", opts.OwnCertSHA)
 		if err != nil {
 			return nil, err
 		}
@@ -455,7 +539,7 @@ func Protect(ctx context.Context, raw []byte, from string, rcpts []string, sign,
 		case crypto.SHA1:
 			sd.SetDigestAlgorithm(pkcs7.OIDDigestAlgorithmSHA1)
 		default:
-			return nil, errors.New("硬件 Key 没有可用的签名算法")
+			return nil, errors.New("selected S/MIME certificate has no usable signing algorithm")
 		}
 		if err = sd.AddSigner(cert, key{ctx, cert}, pkcs7.SignerInfoConfig{}); err != nil {
 			return nil, err
@@ -466,7 +550,7 @@ func Protect(ctx context.Context, raw []byte, from string, rcpts []string, sign,
 		}
 		entity = wrap(der, "signed-data")
 	}
-	if encrypt {
+	if opts.Encrypt {
 		der, err := pkcs7.Encrypt(pkcs.AES256CBC, entity, recipients)
 		if err != nil {
 			return nil, err

@@ -291,6 +291,7 @@ func (a *App) View(c *ui.Context) {
 	a.mail.reader.egressDialog(c)
 	a.mail.reader.unsubscribeDialog(c)
 	a.mail.reader.attachmentConflictDialog(c)
+	a.smimeCertDialog(c)
 	a.mcpSendDialog(c)
 	a.pages[PageSettings].(*settingsPage).importDialog(c)
 	kit.ToastHost(c, i18n.T("toast.close"))

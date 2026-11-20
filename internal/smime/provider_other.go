@@ -8,7 +8,7 @@ import (
 	"errors"
 )
 
-var errUnsupportedPlatform = errors.New("当前平台暂不支持 S/MIME 硬件 Key")
+var errUnsupportedPlatform = errors.New("S/MIME certificates and security keys are not supported on this platform")
 
 func platformSupported() bool { return false }
 
@@ -16,8 +16,11 @@ func newPlatformProvider(bool) provider { return unsupportedProvider{} }
 
 type unsupportedProvider struct{}
 
-func (unsupportedProvider) Identities(context.Context) ([][]byte, error) {
+func (unsupportedProvider) Identities(context.Context) ([]RawIdentity, error) {
 	return nil, errUnsupportedPlatform
+}
+func (unsupportedProvider) FindCertificates(context.Context, string) ([][]byte, error) {
+	return nil, nil
 }
 func (unsupportedProvider) Prepare(context.Context, []byte, []byte) error {
 	return errUnsupportedPlatform
@@ -34,8 +37,8 @@ func (unsupportedProvider) Decrypt(context.Context, []byte, []byte) ([]byte, err
 func (unsupportedProvider) VerifyTrust(context.Context, string, string, [][]byte) error {
 	return errUnsupportedPlatform
 }
-func (unsupportedProvider) VerifyCMS(context.Context, string, []byte, []byte) ([]byte, error) {
-	return nil, errUnsupportedPlatform
+func (unsupportedProvider) VerifyCMS(context.Context, string, []byte, []byte) (cmsVerifyResult, error) {
+	return cmsVerifyResult{}, errUnsupportedPlatform
 }
 func (unsupportedProvider) Retry(context.Context) error { return nil }
 func (unsupportedProvider) Close() error                { return nil }

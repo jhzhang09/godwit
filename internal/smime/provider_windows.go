@@ -77,6 +77,7 @@ type windowsIdentity struct {
 	handle     windows.Handle
 	keySpec    uint32
 	callerFree bool
+	hardware   bool
 }
 
 type windowsProvider struct {
@@ -221,16 +222,7 @@ func (p *windowsProvider) ensureKeys() ([]windowsIdentity, error) {
 		if err := windows.CryptAcquireCertificatePrivateKey(ctx, flags, nil, &handle, &keySpec, &callerFree); err != nil {
 			continue
 		}
-		if !isHardwareKey(handle, keySpec) {
-			if callerFree && handle != 0 {
-				if keySpec == windows.CERT_NCRYPT_KEY_SPEC {
-					_, _, _ = procNCryptFreeObject.Call(uintptr(handle))
-				} else {
-					_ = windows.CryptReleaseContext(handle, 0)
-				}
-			}
-			continue
-		}
+		hardware := isHardwareKey(handle, keySpec)
 		var retainedCert *windows.CertContext
 		if !callerFree {
 			// Retain an independent key handle or keep a duplicated cert context so cached handles stay valid past CertCloseStore.
@@ -251,6 +243,7 @@ func (p *windowsProvider) ensureKeys() ([]windowsIdentity, error) {
 			handle:     handle,
 			keySpec:    keySpec,
 			callerFree: callerFree,
+			hardware:   hardware,
 		})
 	}
 	p.items = items
@@ -267,7 +260,7 @@ func (p *windowsProvider) findKey(certDER []byte) (windowsIdentity, error) {
 			return it, nil
 		}
 	}
-	return windowsIdentity{}, errors.New("请插入与邮件证书匹配的硬件 Key")
+	return windowsIdentity{}, errors.New("matching personal S/MIME certificate or security key not found")
 }
 
 func (p *windowsProvider) handleHardwareErr(idKey string, code uint32) error {
@@ -278,17 +271,52 @@ func (p *windowsProvider) handleHardwareErr(idKey string, code uint32) error {
 	if p.session && isWindowsAuthFailure(code) {
 		p.failures[idKey] = err.Error()
 	}
-	return fmt.Errorf("硬件操作失败 (0x%08x): %w", code, err)
+	return fmt.Errorf("private key operation failed (0x%08x): %w", code, err)
 }
 
-func (p *windowsProvider) Identities(context.Context) ([][]byte, error) {
+func (p *windowsProvider) Identities(context.Context) ([]RawIdentity, error) {
 	items, err := p.ensureKeys()
 	if err != nil {
 		return nil, err
 	}
-	out := make([][]byte, len(items))
+	out := make([]RawIdentity, len(items))
 	for i, it := range items {
-		out[i] = bytes.Clone(it.der)
+		out[i] = RawIdentity{DER: bytes.Clone(it.der), Hardware: it.hardware}
+	}
+	return out, nil
+}
+
+func (p *windowsProvider) FindCertificates(_ context.Context, email string) ([][]byte, error) {
+	seen := map[string]bool{}
+	var out [][]byte
+	for _, storeName := range []string{"AddressBook", "MY"} {
+		wname, err := windows.UTF16PtrFromString(storeName)
+		if err != nil {
+			continue
+		}
+		store, err := windows.CertOpenSystemStore(0, wname)
+		if err != nil {
+			continue
+		}
+		var prev *windows.CertContext
+		for {
+			cctx, err := windows.CertEnumCertificatesInStore(store, prev)
+			if err != nil {
+				break
+			}
+			prev = cctx
+			der := bytes.Clone(unsafe.Slice(cctx.EncodedCert, cctx.Length))
+			cert, err := ParseCertificate(der)
+			if err != nil || !MatchesMailbox(cert, email) {
+				continue
+			}
+			sum := CertSHA256(cert.Raw)
+			if !seen[sum] {
+				seen[sum] = true
+				out = append(out, der)
+			}
+		}
+		_ = windows.CertCloseStore(store, 0)
 	}
 	return out, nil
 }
@@ -329,7 +357,7 @@ func (p *windowsProvider) DigestAlgorithm(_ context.Context, certDER []byte) (cr
 		return crypto.SHA1, nil
 	}
 	_ = e1
-	return 0, errors.New("硬件 Key 没有可用的签名算法")
+	return 0, errors.New("selected S/MIME certificate has no usable signing algorithm")
 }
 
 func (p *windowsProvider) Sign(_ context.Context, certDER []byte, hash crypto.Hash, digest []byte) ([]byte, error) {
@@ -350,10 +378,10 @@ func (p *windowsProvider) Sign(_ context.Context, certDER []byte, hash crypto.Ha
 	case crypto.SHA1:
 		algName, calg, wantLen = "SHA1", calgSHA1, 20
 	default:
-		return nil, errors.New("不支持的硬件签名摘要")
+		return nil, errors.New("unsupported signature digest algorithm")
 	}
 	if len(digest) != wantLen {
-		return nil, errors.New("签名摘要长度无效")
+		return nil, errors.New("invalid signature digest length")
 	}
 
 	if id.keySpec == windows.CERT_NCRYPT_KEY_SPEC {
@@ -404,7 +432,7 @@ func (p *windowsProvider) Sign(_ context.Context, certDER []byte, hash crypto.Ha
 			code = uint32(errno)
 		}
 		if hash == crypto.SHA256 && code == uint32(windows.NTE_BAD_ALGID) {
-			return nil, errors.New("硬件 Key 不支持 SHA-256 签名算法")
+			return nil, errors.New("selected S/MIME key does not support SHA-256 signing")
 		}
 		return nil, p.handleHardwareErr(idKey, code)
 	}
@@ -446,7 +474,7 @@ func (p *windowsProvider) Sign(_ context.Context, certDER []byte, hash crypto.Ha
 
 func (p *windowsProvider) Decrypt(_ context.Context, certDER, ciphertext []byte) ([]byte, error) {
 	if len(ciphertext) == 0 {
-		return nil, errors.New("缺少硬件操作数据")
+		return nil, errors.New("missing ciphertext data")
 	}
 	id, err := p.findKey(certDER)
 	if err != nil {
@@ -522,27 +550,27 @@ func (p *windowsProvider) Decrypt(_ context.Context, certDER, ciphertext []byte)
 
 func (p *windowsProvider) VerifyTrust(_ context.Context, usage, email string, certsDER [][]byte) error {
 	if email == "" || len(certsDER) == 0 {
-		return errors.New("缺少 S/MIME 证书或邮箱地址")
+		return errors.New("missing S/MIME certificate or email address")
 	}
 	leaf, err := ParseCertificate(certsDER[0])
 	if err != nil {
-		return errors.New("无效的 X.509 证书")
+		return errors.New("invalid X.509 certificate")
 	}
 	if !MatchesMailbox(leaf, email) {
-		return fmt.Errorf("证书邮箱与 %s 不匹配", email)
+		return fmt.Errorf("certificate email does not match %s", email)
 	}
 	if leaf.KeyUsage != 0 {
 		switch usage {
 		case "sign":
 			if leaf.KeyUsage&(smx509.KeyUsageDigitalSignature|smx509.KeyUsageContentCommitment) == 0 {
-				return errors.New("证书不支持数字签名用途")
+				return errors.New("certificate key usage does not allow digital signatures")
 			}
 		case "encrypt":
 			if leaf.KeyUsage&smx509.KeyUsageKeyEncipherment == 0 {
-				return errors.New("证书不支持密钥加密用途")
+				return errors.New("certificate key usage does not allow key encipherment")
 			}
 		default:
-			return errors.New("未知的证书用途")
+			return errors.New("unknown certificate usage")
 		}
 	}
 
@@ -555,7 +583,7 @@ func (p *windowsProvider) VerifyTrust(_ context.Context, usage, email string, ce
 	var leafCtx *windows.CertContext
 	for i, der := range certsDER {
 		if len(der) == 0 {
-			return errors.New("无效的 X.509 证书")
+			return errors.New("invalid X.509 certificate")
 		}
 		var ctx *windows.CertContext
 		var outArg uintptr
@@ -578,7 +606,7 @@ func (p *windowsProvider) VerifyTrust(_ context.Context, usage, email string, ce
 		}
 	}
 	if leafCtx == nil {
-		return errors.New("无法加载待验证证书")
+		return errors.New("unable to load certificate for verification")
 	}
 	defer windows.CertFreeCertificateContext(leafCtx)
 
@@ -594,7 +622,7 @@ func (p *windowsProvider) VerifyTrust(_ context.Context, usage, email string, ce
 	}
 	var chain *windows.CertChainContext
 	if err := windows.CertGetCertificateChain(0, leafCtx, nil, memStore, &para, certChainCacheOnlyURLRetrieval, 0, &chain); err != nil {
-		return fmt.Errorf("证书不受信任: %w", err)
+		return fmt.Errorf("certificate is not trusted: %w", err)
 	}
 	defer windows.CertFreeCertificateChain(chain)
 
@@ -603,17 +631,17 @@ func (p *windowsProvider) VerifyTrust(_ context.Context, usage, email string, ce
 	var policyStatus windows.CertChainPolicyStatus
 	policyStatus.Size = uint32(unsafe.Sizeof(policyStatus))
 	if err := windows.CertVerifyCertificateChainPolicy(windows.CERT_CHAIN_POLICY_BASE, chain, &policyPara, &policyStatus); err != nil {
-		return fmt.Errorf("证书不受信任: %w", err)
+		return fmt.Errorf("certificate is not trusted: %w", err)
 	}
 	if policyStatus.Error != 0 {
-		return fmt.Errorf("证书不受信任: %w", windows.Errno(policyStatus.Error))
+		return fmt.Errorf("certificate is not trusted: %w", windows.Errno(policyStatus.Error))
 	}
 	return nil
 }
 
-func (p *windowsProvider) VerifyCMS(ctx context.Context, email string, cmsDER, detached []byte) ([]byte, error) {
-	if len(cmsDER) == 0 || email == "" {
-		return nil, errors.New("缺少签名或发件人")
+func (p *windowsProvider) VerifyCMS(ctx context.Context, email string, cmsDER, detached []byte) (cmsVerifyResult, error) {
+	if len(cmsDER) == 0 {
+		return cmsVerifyResult{}, errors.New("missing signature data")
 	}
 	var flags uint32
 	if detached != nil {
@@ -628,13 +656,13 @@ func (p *windowsProvider) VerifyCMS(ctx context.Context, email string, cmsDER, d
 		0,
 	)
 	if hMsg == 0 {
-		return nil, e1
+		return cmsVerifyResult{}, e1
 	}
 	defer func() { _, _, _ = procCryptMsgClose.Call(hMsg) }()
 
 	r1, _, e1 := procCryptMsgUpdate.Call(hMsg, uintptr(unsafe.Pointer(&cmsDER[0])), uintptr(len(cmsDER)), 1)
 	if r1 == 0 {
-		return nil, fmt.Errorf("S/MIME 签名无效: %w", e1)
+		return cmsVerifyResult{}, fmt.Errorf("invalid S/MIME signature: %w", e1)
 	}
 	if detached != nil {
 		var ptr unsafe.Pointer
@@ -645,35 +673,56 @@ func (p *windowsProvider) VerifyCMS(ctx context.Context, email string, cmsDER, d
 		}
 		r1, _, e1 = procCryptMsgUpdate.Call(hMsg, uintptr(ptr), uintptr(len(detached)), 1)
 		if r1 == 0 {
-			return nil, fmt.Errorf("分离签名无效: %w", e1)
+			return cmsVerifyResult{}, fmt.Errorf("invalid detached signature: %w", e1)
 		}
 	}
 
 	var signerCount uint32
 	cbCount := uint32(unsafe.Sizeof(signerCount))
+	var verifyErr error
 	r1, _, e1 = procCryptMsgGetParam.Call(hMsg, uintptr(cmsgSignerCountParam), 0, uintptr(unsafe.Pointer(&signerCount)), uintptr(unsafe.Pointer(&cbCount)))
 	if r1 == 0 {
-		return nil, e1
+		verifyErr = e1
+	} else if signerCount != 1 {
+		verifyErr = errors.New("unable to identify unique S/MIME signer")
 	}
-	if signerCount != 1 {
-		return nil, errors.New("无法确定唯一的 S/MIME 签名人")
+
+	var contentBytes []byte
+	if detached != nil {
+		contentBytes = detached
+	} else {
+		var cbContent uint32
+		r1, _, e1 = procCryptMsgGetParam.Call(hMsg, uintptr(cmsgContentParam), 0, 0, uintptr(unsafe.Pointer(&cbContent)))
+		if r1 == 0 || cbContent == 0 {
+			return cmsVerifyResult{}, errors.New("signature contains no content")
+		}
+		content := make([]byte, cbContent)
+		r1, _, e1 = procCryptMsgGetParam.Call(hMsg, uintptr(cmsgContentParam), 0, uintptr(unsafe.Pointer(&content[0])), uintptr(unsafe.Pointer(&cbContent)))
+		if r1 == 0 {
+			return cmsVerifyResult{}, e1
+		}
+		contentBytes = content[:cbContent]
+	}
+
+	if verifyErr != nil {
+		return cmsVerifyResult{content: contentBytes, verifyErr: verifyErr}, nil
 	}
 
 	msgStore, err := windows.CertOpenStore(windows.CERT_STORE_PROV_MSG, windows.X509_ASN_ENCODING|windows.PKCS_7_ASN_ENCODING, 0, 0, hMsg)
 	if err != nil {
-		return nil, err
+		return cmsVerifyResult{content: contentBytes, verifyErr: err}, nil
 	}
 	defer windows.CertCloseStore(msgStore, 0)
 
 	var cbInfo uint32
 	r1, _, e1 = procCryptMsgGetParam.Call(hMsg, uintptr(cmsgSignerCertInfoParam), 0, 0, uintptr(unsafe.Pointer(&cbInfo)))
 	if r1 == 0 || cbInfo == 0 {
-		return nil, fmt.Errorf("缺少签名证书: %w", e1)
+		return cmsVerifyResult{content: contentBytes, verifyErr: fmt.Errorf("missing signer certificate: %w", e1)}, nil
 	}
 	infoBuf := make([]byte, cbInfo)
 	r1, _, e1 = procCryptMsgGetParam.Call(hMsg, uintptr(cmsgSignerCertInfoParam), 0, uintptr(unsafe.Pointer(&infoBuf[0])), uintptr(unsafe.Pointer(&cbInfo)))
 	if r1 == 0 {
-		return nil, fmt.Errorf("缺少签名证书: %w", e1)
+		return cmsVerifyResult{content: contentBytes, verifyErr: fmt.Errorf("missing signer certificate: %w", e1)}, nil
 	}
 
 	rCtx, _, e1 := procCertGetSubjectCertificateFromStore.Call(
@@ -682,17 +731,21 @@ func (p *windowsProvider) VerifyCMS(ctx context.Context, email string, cmsDER, d
 		uintptr(unsafe.Pointer(&infoBuf[0])),
 	)
 	if rCtx == 0 {
-		return nil, fmt.Errorf("缺少签名证书: %w", e1)
+		return cmsVerifyResult{content: contentBytes, verifyErr: fmt.Errorf("missing signer certificate: %w", e1)}, nil
 	}
 	signerCtx := (*windows.CertContext)(unsafe.Pointer(rCtx))
 	defer windows.CertFreeCertificateContext(signerCtx)
 
-	r1, _, e1 = procCryptMsgControl.Call(hMsg, 0, uintptr(cmsgCtrlVerifySignature), uintptr(unsafe.Pointer(signerCtx.CertInfo)))
-	if r1 == 0 {
-		return nil, fmt.Errorf("S/MIME 签名无效: %w", e1)
+	signerDER := bytes.Clone(unsafe.Slice(signerCtx.EncodedCert, signerCtx.Length))
+	if email == "" {
+		return cmsVerifyResult{content: contentBytes, signerDER: signerDER, verifyErr: errors.New("signed message lacks a unique sender address")}, nil
 	}
 
-	signerDER := bytes.Clone(unsafe.Slice(signerCtx.EncodedCert, signerCtx.Length))
+	r1, _, e1 = procCryptMsgControl.Call(hMsg, 0, uintptr(cmsgCtrlVerifySignature), uintptr(unsafe.Pointer(signerCtx.CertInfo)))
+	if r1 == 0 {
+		return cmsVerifyResult{content: contentBytes, signerDER: signerDER, verifyErr: fmt.Errorf("invalid S/MIME signature: %w", e1)}, nil
+	}
+
 	certsDER := [][]byte{signerDER}
 	var prev *windows.CertContext
 	for {
@@ -708,23 +761,9 @@ func (p *windowsProvider) VerifyCMS(ctx context.Context, email string, cmsDER, d
 	}
 
 	if err := p.VerifyTrust(ctx, "sign", email, certsDER); err != nil {
-		return nil, fmt.Errorf("签名完整，但发件人证书未通过验证: %w", err)
+		return cmsVerifyResult{content: contentBytes, signerDER: signerDER, verifyErr: fmt.Errorf("signature intact, but sender certificate failed verification: %w", err)}, nil
 	}
-	if detached != nil {
-		return detached, nil
-	}
-
-	var cbContent uint32
-	r1, _, e1 = procCryptMsgGetParam.Call(hMsg, uintptr(cmsgContentParam), 0, 0, uintptr(unsafe.Pointer(&cbContent)))
-	if r1 == 0 || cbContent == 0 {
-		return nil, errors.New("签名中没有正文")
-	}
-	content := make([]byte, cbContent)
-	r1, _, e1 = procCryptMsgGetParam.Call(hMsg, uintptr(cmsgContentParam), 0, uintptr(unsafe.Pointer(&content[0])), uintptr(unsafe.Pointer(&cbContent)))
-	if r1 == 0 {
-		return nil, e1
-	}
-	return content[:cbContent], nil
+	return cmsVerifyResult{content: contentBytes, signerDER: signerDER}, nil
 }
 
 func (p *windowsProvider) Retry(context.Context) error {

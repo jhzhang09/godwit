@@ -61,6 +61,9 @@ type settingsPage struct {
 	servers       serverForm                                                                     // the servers dialog's fields
 	reauth        map[int64]bool                                                                 // a browser sign-in runs for the account
 	rechecking    map[int64]bool                                                                 // a receive-only account's sending check runs
+	smimeCerts    map[int64][]core.SMIMEIdentity                                                 // cached personal S/MIME identities per account
+	smimeLoaded   map[int64]bool
+	smimeLoading  map[int64]bool
 	exporting     bool                                                                           // ExportAccounts runs
 	importing     bool                                                                           // OpenFiles + PreviewAccountImport runs
 	importOpen    bool                                                                           // the import confirmation dialog shows

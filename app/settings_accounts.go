@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/url"
 	"os"
@@ -330,6 +331,107 @@ func (p *settingsPage) readUsage(id int64) {
 
 // recheckSending checks a receive-only account's servers again: a pass makes
 // it send, a failure says which step failed.
+func (p *settingsPage) loadSMIMECerts(acc core.Account, force bool) {
+	if !smime.Supported() || acc.ReceiveOnly {
+		return
+	}
+	if !force && (p.smimeLoaded[acc.ID] || p.smimeLoading[acc.ID]) {
+		return
+	}
+	if p.smimeCerts == nil {
+		p.smimeCerts = map[int64][]core.SMIMEIdentity{}
+		p.smimeLoaded = map[int64]bool{}
+		p.smimeLoading = map[int64]bool{}
+	}
+	p.smimeLoading[acc.ID] = true
+	var certs []core.SMIMEIdentity
+	p.a.do(func(ctx context.Context) error {
+		var err error
+		certs, err = p.a.svc.ListOwnSMIMECertificates(ctx, acc.Email)
+		return err
+	}, func(err error) {
+		delete(p.smimeLoading, acc.ID)
+		p.smimeLoaded[acc.ID] = true
+		if err != nil {
+			if force {
+				p.a.toastErr(err)
+			}
+			return
+		}
+		p.smimeCerts[acc.ID] = certs
+	})
+}
+
+func formatSMIMEIdentitySummary(id core.SMIMEIdentity) string {
+	kind := i18n.T("smime.cert.software")
+	if id.Hardware {
+		kind = i18n.T("smime.cert.hardware")
+	}
+	parts := []string{cmp.Or(id.Subject, id.SHA256[:min(12, len(id.SHA256))]), kind}
+	if id.Issuer != "" {
+		parts = append(parts, id.Issuer)
+	}
+	if !id.NotAfter.IsZero() {
+		parts = append(parts, id.NotAfter.Format("2006-01-02"))
+	}
+	if !id.CanSign && !id.CanEncrypt {
+		parts = append(parts, i18n.T("smime.cert.untrusted"))
+	}
+	return strings.Join(parts, " · ")
+}
+
+func (p *settingsPage) activeSMIMEIdentity(acc core.Account) *core.SMIMEIdentity {
+	certs := p.smimeCerts[acc.ID]
+	if acc.SMIMECert != "" {
+		for i := range certs {
+			if certs[i].SHA256 == acc.SMIMECert {
+				return &certs[i]
+			}
+		}
+		return nil
+	}
+	for i := range certs {
+		if certs[i].CanSign || certs[i].CanEncrypt {
+			return &certs[i]
+		}
+	}
+	return nil
+}
+
+func (p *settingsPage) smimeCertOptions(acc core.Account) []kit.Option[string] {
+	autoLabel := i18n.T("smime.cert.auto")
+	for _, id := range p.smimeCerts[acc.ID] {
+		if id.CanSign || id.CanEncrypt {
+			autoLabel = i18n.Tf("smime.cert.auto_selected", formatSMIMEIdentitySummary(id))
+			break
+		}
+	}
+	opts := []kit.Option[string]{
+		{Value: "", Label: autoLabel},
+	}
+	matched := acc.SMIMECert == ""
+	for _, id := range p.smimeCerts[acc.ID] {
+		if id.SHA256 == acc.SMIMECert {
+			matched = true
+		}
+		opts = append(opts, kit.Option[string]{
+			Value: id.SHA256,
+			Label: formatSMIMEIdentitySummary(id),
+		})
+	}
+	if !matched {
+		short := acc.SMIMECert
+		if len(short) > 12 {
+			short = short[:12]
+		}
+		opts = append(opts, kit.Option[string]{
+			Value: acc.SMIMECert,
+			Label: fmt.Sprintf("%s (%s)", short, i18n.T("smime.cert.missing")),
+		})
+	}
+	return opts
+}
+
 func (p *settingsPage) recheckSending(id int64) {
 	a := p.a
 	if p.rechecking[id] {
@@ -541,14 +643,35 @@ func (p *settingsPage) accountView(c *ui.Context, acc core.Account) {
 	}
 	p.accountSignatureView(c, acc)
 	if smime.Supported() && !acc.ReceiveOnly {
+		p.loadSMIMECerts(acc, false)
 		settingsSection(c, "S/MIME", "", func() {
+			settingRow(c, i18n.T("smime.cert"), i18n.T("smime.cert.help"), func() {
+				ui.Row(c).Gap(th.Space(2)).AlignItems(ui.Center).Children(func() {
+					sel := acc.SMIMECert
+					opts := p.smimeCertOptions(acc)
+					settingSelect(c, i18n.T("smime.cert"), &sel, opts)
+					if sel != acc.SMIMECert {
+						p.patch(acc.ID, core.AccountPatch{SMIMECert: &sel}, nil)
+					}
+					if activeID := p.activeSMIMEIdentity(acc); activeID != nil {
+						idCopy := *activeID
+						settingButton(c, i18n.T("smime.cert.view"), kit.Outline, false).OnClick(func() {
+							p.a.openSMIMECertDialog(certViewFromIdentity(idCopy))
+						})
+					}
+					settingButton(c, i18n.T("smime.cert.refresh"), kit.Outline, p.smimeLoading[acc.ID]).OnClick(func() {
+						p.loadSMIMECerts(acc, true)
+					})
+				})
+			})
+		}, func() {
 			sign := acc.SMIMESign
-			if kit.SwitchRow(c, &sign, smimeText("smime.sign"), smimeText("smime.sign.help")).Changed() {
+			if kit.SwitchRow(c, &sign, i18n.T("smime.sign"), i18n.T("smime.sign.help")).Changed() {
 				p.patch(acc.ID, core.AccountPatch{SMIMESign: &sign}, nil)
 			}
 		}, func() {
 			encrypt := acc.SMIMEEncrypt
-			if kit.SwitchRow(c, &encrypt, smimeText("smime.encrypt"), smimeText("smime.encrypt.help")).Changed() {
+			if kit.SwitchRow(c, &encrypt, i18n.T("smime.encrypt"), i18n.T("smime.encrypt.help")).Changed() {
 				p.patch(acc.ID, core.AccountPatch{SMIMEEncrypt: &encrypt}, nil)
 			}
 		})

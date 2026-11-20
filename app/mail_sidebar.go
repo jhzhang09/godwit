@@ -46,14 +46,17 @@ type sideFolder struct {
 	totalSum    int // total messages in it and every folder under it
 }
 
+func folderPathSegs(name, delim string) []string {
+	if delim == "" {
+		return []string{name}
+	}
+	return slices.DeleteFunc(strings.Split(name, delim), func(s string) bool { return s == "" })
+}
+
 // sidebarFolders are an account's folder rows: its role folders in roleOrder
-// (the local drafts for missing drafts), then its own folders as a tree split on the server's
-// delimiter, each parent before its children and siblings by name, with a row
-// for a parent only named in paths. Folders under a role folder (Courier's
-// INBOX.Projects) show at the top, but keep the role folder in their key.
-// Only folders that map onto a row are folded into it: Gmail's Starred into
-// 已标星 at the top, its All Mail into 归档 when there is no archive. The rest
-// show as they are.
+// (the local drafts for missing drafts), each followed by its own subfolders
+// (such as INBOX/Team or 已归档/Help) indented beneath it, then top-level
+// user folders as a tree split on the server's delimiter.
 func sidebarFolders(acc int64, fs []core.Folder) []sideFolder {
 	byRole := map[string]core.Folder{}
 	for _, f := range fs {
@@ -67,32 +70,31 @@ func sidebarFolders(acc int64, fs []core.Folder) []sideFolder {
 	if byRole["drafts"].Role == "" {
 		byRole["drafts"] = core.Folder{AccountID: acc, Role: "drafts"}
 	}
-	var out []sideFolder
+
+	roleRows := make(map[string]*sideFolder, len(roleOrder))
+	roleChildren := make(map[string]map[string]*sideFolder)
 	for _, r := range roleOrder {
 		if f, ok := byRole[r]; ok {
-			out = append(out, sideFolder{Folder: f, name: folderName(f), depth: 1, sum: f.Unread, totalSum: f.Total})
+			key := ""
+			if f.ID != 0 && f.Name != "" {
+				key = strings.Join(folderPathSegs(f.Name, f.Delim), "\x00")
+			}
+			roleRows[r] = &sideFolder{Folder: f, name: folderName(f), key: key, depth: 1, sum: f.Unread, totalSum: f.Total}
 		}
 	}
-	nodes := map[string]*sideFolder{}
-	for _, f := range fs {
-		if f.Role != "" {
-			continue
-		}
-		segs := []string{f.Name}
-		if f.Delim != "" {
-			segs = slices.DeleteFunc(strings.Split(f.Name, f.Delim), func(s string) bool { return s == "" })
-		}
-		top := 0 // segments of the role folder it is under, shown by no row
-		for _, r := range fs {
-			if p := r.Name + f.Delim; r.Role != "" && f.Delim != "" && strings.HasPrefix(f.Name, p) {
-				top = max(top, min(len(strings.Split(r.Name, f.Delim)), len(segs)-1))
-			}
-		}
-		for k := top + 1; k <= len(segs); k++ {
+
+	rootNodes := map[string]*sideFolder{}
+	insertSubtree := func(nodes map[string]*sideFolder, segs []string, startIdx, baseDepth int, f core.Folder) {
+		for k := startIdx + 1; k <= len(segs); k++ {
 			key := strings.Join(segs[:k], "\x00")
 			n := nodes[key]
 			if n == nil {
-				n = &sideFolder{Folder: core.Folder{AccountID: acc}, name: segs[k-1], key: key, depth: k - top}
+				n = &sideFolder{
+					Folder: core.Folder{AccountID: acc},
+					name:   segs[k-1],
+					key:    key,
+					depth:  baseDepth + (k - startIdx),
+				}
 				nodes[key] = n
 			}
 			n.sum += f.Unread
@@ -104,9 +106,58 @@ func sidebarFolders(acc int64, fs []core.Folder) []sideFolder {
 			}
 		}
 	}
+
+	for _, f := range fs {
+		if f.Role != "" {
+			continue
+		}
+		segs := folderPathSegs(f.Name, f.Delim)
+		parentRole := ""
+		parentLen := 0
+		if f.Delim != "" {
+			for rKey, rr := range roleRows {
+				if rr.ID == 0 || rr.Name == "" {
+					continue
+				}
+				rSegs := folderPathSegs(rr.Name, f.Delim)
+				if len(rSegs) > 0 && len(rSegs) < len(segs) && len(rSegs) > parentLen && slices.Equal(segs[:len(rSegs)], rSegs) {
+					parentRole = rKey
+					parentLen = len(rSegs)
+				}
+			}
+		}
+		if parentRole != "" {
+			rr := roleRows[parentRole]
+			rr.kids = true
+			rr.sum += f.Unread
+			rr.totalSum += f.Total
+			children := roleChildren[parentRole]
+			if children == nil {
+				children = map[string]*sideFolder{}
+				roleChildren[parentRole] = children
+			}
+			insertSubtree(children, segs, parentLen, rr.depth, f)
+			continue
+		}
+		insertSubtree(rootNodes, segs, 0, 0, f)
+	}
+
+	var out []sideFolder
 	// "\x00" sorts before any other byte: a parent's subtree comes right after it.
-	for _, k := range slices.Sorted(maps.Keys(nodes)) {
-		out = append(out, *nodes[k])
+	for _, r := range roleOrder {
+		rr, ok := roleRows[r]
+		if !ok {
+			continue
+		}
+		out = append(out, *rr)
+		if children := roleChildren[r]; len(children) > 0 {
+			for _, k := range slices.Sorted(maps.Keys(children)) {
+				out = append(out, *children[k])
+			}
+		}
+	}
+	for _, k := range slices.Sorted(maps.Keys(rootNodes)) {
+		out = append(out, *rootNodes[k])
 	}
 	return out
 }

@@ -23,6 +23,7 @@ export function SendBar({
   sending,
   frozen,
   anyway = false,
+  className = "ml-auto",
   onSend,
   onSendNow = onSend,
   onSendLater,
@@ -34,6 +35,7 @@ export function SendBar({
   frozen: boolean;
   /** Plugins warned about this send: the button reads 仍然发送, and onSend goes ahead despite them. */
   anyway?: boolean;
+  className?: string;
   onSend(): void;
   /** The menu's Send now: now, whatever onSend's warned send was for (onSend if absent). */
   onSendNow?(): void;
@@ -67,7 +69,7 @@ export function SendBar({
   };
   const off = sending || frozen;
   return (
-    <ButtonGroup className="ml-auto">
+    <ButtonGroup className={className}>
       <Button disabled={off} onClick={onSend}>
         {t(anyway ? "compose.send_anyway" : "compose.send")}
       </Button>

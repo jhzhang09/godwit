@@ -33,8 +33,8 @@ func TestDarwinProviderPureGo(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, len(ders), len(warmDers))
 	t.Logf("darwin smart-card identities found: %d (cold=%s, warm=%s)", len(ders), coldDur, warmDur)
-	for i, hwDER := range ders {
-		cert, err := ParseCertificate(hwDER)
+	for i, id := range ders {
+		cert, err := ParseCertificate(id.DER)
 		require.NoError(t, err)
 		var email string
 		if len(cert.EmailAddresses) > 0 {
@@ -49,13 +49,20 @@ func TestDarwinProviderPureGo(t *testing.T) {
 				}
 			}
 		}
+		var trustErr error
 		if email != "" {
-			require.NoError(t, p.VerifyTrust(t.Context(), "sign", email, [][]byte{hwDER}), "identity[%d] %s", i, email)
+			trustErr = p.VerifyTrust(t.Context(), "sign", email, [][]byte{id.DER})
+			if id.Hardware {
+				require.NoError(t, trustErr, "identity[%d] %s", i, email)
+			}
 		}
-		hash, err := p.DigestAlgorithm(t.Context(), hwDER)
+		hash, err := p.DigestAlgorithm(t.Context(), id.DER)
 		require.NoError(t, err)
-		t.Logf("identity[%d] email=%s digest=%v", i, email, hash)
+		t.Logf("identity[%d] hw=%v email=%s trusted=%v digest=%v", i, id.Hardware, email, trustErr == nil, hash)
 	}
+	found, err := p.FindCertificates(t.Context(), "jhzhang@tendyron.com")
+	require.NoError(t, err)
+	t.Logf("darwin system cert lookup jhzhang@tendyron.com: %d", len(found))
 
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
 	require.NoError(t, err)

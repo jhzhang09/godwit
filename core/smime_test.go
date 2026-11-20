@@ -6,8 +6,11 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
+	"encoding/pem"
 	"fmt"
+	"github.com/egoist/mygo/plugins/sqlite"
 	"github.com/emmansun/gmsm/pkcs7"
 	"github.com/godwit-email/godwit/core/gateway"
 	"github.com/godwit-email/godwit/core/internal/testllm"
@@ -18,6 +21,7 @@ import (
 	"math/big"
 	"net/mail"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -72,7 +76,7 @@ func TestSMIMEFailureKeepsDraft(t *testing.T) {
 			} else {
 				require.Error(t, err)
 			}
-			require.ErrorContains(t, e.s.Send(t.Context(), d.ID), "手动发送")
+			require.ErrorIs(t, e.s.Send(t.Context(), d.ID), ErrSMIMEManualSend)
 			require.Empty(t, e.rows(t, "SELECT id FROM outbox"))
 			saved, err := e.s.GetDraft(ctx, d.ID)
 			require.NoError(t, err)
@@ -587,4 +591,158 @@ func TestSMIMEDecryptedBodyUIOnlySkillsWitAndCacheBypass(t *testing.T) {
 		_, ok := e.s.decryptedBody(uiCtx, encID)
 		return !ok
 	}, time.Second, time.Millisecond)
+}
+
+func TestSMIMEStandardCertificateSourcesAndSelection(t *testing.T) {
+	e := newSendEnv(t, false)
+	ctx := WithUISession(t.Context(), e.s)
+
+	makeCert := func(email, cn string, serial int64, offset time.Duration) []byte {
+		key, err := rsa.GenerateKey(rand.Reader, 2048)
+		require.NoError(t, err)
+		now := time.Now()
+		tmpl := &x509.Certificate{
+			SerialNumber:   big.NewInt(serial),
+			Subject:        pkix.Name{CommonName: cn},
+			EmailAddresses: []string{email},
+			NotBefore:      now.Add(offset),
+			NotAfter:       now.Add(24 * time.Hour),
+			KeyUsage:       x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+		require.NoError(t, err)
+		return der
+	}
+
+	// 1. Generic .vcf in a standard folder (Archive, NOT '邮箱名片') and .cer in INBOX are indexed,
+	//    while certificates placed in Trash are ignored.
+	_ = e.im.User.Create("Trash", nil)
+	bobVCardDER := makeCert("bob@example.com", "Bob Archive Card", 101, -2*time.Hour)
+	carolCerDER := makeCert("carol@example.com", "Carol Inbox CER", 102, -time.Hour)
+	trashDER := makeCert("trash@example.com", "Ignored Trash Cert", 103, -time.Hour)
+
+	b64Bob := base64.StdEncoding.EncodeToString(bobVCardDER)
+	bobCard := "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Bob\r\nKEY;ENCODING=BASE64:" + b64Bob + "\r\nEMAIL:bob@example.com\r\nEND:VCARD\r\n"
+	msgVCard := withAttachments("sender@example.com", "card in archive", 1)
+	msgVCard = strings.ReplaceAll(msgVCard, "application/pdf", "text/vcard")
+	msgVCard = strings.ReplaceAll(msgVCard, "f0.pdf", "bob.vcf")
+	e.put(t, "Archive", strings.ReplaceAll(msgVCard, "JVBERi0xLjQK", base64.StdEncoding.EncodeToString([]byte(bobCard))))
+
+	pemCarol := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: carolCerDER})
+	msgCer := withAttachments("carol@example.com", "cert in inbox", 1)
+	msgCer = strings.ReplaceAll(msgCer, "application/pdf", "application/pkix-cert")
+	msgCer = strings.ReplaceAll(msgCer, "f0.pdf", "carol.cer")
+	e.put(t, "INBOX", strings.ReplaceAll(msgCer, "JVBERi0xLjQK", base64.StdEncoding.EncodeToString(pemCarol)))
+
+	msgTrash := withAttachments("trash@example.com", "junk cert", 1)
+	msgTrash = strings.ReplaceAll(msgTrash, "application/pdf", "application/pkix-cert")
+	msgTrash = strings.ReplaceAll(msgTrash, "f0.pdf", "trash.cer")
+	e.put(t, "Trash", strings.ReplaceAll(msgTrash, "JVBERi0xLjQK", base64.StdEncoding.EncodeToString(trashDER)))
+
+	e.sync(t)
+	require.NoError(t, e.s.exec(ctx, sqlite.Statement{SQL: "UPDATE folders SET role = 'trash' WHERE name = 'Trash'"}))
+
+	certs, err := e.s.mailboxCertificates(ctx, e.acc.ID, []string{"bob@example.com", "carol@example.com", "trash@example.com"})
+	require.NoError(t, err)
+	require.Len(t, certs["bob@example.com"], 1)
+	require.Equal(t, bobVCardDER, certs["bob@example.com"][0].Raw)
+	require.Len(t, certs["carol@example.com"], 1)
+	require.Equal(t, carolCerDER, certs["carol@example.com"][0].Raw)
+	require.Empty(t, certs["trash@example.com"])
+
+	// 2. CardDAV parsed certificate helper extracts matching cert for upsert.
+	daveDER := makeCert("dave@example.com", "Dave CardDAV", 104, -time.Hour)
+	daveCard := "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Dave\r\nEMAIL:dave@example.com\r\nKEY;ENCODING=BASE64:" +
+		base64.StdEncoding.EncodeToString(daveDER) + "\r\nEND:VCARD\r\n"
+	pc := carddav.ParseVCard(daveCard)
+	preparedCerts := carddavPreparedCerts(pc, []carddav.CardEmail{{AddrKey: "dave@example.com"}})
+	require.Len(t, preparedCerts, 1)
+	require.NoError(t, e.s.exec(ctx, upsertSMIMECertStmt(preparedCerts[0].addrKey, CertSourceCardDAV, preparedCerts[0].cert, time.Now().Unix())))
+
+	// 3. Verified incoming signer cert and manual certificate file import + pinning + removal.
+	aliceSigDER := makeCert("bob@example.com", "Bob Signed Mail", 105, -30*time.Minute)
+	require.NoError(t, e.s.RecordSMIMESignerCert(ctx, "Bob <bob@example.com>", aliceSigDER))
+
+	impDER := makeCert("bob@example.com", "Bob Manual File", 106, -15*time.Minute)
+	impPath := filepath.Join(t.TempDir(), "bob.pem")
+	require.NoError(t, os.WriteFile(impPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: impDER}), 0o600))
+
+	// Importing with mismatched target address is rejected cleanly.
+	_, err = e.s.ImportContactCertificateFile(ctx, "other@example.com", impPath)
+	require.ErrorIs(t, err, ErrSMIMECertAddressMismatch)
+
+	imported, err := e.s.ImportContactCertificateFile(ctx, "bob@example.com", impPath)
+	require.NoError(t, err)
+	require.Len(t, imported, 1)
+	require.Equal(t, CertSourceImported, imported[0].Source)
+	require.NotEmpty(t, imported[0].SerialNumber)
+	require.Equal(t, "RSA (2048 bit)", imported[0].PublicKeyAlgo)
+	require.Equal(t, []string{"bob@example.com"}, imported[0].Emails)
+	require.Len(t, imported[0].SHA1, 40)
+
+	statuses, err := e.s.ListContactCertificates(ctx, []string{"bob@example.com", "dave@example.com", "missing@example.com"})
+	require.NoError(t, err)
+	require.Len(t, statuses, 3)
+	require.Len(t, statuses[0].Certs, 3) // mail_card, mail_sig, imported
+	require.Len(t, statuses[1].Certs, 1)
+	require.Equal(t, CertSourceCardDAV, statuses[1].Certs[0].Source)
+	require.Equal(t, "rcpt_missing", statuses[2].ErrorCode)
+	require.Empty(t, statuses[2].Error)
+
+	// Selecting and clearing a preferred certificate persists smime.rcpt.<addr>.
+	bobSigSHA := smime.CertSHA256(aliceSigDER)
+	require.NoError(t, e.s.SelectContactCertificate(ctx, "bob@example.com", bobSigSHA))
+	statuses, err = e.s.ListContactCertificates(ctx, []string{"bob@example.com"})
+	require.NoError(t, err)
+	var selectedCount int
+	for _, c := range statuses[0].Certs {
+		if c.Selected {
+			selectedCount++
+			require.Equal(t, bobSigSHA, c.SHA256)
+		}
+	}
+	require.Equal(t, 1, selectedCount)
+
+	// Removing an imported cert deletes it and clears selection if it had been selected.
+	require.NoError(t, e.s.SelectContactCertificate(ctx, "bob@example.com", imported[0].SHA256))
+	require.NoError(t, e.s.RemoveContactCertificate(ctx, "bob@example.com", imported[0].SHA256))
+	statuses, err = e.s.ListContactCertificates(ctx, []string{"bob@example.com"})
+	require.NoError(t, err)
+	require.Len(t, statuses[0].Certs, 2)
+	for _, c := range statuses[0].Certs {
+		require.False(t, c.Selected)
+	}
+
+	// 4. Account SMIMECert setting + Draft S/MIME overrides + DeleteDraft cleanup.
+	pinnedAccountCert := "deadbeef00112233"
+	acc, err := e.s.UpdateAccount(ctx, e.acc.ID, AccountPatch{SMIMECert: &pinnedAccountCert})
+	require.NoError(t, err)
+	require.Equal(t, pinnedAccountCert, acc.SMIMECert)
+	gotAcc, err := e.s.ListAccounts(ctx)
+	require.NoError(t, err)
+	require.Equal(t, pinnedAccountCert, gotAcc[0].SMIMECert)
+	emptyCert := ""
+	acc, err = e.s.UpdateAccount(ctx, e.acc.ID, AccountPatch{SMIMECert: &emptyCert})
+	require.NoError(t, err)
+	require.Empty(t, acc.SMIMECert)
+
+	d, err := e.s.NewDraft(ctx, e.acc.ID, "new", 0)
+	require.NoError(t, err)
+	d.To = []string{"bob@example.com"}
+	d, err = e.s.SaveDraft(ctx, d)
+	require.NoError(t, err)
+
+	signOn, encOn := true, true
+	dst, err := e.s.SetDraftSMIME(ctx, d.ID, &signOn, &encOn, map[string]string{"bob@example.com": bobSigSHA})
+	require.NoError(t, err)
+	require.True(t, dst.Sign)
+	require.True(t, dst.Encrypt)
+	require.Len(t, dst.Recipients, 1)
+	for _, c := range dst.Recipients[0].Certs {
+		require.Equal(t, c.SHA256 == bobSigSHA, c.Selected)
+	}
+
+	require.NoError(t, e.s.DeleteDraft(ctx, d.ID))
+	rows := e.rows(t, "SELECT value FROM settings WHERE key = ?", draftSMIMEKey(d.ID))
+	require.Empty(t, rows)
 }

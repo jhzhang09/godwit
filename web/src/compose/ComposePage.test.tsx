@@ -19,6 +19,9 @@ vi.mock("@/mygo", () => ({
     send: vi.fn(),
     popupMenu: vi.fn(),
     setModel: vi.fn(),
+    smimeStatus: vi.fn(),
+    setSMIME: vi.fn(),
+    importSMIMECertificate: vi.fn(),
   },
   events: {
     closing: {

@@ -250,7 +250,8 @@ func (p *ComposePage) Load(ctx context.Context) (ComposeState, error) {
 	out := ComposeState{SignatureHTML: sig, Wit: wit, DraftID: d.ID, From: d.AccountID, To: nz(d.To), Cc: nz(d.Cc), Bcc: nz(d.Bcc),
 		ReplyTo: d.ReplyTo, Subject: d.Subject, Body: editable, Quote: mail.HTMLToText(s.quote),
 		Attachments: attachments(d), Revision: d.Revision,
-		UpdatedAt: d.UpdatedAt.UnixMilli(), Theme: ThemeOf(st), Locale: i18n.Language(), FromProgram: d.FromProgram}
+		UpdatedAt: d.UpdatedAt.UnixMilli(), Theme: ThemeOf(st), Locale: i18n.Language(), FromProgram: d.FromProgram,
+		SMIME: smimeOf(ctx, svc, d.ID)}
 	for _, a := range accs {
 		if a.Kind != core.KindLocalArchive && !a.ReceiveOnly { // no sender
 			out.Accounts = append(out.Accounts, Account{ID: a.ID, Email: a.Email})
@@ -464,6 +465,70 @@ func (p *ComposePage) PopupMenu(ctx context.Context, items []string, x, y int) (
 	return p.d.PopupMenu(win, items, x, y), nil
 }
 
+// SMIMEStatus returns live S/MIME sign/encrypt readiness and certificate options for this draft.
+func (p *ComposePage) SMIMEStatus(ctx context.Context) (ComposeSMIME, error) {
+	_, svc, s, err := p.open(ctx)
+	if err != nil {
+		return ComposeSMIME{}, err
+	}
+	draftID := s.draftID
+	s.mu.Unlock()
+	st, err := svc.DraftSMIMEStatus(ctx, draftID)
+	if err != nil {
+		return ComposeSMIME{}, err
+	}
+	return toComposeSMIME(st), nil
+}
+
+// SetSMIME updates per-draft S/MIME signing/encryption toggles or pinned recipient certificates.
+func (p *ComposePage) SetSMIME(ctx context.Context, sign, encrypt *bool, pinned map[string]string) (ComposeSMIME, error) {
+	_, svc, s, err := p.open(ctx)
+	if err != nil {
+		return ComposeSMIME{}, err
+	}
+	draftID := s.draftID
+	s.mu.Unlock()
+	st, err := svc.SetDraftSMIME(ctx, draftID, sign, encrypt, pinned)
+	if err != nil {
+		return ComposeSMIME{}, err
+	}
+	return toComposeSMIME(st), nil
+}
+
+// ImportSMIMECertificate prompts for a certificate file (.cer/.crt/.der/.pem/.p7b/.vcf)
+// for address and refreshes the draft's S/MIME status.
+func (p *ComposePage) ImportSMIMECertificate(ctx context.Context, address string) (ComposeSMIME, error) {
+	win, svc, s, err := p.open(ctx)
+	if err != nil {
+		return ComposeSMIME{}, err
+	}
+	draftID := s.draftID
+	s.mu.Unlock()
+	if p.d.PickFiles == nil {
+		return ComposeSMIME{}, ErrNoPicker
+	}
+	paths, err := p.d.PickFiles(ctx, win)
+	if err != nil {
+		return ComposeSMIME{}, err
+	}
+	_, svc, s, err = p.open(ctx)
+	if err != nil {
+		return ComposeSMIME{}, err
+	}
+	draftID = s.draftID
+	s.mu.Unlock()
+	if len(paths) > 0 {
+		if _, err := svc.ImportContactCertificateFile(ctx, address, paths[0]); err != nil {
+			return ComposeSMIME{}, err
+		}
+	}
+	st, err := svc.DraftSMIMEStatus(ctx, draftID)
+	if err != nil {
+		return ComposeSMIME{}, err
+	}
+	return toComposeSMIME(st), nil
+}
+
 // Closed is the page's final flush for the close attempt gen, the payload
 // of the Closing event it answers: saved reports whether it succeeded.
 func (p *ComposePage) Closed(ctx context.Context, gen int, saved bool) error {
@@ -492,7 +557,90 @@ func changeOf(ctx context.Context, svc Service, d core.Draft) (Change, error) {
 	_, _, sig := mail.SplitDraft(d.HTML)
 	shown, err := svc.SignatureShown(ctx, sig)
 	return Change{Revision: d.Revision, Attachments: attachments(d), SignatureHTML: shown,
-		UpdatedAt: d.UpdatedAt.UnixMilli()}, err
+		UpdatedAt: d.UpdatedAt.UnixMilli(), SMIME: smimeOf(ctx, svc, d.ID)}, err
+}
+
+func smimeOf(ctx context.Context, svc Service, draftID int64) *ComposeSMIME {
+	st, err := svc.DraftSMIMEStatus(ctx, draftID)
+	if err != nil {
+		return nil
+	}
+	out := toComposeSMIME(st)
+	return &out
+}
+
+func toComposeSMIME(st core.DraftSMIMEStatus) ComposeSMIME {
+	own := make([]ComposeSMIMEIdentity, 0, len(st.OwnCerts))
+	for _, id := range st.OwnCerts {
+		own = append(own, ComposeSMIMEIdentity{
+			SHA256:        id.SHA256,
+			Subject:       id.Subject,
+			SubjectDN:     id.SubjectDN,
+			Issuer:        id.Issuer,
+			IssuerDN:      id.IssuerDN,
+			Emails:        nz(id.Emails),
+			SerialNumber:  id.SerialNumber,
+			NotBefore:     id.NotBefore.UnixMilli(),
+			NotAfter:      id.NotAfter.UnixMilli(),
+			PublicKeyAlgo: id.PublicKeyAlgo,
+			SignatureAlgo: id.SignatureAlgo,
+			KeyUsages:     nz(id.KeyUsages),
+			ExtKeyUsages:  nz(id.ExtKeyUsages),
+			SHA1:          id.SHA1,
+			Hardware:      id.Hardware,
+			CanSign:       id.CanSign,
+			CanEncrypt:    id.CanEncrypt,
+		})
+	}
+	rcpts := make([]ComposeRecipientSMIME, 0, len(st.Recipients))
+	for _, r := range st.Recipients {
+		certs := make([]ComposeSMIMECert, 0, len(r.Certs))
+		for _, c := range r.Certs {
+			certs = append(certs, ComposeSMIMECert{
+				SHA256:        c.SHA256,
+				Address:       c.Address,
+				Source:        c.Source,
+				Subject:       c.Subject,
+				SubjectDN:     c.SubjectDN,
+				Issuer:        c.Issuer,
+				IssuerDN:      c.IssuerDN,
+				Emails:        nz(c.Emails),
+				SerialNumber:  c.SerialNumber,
+				NotBefore:     c.NotBefore.UnixMilli(),
+				NotAfter:      c.NotAfter.UnixMilli(),
+				PublicKeyAlgo: c.PublicKeyAlgo,
+				SignatureAlgo: c.SignatureAlgo,
+				KeyUsages:     nz(c.KeyUsages),
+				ExtKeyUsages:  nz(c.ExtKeyUsages),
+				SHA1:          c.SHA1,
+				Trusted:       c.Trusted,
+				TrustErr:      c.TrustErr,
+				Selected:      c.Selected,
+			})
+		}
+		rcpts = append(rcpts, ComposeRecipientSMIME{
+			Address:   r.Address,
+			Ready:     r.Ready,
+			Selected:  r.Selected,
+			Error:     r.Error,
+			ErrorCode: r.ErrorCode,
+			Certs:     certs,
+		})
+	}
+	return ComposeSMIME{
+		Supported:        st.Supported,
+		From:             st.From,
+		Sign:             st.Sign,
+		Encrypt:          st.Encrypt,
+		OwnCertSHA:       st.OwnCertSHA,
+		OwnReady:         st.OwnReady,
+		OwnError:         st.OwnError,
+		OwnErrorCode:     st.OwnErrorCode,
+		OwnCerts:         own,
+		Recipients:       rcpts,
+		CanSendSigned:    st.CanSendSigned,
+		CanSendEncrypted: st.CanSendEncrypted,
+	}
 }
 
 // attachments is d's attachments for the page, never nil.

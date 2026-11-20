@@ -240,6 +240,8 @@ type Service struct {
 	securityWake      chan struct{} // wakes the security scanner
 	reclaimWake       chan struct{} // wakes the free-space reclaimer (reclaimSoon)
 	smime             *smimeState
+	smimeTablesOnce   sync.Once
+	smimeTablesErr    error
 	labelJudge        func(context.Context) (ai.Judge, error)
 	securityJudge     func(context.Context) (ai.Judge, error)
 	securityRaw       func(context.Context, int64) ([]byte, error)
@@ -433,6 +435,10 @@ func New(ctx context.Context, opts Options) (*Service, error) {
 		s.startSecurityScanner()
 	}
 	s.startImagePrefetch()
+	if err := s.ensureSMIMETables(ctx); err != nil {
+		s.Close()
+		return nil, fmt.Errorf("smime tables: %w", err)
+	}
 	if err := s.repairSMIMEHasAttachments(ctx); err != nil {
 		s.Close()
 		return nil, fmt.Errorf("smime attachments: %w", err)

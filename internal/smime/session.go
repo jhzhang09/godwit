@@ -69,6 +69,18 @@ func (s *Session) OpenCMS(ctx context.Context, fromHeader string, der []byte) (O
 	return OpenCMS(context.WithValue(ctx, sessionKey{}, s), fromHeader, der)
 }
 
+// OpenForRead decrypts and unwraps raw for display in the reader; signature/trust failures
+// populate Opened.VerifyErr instead of discarding decrypted content.
+func (s *Session) OpenForRead(ctx context.Context, raw []byte) (Opened, error) {
+	return OpenForRead(context.WithValue(ctx, sessionKey{}, s), raw)
+}
+
+// OpenCMSForRead unwraps and decrypts a single application/pkcs7-mime part for display in the reader;
+// signature/trust failures populate Opened.VerifyErr instead of discarding decrypted content.
+func (s *Session) OpenCMSForRead(ctx context.Context, fromHeader string, der []byte) (Opened, error) {
+	return OpenCMSForRead(context.WithValue(ctx, sessionKey{}, s), fromHeader, der)
+}
+
 // Prepare 仅对已配置邮箱的卡做一次随机挑战，触发系统自己的 PIN 窗口。
 func (s *Session) Prepare(emails []string) error {
 	ctx := context.WithValue(s.lifetime, sessionKey{}, s)

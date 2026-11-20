@@ -15,6 +15,7 @@ import (
 	"github.com/godwit-email/godwit/internal/i18n"
 	"github.com/godwit-email/godwit/internal/icons"
 	"github.com/godwit-email/godwit/internal/kit"
+	"github.com/godwit-email/godwit/internal/smime"
 	"github.com/godwit-email/godwit/internal/theme"
 )
 
@@ -44,6 +45,11 @@ type contactsPage struct {
 
 	avatars    map[string]*contactAvatar // by primary address and newest message, as settingsSavedVer was
 	avatarsVer uint64
+
+	certs        []core.RecipientSMIMEStatus
+	certsOf      string
+	certsLoading bool
+	certsGen     uint64
 }
 
 // contactAvatar is a contact's sender avatar once read; nil while it is read,
@@ -203,6 +209,9 @@ func (p *contactsPage) load() {
 			p.mailList = &ui.ListState{} // another's mail starts at its top
 		}
 		p.all, p.detail, p.detailOf, p.mail, p.cursor, p.more = all, d, addr, mail, cursor, false
+		if ct, idx := findContact(all, addr); idx >= 0 {
+			p.loadCerts(ct)
+		}
 	})
 }
 
@@ -503,12 +512,207 @@ func (p *contactsPage) detailView(c *ui.Context) {
 				})
 				kit.Separator(c, false)
 			})
+			p.smimeCertsSection(c, ct, addrs)
 			kit.Text(c, i18n.Tf("contacts.mail", ct.Messages), t.Text.Xs).FontWeight(500).TextColor(t.Muted).Padding(0, th.Space(3))
 		})
 	}).Grow(1)
 	if _, last := p.mailList.Visible(); ready && last >= len(mail)-5 {
 		p.loadMore()
 	}
+}
+
+func (p *contactsPage) loadCerts(ct core.Contact) {
+	if !smime.Supported() {
+		return
+	}
+	addrs := contactAddrs(ct)
+	emails := make([]string, 0, len(addrs))
+	for _, ea := range addrs {
+		if ea.Address != "" {
+			emails = append(emails, ea.Address)
+		}
+	}
+	if len(emails) == 0 {
+		p.certs, p.certsOf, p.certsLoading = nil, ct.Address, false
+		return
+	}
+	p.certsGen++
+	gen := p.certsGen
+	target := ct.Address
+	p.certsLoading = true
+	var list []core.RecipientSMIMEStatus
+	p.a.do(func(ctx context.Context) error {
+		var err error
+		list, err = p.a.svc.ListContactCertificates(ctx, emails)
+		return err
+	}, func(err error) {
+		if gen != p.certsGen {
+			return
+		}
+		p.certsLoading = false
+		if err != nil {
+			return
+		}
+		p.certs = list
+		p.certsOf = target
+	})
+}
+
+func (p *contactsPage) importCert(ct core.Contact, targetAddr string) {
+	a := p.a
+	plat := a.plat
+	var imported []core.SMIMECertificate
+	a.do(func(ctx context.Context) error {
+		paths, err := plat.OpenFiles(false)
+		if err != nil || len(paths) == 0 {
+			return err
+		}
+		imported, err = a.svc.ImportContactCertificateFile(ctx, targetAddr, paths[0])
+		return err
+	}, func(err error) {
+		if err != nil {
+			a.toastErr(err)
+			return
+		}
+		if len(imported) == 0 {
+			return
+		}
+		a.toastAs(kit.ToastSuccess, i18n.T("smime.contacts.imported_ok"))
+		p.loadCerts(ct)
+	})
+}
+
+func (p *contactsPage) selectCert(ct core.Contact, addr, sha string) {
+	a := p.a
+	a.do(func(ctx context.Context) error {
+		return a.svc.SelectContactCertificate(ctx, addr, sha)
+	}, func(err error) {
+		if err != nil {
+			a.toastErr(err)
+			return
+		}
+		p.loadCerts(ct)
+	})
+}
+
+func (p *contactsPage) removeCert(ct core.Contact, addr, sha string) {
+	a := p.a
+	a.do(func(ctx context.Context) error {
+		return a.svc.RemoveContactCertificate(ctx, addr, sha)
+	}, func(err error) {
+		if err != nil {
+			a.toastErr(err)
+			return
+		}
+		p.loadCerts(ct)
+	})
+}
+
+func (p *contactsPage) smimeCertsSection(c *ui.Context, ct core.Contact, addrs []core.ContactAddress) {
+	if !smime.Supported() {
+		return
+	}
+	if ct.Address != p.certsOf && !p.certsLoading {
+		p.loadCerts(ct)
+	}
+	t, th := theme.Of(c), c.Theme()
+	ui.Column(c).FillWidth().Gap(th.Space(2.5)).Children(func() {
+		ui.Row(c).FillWidth().AlignItems(ui.Center).Children(func() {
+			kit.Text(c, i18n.T("smime.contacts.title"), t.Text.Xs).FontWeight(500).TextColor(t.Muted).Padding(0, th.Space(3))
+			ui.Spacer(c)
+			importBtn := kit.Button(c, i18n.T("smime.contacts.import"), kit.ButtonOpts{Variant: kit.Outline, Size: kit.SizeSm})
+			if len(addrs) <= 1 {
+				importBtn.OnClick(func() { p.importCert(ct, ct.Address) })
+			} else {
+				importBtn.Menu(func(m *ui.Menu) {
+					for _, ea := range addrs {
+						addr := ea.Address
+						if m.Item(addr).Chosen() {
+							p.importCert(ct, addr)
+						}
+					}
+				})
+			}
+		})
+		if p.certsLoading && p.certsOf != ct.Address {
+			ui.Row(c).Padding(0, th.Space(3)).Children(func() { kit.Spinner(c) })
+			return
+		}
+		hasAnyCert := false
+		for _, st := range p.certs {
+			if len(st.Certs) > 0 {
+				hasAnyCert = true
+				break
+			}
+		}
+		if !hasAnyCert {
+			kit.Text(c, i18n.T("smime.contacts.empty"), t.Text.Xs).TextColor(t.Muted).Padding(0, th.Space(3))
+			kit.Separator(c, false)
+			return
+		}
+		for _, st := range p.certs {
+			if len(st.Certs) == 0 {
+				continue
+			}
+			if len(p.certs) > 1 {
+				kit.Text(c, st.Address, t.Text.Xs).FontWeight(500).TextColor(t.Muted).Padding(0, th.Space(3))
+			}
+			for _, cert := range st.Certs {
+				cert := cert
+				addr := st.Address
+				autoActive := !cert.Selected && st.Selected == cert.SHA256 && cert.Trusted
+				kit.Block(c, ui.Column(c), kit.ToneRaised).FillWidth().Padding(th.Space(2.5), th.Space(3)).Gap(th.Space(1.5)).Children(func() {
+					ui.Row(c).FillWidth().Wrap().Gap(th.Space(1.5)).AlignItems(ui.Center).Children(func() {
+						kit.Text(c, cmp.Or(cert.Subject, addr), t.Text.Sm).FontWeight(500)
+						kit.Badge(c, smimeSourceLabel(cert.Source))
+						switch {
+						case cert.Selected:
+							kit.Badge(c, i18n.T("smime.contacts.selected"))
+						case autoActive:
+							kit.Badge(c, i18n.T("smime.contacts.auto_active"))
+						case !cert.Trusted:
+							kit.Badge(c, i18n.T("smime.contacts.untrusted"))
+						}
+					})
+					short := cert.SHA256
+					if len(short) > 12 {
+						short = short[:12]
+					}
+					meta := []string{
+						i18n.Tf("smime.contacts.expires", cert.NotAfter.Format("2006-01-02")),
+						short,
+					}
+					if cert.Issuer != "" {
+						meta = append([]string{cert.Issuer}, meta...)
+					}
+					kit.Text(c, strings.Join(meta, " · "), t.Text.Xs).TextColor(t.Muted)
+					if !cert.Trusted && cert.TrustErr != "" {
+						kit.Text(c, cert.TrustErr, t.Text.Xs).TextColor(t.Danger)
+					}
+					ui.Row(c).Gap(th.Space(2)).Padding(th.Space(0.5), 0, 0, 0).Children(func() {
+						label := i18n.T("smime.contacts.select")
+						nextSHA := cert.SHA256
+						if cert.Selected {
+							label = i18n.T("smime.contacts.unselect")
+							nextSHA = ""
+						}
+						if kit.Button(c, label, kit.ButtonOpts{Variant: kit.Outline, Size: kit.SizeSm}).Clicked() {
+							p.selectCert(ct, addr, nextSHA)
+						}
+						if kit.Button(c, i18n.T("smime.cert.view"), kit.ButtonOpts{Variant: kit.Outline, Size: kit.SizeSm}).Clicked() {
+							p.a.openSMIMECertDialog(certViewFromCoreCert(cert))
+						}
+						if cert.Source == core.CertSourceImported {
+							if kit.Button(c, i18n.T("smime.contacts.remove"), kit.ButtonOpts{Variant: kit.Ghost, Size: kit.SizeSm}).Clicked() {
+								p.removeCert(ct, addr, cert.SHA256)
+							}
+						}
+					})
+				})
+			}
+		}
+		kit.Separator(c, false)
+	})
 }
 
 // addressLine is the contact's first address, a menu of what to do with it,

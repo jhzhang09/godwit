@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"maps"
 	"mime"
 	netmail "net/mail"
 	"os"
@@ -577,6 +578,7 @@ func (s *Service) deleteDraft(ctx context.Context, id int64) error {
 	if r.Changes == 0 {
 		return fmt.Errorf("draft %d not found", id)
 	}
+	_ = s.exec(ctx, sqlite.Statement{SQL: "DELETE FROM settings WHERE key = ?", Args: []any{draftSMIMEKey(id)}})
 	return os.RemoveAll(s.draftDir(id))
 }
 
@@ -822,10 +824,14 @@ func (s *Service) enqueue(ctx context.Context, draftID, rev int64, checked []str
 	if err != nil {
 		return err
 	}
-	if acc.SMIMESign || acc.SMIMEEncrypt {
+	smimeSign, smimeEncrypt, smimePins, err := s.effectiveDraftSMIME(ctx, acc, draftID)
+	if err != nil {
+		return err
+	}
+	if smimeSign || smimeEncrypt {
 		// 不在持有草稿、插件和运行记录锁时下载名片或等待用户输入 PIN。
 		if uiSessionFromContext(ctx) == nil || rs != nil && rs.ruleID != 0 {
-			return errors.New("请在 Godwit 中手动发送启用了 S/MIME 的邮件")
+			return ErrSMIMEManualSend
 		}
 		unlock()
 		unlock = nil
@@ -844,7 +850,11 @@ func (s *Service) enqueue(ctx context.Context, draftID, rev int64, checked []str
 		if err != nil {
 			return err
 		}
-		if current.SMIMESign != acc.SMIMESign || current.SMIMEEncrypt != acc.SMIMEEncrypt || !slices.Equal(checkerIDs(s.sendCheckersLocked()), checked) {
+		curSign, curEncrypt, curPins, err := s.effectiveDraftSMIME(ctx, current, draftID)
+		if err != nil {
+			return err
+		}
+		if curSign != smimeSign || curEncrypt != smimeEncrypt || current.SMIMECert != acc.SMIMECert || !maps.Equal(curPins, smimePins) || !slices.Equal(checkerIDs(s.sendCheckersLocked()), checked) {
 			return ErrStaleDraft
 		}
 	}

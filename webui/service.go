@@ -25,6 +25,7 @@ type Service interface {
 	CompactConversation(ctx context.Context, id int64) error
 	DeleteDraftIfEmpty(ctx context.Context, id, revision int64) (deleted bool, err error)
 	DraftForApproval(ctx context.Context, approvalID int64) (int64, error)
+	DraftSMIMEStatus(ctx context.Context, draftID int64) (core.DraftSMIMEStatus, error)
 	EditProposedRule(ctx context.Context, id int64) (core.Rule, error)
 	FailQuestion(ctx context.Context, conv int64, question string, quoted []int64, reason string) error
 	ForgetImageFailure(urls []string)
@@ -33,6 +34,7 @@ type Service interface {
 	GetMessageLazyImages(ctx context.Context, id int64, loadRemoteImages bool) (core.Message, error)
 	GetSettings(ctx context.Context) (core.Settings, error)
 	ImagesAllowed(ctx context.Context, message int64) (bool, error)
+	ImportContactCertificateFile(ctx context.Context, address, path string) ([]core.SMIMECertificate, error)
 	InlineImages(ctx context.Context, id int64, each func(cid string, a mail.Attachment)) error
 	ListAccounts(ctx context.Context) ([]core.Account, error)
 	ListApprovals(ctx context.Context, conversationID int64) ([]core.Approval, error)
@@ -55,6 +57,7 @@ type Service interface {
 	RunConversation(ctx context.Context, runID int64) (int64, error)
 	SaveDraft(ctx context.Context, d core.Draft) (core.Draft, error)
 	SearchWith(ctx context.Context, q core.SearchQuery, limit int) ([]core.MessageSummary, error)
+	SelectContactCertificate(ctx context.Context, address, sha256 string) error
 	SendAcknowledgedRevision(ctx context.Context, draftID, revision int64, digest string) error
 	SendLater(ctx context.Context, draftID, revision int64, at time.Time, digest string) error
 	SendRevision(ctx context.Context, draftID, revision int64) error
@@ -62,6 +65,7 @@ type Service interface {
 	SetConversationModel(ctx context.Context, id int64, ref, effort string) error
 	SetDraftAccount(ctx context.Context, id, accountID, revision int64) (core.Draft, error)
 	SetDraftModel(ctx context.Context, draftID int64, model string) error
+	SetDraftSMIME(ctx context.Context, draftID int64, sign, encrypt *bool, pinnedCerts map[string]string) (core.DraftSMIMEStatus, error)
 	SignatureEditor(ctx context.Context, id int64) (string, error)
 	SignatureShown(ctx context.Context, block string) (string, error)
 	SubscribeConversation(id int64) (<-chan core.WitEvent, func())

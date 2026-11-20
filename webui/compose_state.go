@@ -7,6 +7,76 @@ type Account struct {
 	Email string `json:"email"`
 }
 
+// ComposeSMIMEIdentity describes one personal S/MIME certificate for the sender account.
+type ComposeSMIMEIdentity struct {
+	SHA256        string   `json:"sha256"`
+	Subject       string   `json:"subject"`
+	SubjectDN     string   `json:"subjectDn,omitempty"`
+	Issuer        string   `json:"issuer"`
+	IssuerDN      string   `json:"issuerDn,omitempty"`
+	Emails        []string `json:"emails"`
+	SerialNumber  string   `json:"serialNumber,omitempty"`
+	NotBefore     int64    `json:"notBefore"`
+	NotAfter      int64    `json:"notAfter"`
+	PublicKeyAlgo string   `json:"publicKeyAlgo,omitempty"`
+	SignatureAlgo string   `json:"signatureAlgo,omitempty"`
+	KeyUsages     []string `json:"keyUsages"`
+	ExtKeyUsages  []string `json:"extKeyUsages"`
+	SHA1          string   `json:"sha1,omitempty"`
+	Hardware      bool     `json:"hardware"`
+	CanSign       bool     `json:"canSign"`
+	CanEncrypt    bool     `json:"canEncrypt"`
+}
+
+// ComposeSMIMECert describes one candidate S/MIME encryption certificate for a recipient.
+type ComposeSMIMECert struct {
+	SHA256        string   `json:"sha256"`
+	Address       string   `json:"address"`
+	Source        string   `json:"source"`
+	Subject       string   `json:"subject"`
+	SubjectDN     string   `json:"subjectDn,omitempty"`
+	Issuer        string   `json:"issuer"`
+	IssuerDN      string   `json:"issuerDn,omitempty"`
+	Emails        []string `json:"emails"`
+	SerialNumber  string   `json:"serialNumber,omitempty"`
+	NotBefore     int64    `json:"notBefore"`
+	NotAfter      int64    `json:"notAfter"`
+	PublicKeyAlgo string   `json:"publicKeyAlgo,omitempty"`
+	SignatureAlgo string   `json:"signatureAlgo,omitempty"`
+	KeyUsages     []string `json:"keyUsages"`
+	ExtKeyUsages  []string `json:"extKeyUsages"`
+	SHA1          string   `json:"sha1,omitempty"`
+	Trusted       bool     `json:"trusted"`
+	TrustErr      string   `json:"trustErr,omitempty"`
+	Selected      bool     `json:"selected"`
+}
+
+// ComposeRecipientSMIME describes S/MIME encryption certificate readiness for one recipient.
+type ComposeRecipientSMIME struct {
+	Address   string             `json:"address"`
+	Ready     bool               `json:"ready"`
+	Selected  string             `json:"selected,omitempty"`
+	Error     string             `json:"error,omitempty"`
+	ErrorCode string             `json:"errorCode,omitempty"`
+	Certs     []ComposeSMIMECert `json:"certs"`
+}
+
+// ComposeSMIME is the S/MIME signing, encryption, and certificate state for a compose draft.
+type ComposeSMIME struct {
+	Supported        bool                    `json:"supported"`
+	From             string                  `json:"from"`
+	Sign             bool                    `json:"sign"`
+	Encrypt          bool                    `json:"encrypt"`
+	OwnCertSHA       string                  `json:"ownCertSha,omitempty"`
+	OwnReady         bool                    `json:"ownReady"`
+	OwnError         string                  `json:"ownError,omitempty"`
+	OwnErrorCode     string                  `json:"ownErrorCode,omitempty"`
+	OwnCerts         []ComposeSMIMEIdentity  `json:"ownCerts"`
+	Recipients       []ComposeRecipientSMIME `json:"recipients"`
+	CanSendSigned    bool                    `json:"canSendSigned"`
+	CanSendEncrypted bool                    `json:"canSendEncrypted"`
+}
+
 // Attachment is a file attached to the draft.
 type Attachment struct {
 	// ID names it to RemoveAttachment; Size is in bytes.
@@ -49,6 +119,8 @@ type ComposeState struct {
 	// FromProgram is core.Draft.FromProgram: a program wrote or changed the
 	// draft, so the page asks the user to check it before sending (ADR 0043).
 	FromProgram bool `json:"fromProgram"`
+	// SMIME is the draft's S/MIME sign/encrypt policy and certificate readiness.
+	SMIME *ComposeSMIME `json:"smime,omitempty"`
 }
 
 // ComposeEdit is what the page saves: the fields it edits, and the revision
@@ -84,6 +156,8 @@ type Change struct {
 	SignatureHTML string `json:"signatureHtml"`
 	// UpdatedAt is when the draft was last stored, in Unix milliseconds.
 	UpdatedAt int64 `json:"updatedAt"`
+	// SMIME refreshes S/MIME state when the sender account changes.
+	SMIME *ComposeSMIME `json:"smime,omitempty"`
 }
 
 // AttachResult is the outcome of adding files: a partial success is no error.

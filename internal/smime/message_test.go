@@ -7,10 +7,11 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/asn1"
 	"encoding/base64"
+	"encoding/pem"
 	"fmt"
-	"github.com/emmansun/gmsm/pkcs7"
-	"github.com/stretchr/testify/require"
 	"math/big"
 	"net/mail"
 	"os"
@@ -18,7 +19,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/emmansun/gmsm/pkcs7"
 	"github.com/emmansun/gmsm/smx509"
+	"github.com/stretchr/testify/require"
 )
 
 func TestDetachedBytes(t *testing.T) {
@@ -97,7 +100,11 @@ func TestSignedContentTamperAndFrom(t *testing.T) {
 	p7.Content = content
 	require.NoError(t, p7.Verify())
 	raw := "From: other@example.org\r\nContent-Type: multipart/signed; protocol=\"application/pkcs7-signature\"; boundary=part\r\n\r\n--part\r\n" + string(content) + "\r\n--part\r\nContent-Type: application/pkcs7-signature\r\nContent-Transfer-Encoding: base64\r\n\r\n" + base64.StdEncoding.EncodeToString(sig) + "\r\n--part--\r\n"
-	for _, tc := range []struct{ raw, reason string }{{raw, "邮箱与 other@example.org"}, {strings.Replace(raw, "From: other@example.org", "From: =?gb2312?B?suLK1A==?= <other@example.org>", 1), "邮箱与 other@example.org"}, {strings.Replace(raw, "original", "altered", 1), "签名无效"}} {
+	for _, tc := range []struct{ raw, reason string }{
+		{raw, "does not match other@example.org"},
+		{strings.Replace(raw, "From: other@example.org", "From: =?gb2312?B?suLK1A==?= <other@example.org>", 1), "does not match other@example.org"},
+		{strings.Replace(raw, "original", "altered", 1), "invalid S/MIME signature"},
+	} {
 		result, err := Open(t.Context(), []byte(tc.raw))
 		require.ErrorContains(t, err, tc.reason)
 		require.Empty(t, result.Entity)
@@ -158,10 +165,10 @@ func TestOpenCMSSignedTamperAndFrom(t *testing.T) {
 		der    []byte
 		reason string
 	}{
-		{"other@example.org", cms, "邮箱与 other@example.org"},
-		{"=?gb2312?B?suLK1A==?= <other@example.org>", cms, "邮箱与 other@example.org"},
-		{"alice@example.org, bob@example.org", cms, "证书邮箱与  不匹配"},
-		{"alice@example.org", bytes.ReplaceAll(cms, []byte("original"), []byte("altered!")), "签名无效"},
+		{"other@example.org", cms, "does not match other@example.org"},
+		{"=?gb2312?B?suLK1A==?= <other@example.org>", cms, "does not match other@example.org"},
+		{"alice@example.org, bob@example.org", cms, "does not match "},
+		{"alice@example.org", bytes.ReplaceAll(cms, []byte("original"), []byte("altered!")), "invalid S/MIME signature"},
 	} {
 		result, err := OpenCMS(t.Context(), tc.from, tc.der)
 		require.ErrorContains(t, err, tc.reason)
@@ -172,7 +179,10 @@ func TestOpenCMSSignedTamperAndFrom(t *testing.T) {
 
 type stubVerifyProvider struct{}
 
-func (stubVerifyProvider) Identities(context.Context) ([][]byte, error) { return nil, nil }
+func (stubVerifyProvider) Identities(context.Context) ([]RawIdentity, error) { return nil, nil }
+func (stubVerifyProvider) FindCertificates(context.Context, string) ([][]byte, error) {
+	return nil, nil
+}
 func (stubVerifyProvider) Prepare(context.Context, []byte, []byte) error {
 	return nil
 }
@@ -186,8 +196,8 @@ func (stubVerifyProvider) Decrypt(context.Context, []byte, []byte) ([]byte, erro
 func (stubVerifyProvider) VerifyTrust(context.Context, string, string, [][]byte) error {
 	return nil
 }
-func (stubVerifyProvider) VerifyCMS(context.Context, string, []byte, []byte) ([]byte, error) {
-	return []byte("Content-Type: text/plain\r\n\r\nok"), nil
+func (stubVerifyProvider) VerifyCMS(context.Context, string, []byte, []byte) (cmsVerifyResult, error) {
+	return cmsVerifyResult{content: []byte("Content-Type: text/plain\r\n\r\nok"), signerDER: []byte{0x01, 0x02}}, nil
 }
 func (stubVerifyProvider) Retry(context.Context) error { return nil }
 func (stubVerifyProvider) Close() error                { return nil }
@@ -203,9 +213,11 @@ func TestSessionVerifyBypassesHardwareGate(t *testing.T) {
 
 	// 通过 providerKey 的纯软件验签必须无阻塞返回。
 	provCtx := context.WithValue(context.WithValue(ctx, sessionKey{}, sess), providerKey{}, stubVerifyProvider{})
-	got, err := verifyCMS(provCtx, "alice@example.org", []byte{0x30, 0x00}, nil)
+	res, err := verifyCMS(provCtx, "alice@example.org", []byte{0x30, 0x00}, nil)
 	require.NoError(t, err)
-	require.Equal(t, []byte("Content-Type: text/plain\r\n\r\nok"), got)
+	require.NoError(t, res.verifyErr)
+	require.Equal(t, []byte("Content-Type: text/plain\r\n\r\nok"), res.content)
+	require.Equal(t, []byte{0x01, 0x02}, res.signerDER)
 
 	if !Supported() {
 		return
@@ -228,4 +240,334 @@ func TestSessionVerifyBypassesHardwareGate(t *testing.T) {
 	// 真实系统 VerifyTrust / VerifyCMS 在 session.gate 被持有时也应立即返回（此处因自签名返回不信任错误，但绝不阻塞）。
 	_, err = sess.OpenCMS(ctx, "untrusted@example.org", cms)
 	require.Error(t, err)
+}
+
+type softwareProvider struct {
+	identities []RawIdentity
+	keys       map[string]*rsa.PrivateKey
+	trustErr   error
+}
+
+func (p *softwareProvider) Identities(context.Context) ([]RawIdentity, error) {
+	return p.identities, nil
+}
+func (p *softwareProvider) FindCertificates(context.Context, string) ([][]byte, error) {
+	return nil, nil
+}
+func (p *softwareProvider) Prepare(context.Context, []byte, []byte) error { return nil }
+func (p *softwareProvider) DigestAlgorithm(context.Context, []byte) (crypto.Hash, error) {
+	return crypto.SHA256, nil
+}
+func (p *softwareProvider) Sign(_ context.Context, certDER []byte, hash crypto.Hash, digest []byte) ([]byte, error) {
+	k := p.keys[CertSHA256(certDER)]
+	if k == nil {
+		return nil, fmt.Errorf("missing key")
+	}
+	return rsa.SignPKCS1v15(rand.Reader, k, hash, digest)
+}
+func (p *softwareProvider) Decrypt(_ context.Context, certDER, data []byte) ([]byte, error) {
+	k := p.keys[CertSHA256(certDER)]
+	if k == nil {
+		return nil, fmt.Errorf("missing key")
+	}
+	return rsa.DecryptPKCS1v15(rand.Reader, k, data)
+}
+func (p *softwareProvider) VerifyTrust(context.Context, string, string, [][]byte) error {
+	return p.trustErr
+}
+func (p *softwareProvider) VerifyCMS(_ context.Context, _ string, der, detached []byte) (cmsVerifyResult, error) {
+	pkt, err := pkcs7.Parse(der)
+	if err != nil {
+		return cmsVerifyResult{}, err
+	}
+	if len(detached) > 0 {
+		pkt.Content = detached
+	}
+	if err := pkt.Verify(); err != nil {
+		return cmsVerifyResult{content: pkt.Content, verifyErr: err}, nil
+	}
+	if p.trustErr != nil {
+		return cmsVerifyResult{content: pkt.Content, verifyErr: p.trustErr}, nil
+	}
+	var signerDER []byte
+	if signer := pkt.GetOnlySigner(); signer != nil {
+		signerDER = signer.Raw
+	}
+	return cmsVerifyResult{content: pkt.Content, signerDER: signerDER}, nil
+}
+func (p *softwareProvider) Retry(context.Context) error { return nil }
+func (p *softwareProvider) Close() error                { return nil }
+
+func TestCertificateBundleListAndProtectWith(t *testing.T) {
+	now := time.Now()
+	makeCert := func(email, cn string, notBefore time.Time) (*rsa.PrivateKey, *smx509.Certificate) {
+		k, err := rsa.GenerateKey(rand.Reader, 2048)
+		require.NoError(t, err)
+		tmpl := &x509.Certificate{
+			SerialNumber:   big.NewInt(notBefore.UnixNano()),
+			Subject:        pkix.Name{CommonName: cn},
+			EmailAddresses: []string{email},
+			NotBefore:      notBefore,
+			NotAfter:       now.Add(24 * time.Hour),
+			KeyUsage:       x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &k.PublicKey, k)
+		require.NoError(t, err)
+		cert, err := ParseCertificate(der)
+		require.NoError(t, err)
+		return k, cert
+	}
+
+	aliceKeyOld, aliceCertOld := makeCert("alice@example.org", "Alice Old", now.Add(-2*time.Hour))
+	aliceKeyNew, aliceCertNew := makeCert("alice@example.org", "Alice New", now.Add(-time.Hour))
+	bobKeyOld, bobCertOld := makeCert("bob@example.org", "Bob Old", now.Add(-2*time.Hour))
+	bobKeyNew, bobCertNew := makeCert("bob@example.org", "Bob New", now.Add(-time.Hour))
+
+	// ParseCertificateBundle handles DER, multi-PEM, and CMS SignedData bundles.
+	bundlePEM := append(
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: bobCertOld.Raw}),
+		pem.EncodeToMemory(&pem.Block{Type: "X509 CERTIFICATE", Bytes: bobCertNew.Raw})...,
+	)
+	parsedPEM, err := ParseCertificateBundle(bundlePEM)
+	require.NoError(t, err)
+	require.Len(t, parsedPEM, 2)
+
+	sd, err := pkcs7.NewSignedData([]byte("bundle"))
+	require.NoError(t, err)
+	require.NoError(t, sd.AddSigner(bobCertOld, bobKeyOld, pkcs7.SignerInfoConfig{}))
+	p7b, err := sd.Finish()
+	require.NoError(t, err)
+	parsedP7B, err := ParseCertificateBundle(p7b)
+	require.NoError(t, err)
+	require.Len(t, parsedP7B, 1)
+	require.Equal(t, CertSHA256(bobCertOld.Raw), CertSHA256(parsedP7B[0].Raw))
+
+	prov := &softwareProvider{
+		identities: []RawIdentity{
+			{DER: aliceCertOld.Raw, Hardware: false},
+			{DER: aliceCertNew.Raw, Hardware: true},
+		},
+		keys: map[string]*rsa.PrivateKey{
+			CertSHA256(aliceCertOld.Raw): aliceKeyOld,
+			CertSHA256(aliceCertNew.Raw): aliceKeyNew,
+		},
+	}
+	ctx := context.WithValue(t.Context(), providerKey{}, prov)
+
+	ids, err := ListIdentities(ctx, "alice@example.org")
+	require.NoError(t, err)
+	require.Len(t, ids, 2)
+	// Newest certificate is ordered first.
+	require.Equal(t, CertSHA256(aliceCertNew.Raw), ids[0].SHA256)
+	require.True(t, ids[0].Hardware)
+	require.False(t, ids[1].Hardware)
+
+	// Explicitly pin Alice's older software cert and Bob's older cert.
+	raw := []byte("From: alice@example.org\r\nTo: bob@example.org\r\nSubject: Test\r\nContent-Type: text/plain\r\n\r\nhello pinned")
+	protected, err := ProtectWith(ctx, raw, "alice@example.org", []string{"bob@example.org"}, ProtectOptions{
+		Sign:        true,
+		Encrypt:     true,
+		OwnCertSHA:  CertSHA256(aliceCertOld.Raw),
+		PinnedCerts: map[string]string{"bob@example.org": CertSHA256(bobCertOld.Raw)},
+	}, func(context.Context, []string) (map[string][]*smx509.Certificate, error) {
+		return map[string][]*smx509.Certificate{
+			"bob@example.org": {bobCertNew, bobCertOld},
+		}, nil
+	})
+	require.NoError(t, err)
+
+	// Bob opens with Bob's older key and recovers Alice's older SignerCert.
+	bobProv := &softwareProvider{
+		identities: []RawIdentity{{DER: bobCertOld.Raw}},
+		keys:       map[string]*rsa.PrivateKey{CertSHA256(bobCertOld.Raw): bobKeyOld},
+	}
+	bobCtx := context.WithValue(t.Context(), providerKey{}, bobProv)
+	opened, err := Open(bobCtx, protected)
+	require.NoError(t, err)
+	require.True(t, opened.Encrypted)
+	require.Equal(t, "alice@example.org", opened.Signer)
+	require.Equal(t, CertSHA256(aliceCertOld.Raw), CertSHA256(opened.SignerCert))
+	require.Contains(t, string(opened.Entity), "hello pinned")
+	_ = bobKeyNew
+}
+
+func TestOpenForReadDeliversBodyOnVerifyFailure(t *testing.T) {
+	now := time.Now()
+	makeCert := func(email string) (*rsa.PrivateKey, *smx509.Certificate) {
+		k, err := rsa.GenerateKey(rand.Reader, 2048)
+		require.NoError(t, err)
+		tmpl := &x509.Certificate{
+			SerialNumber:   big.NewInt(now.UnixNano()),
+			EmailAddresses: []string{email},
+			NotBefore:      now.Add(-time.Hour),
+			NotAfter:       now.Add(24 * time.Hour),
+			KeyUsage:       x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &k.PublicKey, k)
+		require.NoError(t, err)
+		cert, err := ParseCertificate(der)
+		require.NoError(t, err)
+		return k, cert
+	}
+
+	aliceKey, aliceCert := makeCert("alice@example.org")
+	bobKey, bobCert := makeCert("bob@example.org")
+
+	aliceProv := &softwareProvider{
+		identities: []RawIdentity{{DER: aliceCert.Raw}},
+		keys:       map[string]*rsa.PrivateKey{CertSHA256(aliceCert.Raw): aliceKey},
+	}
+	aliceCtx := context.WithValue(t.Context(), providerKey{}, aliceProv)
+
+	// 1. Encrypted + Signed mail whose signer cert fails trust validation.
+	raw := []byte("From: alice@example.org\r\nTo: bob@example.org\r\nSubject: Report\r\nContent-Type: text/plain\r\n\r\ndecrypted plaintext body")
+	protected, err := ProtectWith(aliceCtx, raw, "alice@example.org", []string{"bob@example.org"}, ProtectOptions{
+		Sign:    true,
+		Encrypt: true,
+	}, func(context.Context, []string) (map[string][]*smx509.Certificate, error) {
+		return map[string][]*smx509.Certificate{"bob@example.org": {bobCert}}, nil
+	})
+	require.NoError(t, err)
+
+	bobUntrustedProv := &softwareProvider{
+		identities: []RawIdentity{{DER: bobCert.Raw}},
+		keys:       map[string]*rsa.PrivateKey{CertSHA256(bobCert.Raw): bobKey},
+		trustErr:   fmt.Errorf("“alice@example.org”证书使用了无效的密钥大小"),
+	}
+	bobUntrustedCtx := context.WithValue(t.Context(), providerKey{}, bobUntrustedProv)
+
+	// Strict Open still rejects untrusted signed content.
+	_, err = Open(bobUntrustedCtx, protected)
+	require.ErrorContains(t, err, "无效的密钥大小")
+
+	// OpenForRead delivers decrypted plaintext + Encrypted=true + VerifyErr, with empty Signer/SignerCert,
+	// while preserving UnverifiedCert so the user can still inspect the sender's certificate.
+	opened, err := OpenForRead(bobUntrustedCtx, protected)
+	require.NoError(t, err)
+	require.True(t, opened.Encrypted)
+	require.Contains(t, string(opened.Entity), "decrypted plaintext body")
+	require.Contains(t, opened.VerifyErr, "无效的密钥大小")
+	require.Empty(t, opened.Signer)
+	require.Nil(t, opened.SignerCert)
+	require.Equal(t, CertSHA256(aliceCert.Raw), CertSHA256(opened.UnverifiedCert))
+
+	// 2. Also verify Session.OpenCMSForRead delivers content on real OS untrusted/invalid CMS signature.
+	if Supported() {
+		sess := NewSession(t.Context())
+		sd, err := pkcs7.NewSignedData([]byte("Content-Type: text/plain\r\n\r\nreadable despite bad sig"))
+		require.NoError(t, err)
+		sd.SetDigestAlgorithm(pkcs7.OIDDigestAlgorithmSHA256)
+		require.NoError(t, sd.AddSigner(aliceCert, aliceKey, pkcs7.SignerInfoConfig{}))
+		cms, err := sd.Finish()
+		require.NoError(t, err)
+
+		tampered := bytes.ReplaceAll(cms, []byte("despite bad sig"), []byte("despite MOD sig"))
+		_, err = sess.OpenCMS(t.Context(), "alice@example.org", tampered)
+		require.Error(t, err)
+
+		readOpened, err := sess.OpenCMSForRead(t.Context(), "alice@example.org", tampered)
+		require.NoError(t, err)
+		require.Contains(t, string(readOpened.Entity), "despite MOD sig")
+		require.NotEmpty(t, readOpened.VerifyErr)
+		require.Empty(t, readOpened.Signer)
+		require.Nil(t, readOpened.SignerCert)
+		require.Equal(t, CertSHA256(aliceCert.Raw), CertSHA256(readOpened.UnverifiedCert))
+	}
+}
+
+func TestInspectCertificate(t *testing.T) {
+	k, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	now := time.Now().UTC().Truncate(time.Second)
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(0x1234AB),
+		Subject: pkix.Name{
+			CommonName:   "Alice Example",
+			Organization: []string{"Example Corp"},
+		},
+		Issuer: pkix.Name{
+			CommonName:   "Example Internal CA",
+			Organization: []string{"Example Corp"},
+		},
+		EmailAddresses: []string{"Alice@Example.com"},
+		NotBefore:      now.Add(-time.Hour),
+		NotAfter:       now.Add(48 * time.Hour),
+		KeyUsage:       x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:    []x509.ExtKeyUsage{x509.ExtKeyUsageEmailProtection},
+	}
+	parent := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject: pkix.Name{
+			CommonName:   "Example Internal CA",
+			Organization: []string{"Example Corp"},
+		},
+		NotBefore:             now.Add(-2 * time.Hour),
+		NotAfter:              now.Add(72 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, parent, &k.PublicKey, k)
+	require.NoError(t, err)
+
+	d, err := InspectCertificateDER(der)
+	require.NoError(t, err)
+	require.Equal(t, "Alice Example", d.Subject)
+	require.Contains(t, d.SubjectDN, "CN=Alice Example")
+	require.Equal(t, "Example Internal CA", d.Issuer)
+	require.Contains(t, d.IssuerDN, "CN=Example Internal CA")
+	require.Equal(t, []string{"alice@example.com"}, d.Emails)
+	require.Equal(t, "12:34:AB", d.SerialNumber)
+	require.Equal(t, "RSA (2048 bit)", d.PublicKeyAlgo)
+	require.Contains(t, d.SignatureAlgo, "RSA")
+	require.Equal(t, []string{"digital_signature", "key_encipherment"}, d.KeyUsages)
+	require.Equal(t, []string{"email_protection"}, d.ExtKeyUsages)
+	require.Len(t, d.SHA256, 64)
+	require.Len(t, d.SHA1, 40)
+
+	// Negative serial fallback must also extract Issuer, KeyUsage, SerialNumber, and SAN emails.
+	negTmpl := &x509.Certificate{
+		SerialNumber:   big.NewInt(0x42),
+		Subject:        pkix.Name{CommonName: "Legacy Card"},
+		EmailAddresses: []string{"legacy@example.com"},
+		NotBefore:      now.Add(-time.Hour),
+		NotAfter:       now.Add(24 * time.Hour),
+		KeyUsage:       x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+	}
+	negParent := &x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject:      pkix.Name{CommonName: "Legacy CA"},
+	}
+	posDER, err := x509.CreateCertificate(rand.Reader, negTmpl, negParent, &k.PublicKey, k)
+	require.NoError(t, err)
+	var rawCert struct {
+		TBS struct {
+			Version    int `asn1:"optional,explicit,tag:0"`
+			Serial     *big.Int
+			Algorithm  pkix.AlgorithmIdentifier
+			Issuer     asn1.RawValue
+			Validity   struct{ Start, End time.Time }
+			Subject    pkix.RDNSequence
+			PublicKey  asn1.RawValue
+			IssuerID   asn1.BitString   `asn1:"optional,tag:1"`
+			SubjectID  asn1.BitString   `asn1:"optional,tag:2"`
+			Extensions []pkix.Extension `asn1:"optional,explicit,tag:3"`
+		}
+		Algorithm pkix.AlgorithmIdentifier
+		Signature asn1.BitString
+	}
+	_, err = asn1.Unmarshal(posDER, &rawCert)
+	require.NoError(t, err)
+	rawCert.TBS.Serial = big.NewInt(-0x42)
+	negDER, err := asn1.Marshal(rawCert)
+	require.NoError(t, err)
+	nd, err := InspectCertificateDER(negDER)
+	require.NoError(t, err)
+	require.Equal(t, "Legacy Card", nd.Subject)
+	require.Equal(t, "Legacy CA", nd.Issuer)
+	require.Equal(t, []string{"legacy@example.com"}, nd.Emails)
+	require.Equal(t, "-42", nd.SerialNumber)
+	require.Equal(t, "RSA (2048 bit)", nd.PublicKeyAlgo)
+	require.Contains(t, nd.KeyUsages, "digital_signature")
+	require.Contains(t, nd.KeyUsages, "key_encipherment")
 }

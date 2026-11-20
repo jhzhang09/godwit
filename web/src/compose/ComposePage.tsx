@@ -16,6 +16,7 @@ import {
   ComposePage as api,
   type BodyChange,
   type ComposeEdit,
+  type ComposeSMIME,
   type ComposeState,
   events,
   type Review as ReviewT,
@@ -37,6 +38,7 @@ import { Notices } from "./Notices";
 import { CmdK } from "./review/CmdK";
 import { BODY, Review, reviewSummary, Static } from "./review/Review";
 import { SendBar } from "./SendBar";
+import { SmimeBar } from "./SmimeBar";
 import { createSaver, type Saver } from "./saver";
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -194,6 +196,14 @@ const errorKeys: [string, string][] = [
   ["attachment exceeds the size limit", "error.too_large"],
   ["link reference that could not be restored", "error.link_ref"],
   ["placeholder that could not be restored", "error.placeholder"],
+  ["encrypted messages cannot use Bcc", "error.smime_bcc_encrypt"],
+  ["S/MIME protected messages must be sent manually", "error.smime_manual_send"],
+  ["invalid S/MIME email address", "error.smime_invalid_address"],
+  ["S/MIME certificate file required", "error.smime_cert_file_required"],
+  ["S/MIME certificate file too large", "error.smime_cert_file_too_large"],
+  ["no valid X.509 public certificate in file", "error.smime_cert_invalid"],
+  ["S/MIME certificate does not match email address", "error.smime_cert_address_mismatch"],
+  ["S/MIME certificate contains no email address", "error.smime_cert_no_email"],
 ];
 
 /** What a rejected call means to the user, in the page's copy. */
@@ -303,6 +313,12 @@ function Compose({
   const [quote, setQuote] = useState(state.quote);
   const [showQuote, setShowQuote] = useState(false);
   const [attachments, setAttachments] = useState<Attachment[]>(state.attachments);
+  const [smime, setSmime] = useState<ComposeSMIME | undefined>(state.smime);
+  const [smimeLoading, setSmimeLoading] = useState(false);
+  const [smimeImporting, setSmimeImporting] = useState(false);
+  const smimeSeq = useRef(0);
+  const smimeChainRef = useRef<Promise<void>>(Promise.resolve());
+  const rcptKeyRef = useRef(JSON.stringify([state.to, state.cc, state.bcc]));
   const [tooLarge, setTooLarge] = useState<string[]>([]);
   const [failed, setFailed] = useState<string[]>([]);
   // at: the Send later time (unix ms) the warnings were for; 0 for a send of now.
@@ -337,7 +353,21 @@ function Compose({
     n.onRefused(() => lockToast.current("compose.sending.locked"));
     let last = n.status;
     const off = n.onChange(() => {
-      if (n.status === "saved" && last === "saving") setSavedAt(fmt(new Date()));
+      if (n.status === "saved" && last === "saving") {
+        setSavedAt(fmt(new Date()));
+        const nextRcpts = JSON.stringify([cur.current.to, cur.current.cc, cur.current.bcc]);
+        if (nextRcpts !== rcptKeyRef.current) {
+          rcptKeyRef.current = nextRcpts;
+          const seq = ++smimeSeq.current;
+          queueMicrotask(() => {
+            void Promise.resolve(api.smimeStatus?.())
+              .then((next) => {
+                if (next && seq === smimeSeq.current) setSmime(next);
+              })
+              .catch(() => {});
+          });
+        }
+      }
       last = n.status;
       if (!n.busy && refresh.current) {
         refresh.current = false;
@@ -441,6 +471,8 @@ function Compose({
       if (edits.current !== runEdits.current) return;
       adopt(l.revision, l.body, l.subject);
       setFromProgram(l.fromProgram);
+      if (l.smime) setSmime(l.smime);
+      rcptKeyRef.current = JSON.stringify([l.to, l.cc, l.bcc]);
       setApplied(true);
     } catch (e) {
       if (n === reloads.current) setReloadErr(witError(message(e), t));
@@ -610,10 +642,70 @@ function Compose({
       else {
         setSignature(sigOf(r));
         setSavedAt(fmt(new Date(r.updatedAt)));
+        if (r.smime) {
+          ++smimeSeq.current;
+          setSmime(r.smime);
+        }
       }
     } catch (e) {
       setFrom(prev);
       failure(e);
+    }
+  };
+  const refreshSMIME = async (flushFirst = false) => {
+    const seq = ++smimeSeq.current;
+    setSmimeLoading(true);
+    try {
+      if (flushFirst && sv?.dirty) await sv.flush();
+      rcptKeyRef.current = JSON.stringify([cur.current.to, cur.current.cc, cur.current.bcc]);
+      const next = await api.smimeStatus();
+      if (seq === smimeSeq.current) setSmime(next);
+    } catch {
+      // Leave prior status unchanged on transient refresh errors.
+    } finally {
+      if (seq === smimeSeq.current) setSmimeLoading(false);
+    }
+  };
+  const updateSMIME = (
+    sign: boolean | null,
+    encrypt: boolean | null,
+    pinned: Record<string, string>,
+  ) => {
+    if (locked || smimeImporting) return;
+    const seq = ++smimeSeq.current;
+    setSmime((prev) =>
+      prev
+        ? {
+            ...prev,
+            ...(sign !== null ? { sign } : {}),
+            ...(encrypt !== null ? { encrypt } : {}),
+          }
+        : prev,
+    );
+    smimeChainRef.current = smimeChainRef.current.then(async () => {
+      try {
+        if (sv?.dirty) await sv.flush();
+        rcptKeyRef.current = JSON.stringify([cur.current.to, cur.current.cc, cur.current.bcc]);
+        const next = await api.setSMIME(sign, encrypt, pinned);
+        if (seq === smimeSeq.current) setSmime(next);
+      } catch (e) {
+        failure(e);
+        if (seq === smimeSeq.current) void refreshSMIME(false);
+      }
+    });
+  };
+  const importSMIMECert = async (address: string) => {
+    if (smimeImporting || locked) return;
+    setSmimeImporting(true);
+    const seq = ++smimeSeq.current;
+    try {
+      if (sv?.dirty) await sv.flush();
+      const next = await api.importSMIMECertificate(address);
+      if (seq === smimeSeq.current) setSmime(next);
+    } catch (e) {
+      failure(e);
+    } finally {
+      setSmimeImporting(false);
     }
   };
   const change = async (op: (rev: number) => ReturnType<typeof api.addAttachments>) => {
@@ -764,6 +856,11 @@ function Compose({
       setSignature(sigOf(l));
       setQuote(l.quote);
       setAttachments(l.attachments);
+      if (l.smime) {
+        ++smimeSeq.current;
+        setSmime(l.smime);
+      }
+      rcptKeyRef.current = JSON.stringify([l.to, l.cc, l.bcc]);
       if (mine) {
         await sv.keepMine(l.revision);
         return;
@@ -1020,10 +1117,24 @@ function Compose({
               <div ref={setToolbarSlot} className="contents">
                 {!showEditor && <IdleToolbar t={t} attach={attach} />}
               </div>
+              <SmimeBar
+                smime={smime}
+                busy={smimeImporting || locked}
+                loading={smimeLoading}
+                hasRecipients={f.to.length + f.cc.length + f.bcc.length > 0}
+                t={t}
+                onOpen={() => void refreshSMIME(true)}
+                onRefresh={() => void refreshSMIME(true)}
+                onToggleSign={(on) => updateSMIME(on, null, {})}
+                onToggleEncrypt={(on) => updateSMIME(null, on, {})}
+                onPinCert={(addr, sha) => updateSMIME(null, null, { [addr]: sha })}
+                onImportCert={(addr) => void importSMIMECert(addr)}
+              />
               <SendBar
                 sending={sending}
                 frozen={locked}
                 anyway={warned}
+                className={smime?.supported ? "" : "ml-auto"}
                 onSend={() => (warned ? send(warnings.digest, warnings.at) : send())}
                 onSendNow={() => send()}
                 onSendLater={(at) => send("", at)}

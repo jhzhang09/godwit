@@ -29,6 +29,9 @@ vi.mock("@/mygo", () => ({
     setModel: vi.fn(),
     openCited: vi.fn(),
     checkCited: vi.fn(),
+    smimeStatus: vi.fn(),
+    setSMIME: vi.fn(),
+    importSMIMECertificate: vi.fn(),
   },
   events: {
     closing: { on: () => () => {} },

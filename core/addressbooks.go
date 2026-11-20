@@ -1279,6 +1279,7 @@ type preparedCard struct {
 	photoHeight     int
 	photoPendingURL string
 	emails          []carddav.CardEmail
+	certs           []preparedCardCert
 }
 
 type retriedPhoto struct {
@@ -1423,6 +1424,7 @@ func (s *Service) syncOneCollectionOnce(ctx context.Context, client *carddav.Cli
 				Pref:    em.Pref,
 			})
 		}
+		item.certs = carddavPreparedCerts(pc, item.emails)
 		for _, ph := range pc.Photos {
 			raw := ph.Data
 			if len(raw) == 0 && ph.URL != "" {
@@ -1558,6 +1560,24 @@ func (s *Service) syncOneCollectionOnce(ctx context.Context, client *carddav.Cli
 					VALUES ((SELECT id FROM address_book_cards WHERE collection_id = ? AND href = ?), ?, ?, ?)`,
 				Args: []any{colID, item.href, em.Pos, em.AddrKey, pref},
 			})
+		}
+	}
+	hasCerts := false
+	for _, item := range prepared {
+		if len(item.certs) > 0 {
+			hasCerts = true
+			break
+		}
+	}
+	if hasCerts {
+		if err := s.ensureSMIMETables(ctx); err != nil {
+			return false, err
+		}
+		now := s.clk().Now().Unix()
+		for _, item := range prepared {
+			for _, cc := range item.certs {
+				stmts = append(stmts, upsertSMIMECertStmt(cc.addrKey, CertSourceCardDAV, cc.cert, now))
+			}
 		}
 	}
 	for _, rp := range retried {

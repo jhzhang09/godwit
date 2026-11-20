@@ -297,6 +297,9 @@ type App struct {
 	link     string // the link waiting for confirmation
 	linkOpen bool   // the link dialog shows
 
+	smimeCertOpen bool          // the S/MIME certificate details dialog shows
+	smimeCert     smimeCertView // currently inspected certificate
+
 	mcpSend mcpSendState // godwit mcp's send request waiting for the user (mcpsend.go)
 
 	customIcons map[int64]accountImage    // by account id: its uploaded icon (accountImage)

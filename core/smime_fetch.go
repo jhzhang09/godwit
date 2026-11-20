@@ -56,6 +56,9 @@ type smimeCandidate struct {
 type smimeState struct {
 	wake             chan struct{}
 	touchCh          chan int64
+	certWake         chan struct{}
+	certStop         chan struct{}
+	certDone         chan struct{}
 	mu               sync.Mutex
 	closed           bool
 	touchActive      bool
@@ -365,6 +368,9 @@ func (st *smimeState) closeAll() {
 	st.mu.Lock()
 	st.closed = true
 	st.touchActive = false
+	certStop := st.certStop
+	st.certStop = nil
+	certDone := st.certDone
 	cancels := make([]context.CancelFunc, 0, len(st.prefetchCancel))
 	for id, fn := range st.prefetchCancel {
 		cancels = append(cancels, fn)
@@ -388,15 +394,23 @@ func (st *smimeState) closeAll() {
 	for _, c := range conns {
 		c.release()
 	}
+	if certStop != nil {
+		close(certStop)
+	}
+	if certDone != nil {
+		<-certDone
+	}
 }
 
 func (s *Service) initSMIME() {
 	s.smime = &smimeState{
-		wake:    make(chan struct{}, 1),
-		touchCh: make(chan int64, 64),
+		wake:     make(chan struct{}, 1),
+		touchCh:  make(chan int64, 64),
+		certWake: make(chan struct{}, 1),
 	}
 	if s.opts.AutoSync {
 		s.startSMIMEPrefetch()
+		s.startSMIMECertIndexer()
 	}
 }
 

@@ -70,7 +70,8 @@ type readerPane struct {
 	getThread  func(ctx context.Context, id int64) (core.Thread, error)                       // tests wrap it
 	getMessage func(ctx context.Context, id int64, remote bool) (core.Message, error)         // tests wrap it
 	getAvatar  func(context.Context, int64, bool) (core.Avatar, error)                        // tests wrap it
-	openCMS    func(ctx context.Context, fromHeader string, der []byte) (entity []byte, encrypted bool, signer string, err error) // tests wrap it
+	openCMS     func(ctx context.Context, fromHeader string, der []byte) (entity []byte, encrypted bool, signer string, err error) // tests wrap it
+	openCMSFull func(ctx context.Context, fromHeader string, der []byte) (smime.Opened, error)                                       // tests wrap it with signer cert details
 	runSkill   func(ctx context.Context, name string, t core.Target) (<-chan ai.Event, error) // tests wrap it
 	cardsFn    func(ctx context.Context, messageID int64) ([]core.Card, error)                // tests wrap it
 	tagsFn     func(ctx context.Context, messageID int64) ([]core.Tag, error)
@@ -156,11 +157,12 @@ type msgBody struct {
 	read        latest // reading it; a read again (a same-message folder move) drops the one before
 	ready       bool
 	err         error // the last read, or making the page, failed; a retry reads again
-	smimeRead    latest
-	smimeResult  *secureMessage
-	smimePending *secureBody
-	smimeErr     error
-	smimeSynced  bool
+	smimeRead       latest
+	smimeResult     *secureMessage
+	smimePending    *secureBody
+	smimeErr        error
+	smimeDetailOpen bool
+	smimeSynced     bool
 
 	view        ui.NativeWebView // the body's page; nil while folded, not read yet, or when it could not be made
 	close       func()           // closes view: unbinds and destroys it

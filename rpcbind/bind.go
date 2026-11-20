@@ -125,6 +125,14 @@ var table = []Error{
 	{Code: "unsubscribe_web", Err: core.ErrUnsubscribeWeb},
 	{Code: "unsubscribing", Err: core.ErrUnsubscribing},
 	{Code: "purge_too_late", Err: core.ErrPurgeTooLate, Key: "mail.purge.too_late"},
+	{Code: "smime_bcc_encrypt", Err: core.ErrSMIMEBccEncrypt},
+	{Code: "smime_manual_send", Err: core.ErrSMIMEManualSend},
+	{Code: "smime_invalid_address", Err: core.ErrSMIMEInvalidAddress},
+	{Code: "smime_cert_file_required", Err: core.ErrSMIMECertFileRequired},
+	{Code: "smime_cert_file_too_large", Err: core.ErrSMIMECertFileTooLarge},
+	{Code: "smime_cert_invalid", Err: core.ErrSMIMECertInvalid},
+	{Code: "smime_cert_address_mismatch", Err: core.ErrSMIMECertAddressMismatch},
+	{Code: "smime_cert_no_email", Err: core.ErrSMIMECertNoEmail},
 	{Code: "canceled", Err: context.Canceled},
 	{Code: "deadline", Err: context.DeadlineExceeded},
 	{Code: "auth_failed", Err: backend.ErrAuthFailed, Key: "settings.account.detail.auth_rejected"}, // also a failed account check's cause; the account's own words for it
@@ -257,6 +265,10 @@ var uiOnly = map[string]bool{
 	"SetUIForeground": true, "SetUIReady": true, "SetComposeOpen": true, "SetInboxOnly": true, "InboxOnly": true,
 	// Ephemeral RAM-only decrypted S/MIME body for the calling RoleUI session (never persisted, never exposed to full, mcp, or plugins).
 	"SetDecryptedBody": true,
+	// S/MIME certificate discovery, OS keychain/store identity listing, manual file import, and per-draft compose overrides for RoleUI.
+	"ListOwnSMIMECertificates": true, "ListContactCertificates": true, "SelectContactCertificate": true,
+	"ImportContactCertificateFile": true, "RemoveContactCertificate": true, "RecordSMIMESignerCert": true,
+	"DraftSMIMEStatus": true, "SetDraftSMIME": true,
 	// Quitting Godwit stops the backend its interface started; a user-started one refuses.
 	// Replace stops it for an interface of another version, even under 一直继续.
 	"StopUIBackend": true, "ReplaceUIBackend": true,
