@@ -4151,6 +4151,8 @@
   "smime_sign_help": "Use a personal S/MIME certificate from your OS keychain or security key matching this account. Can be changed per message in compose.",
   "smime_encrypt": "Encrypt outgoing mail by default",
   "smime_encrypt_help": "Resolve recipient public certificates from contacts, OS certificate stores, verified signed mail, or manual import. Missing certificates keep the draft unsent.",
+  "smime_allow_weak_key": "Allow legacy 1024-bit RSA certificates",
+  "smime_allow_weak_key_help": "Relaxes only the OS key-length minimum for 1024-bit RSA certificates while still enforcing trusted CA chain, validity period, email match, and signature integrity. Off by default; enable only for legacy enterprise certificates.",
   "smime_cert": "Personal S/MIME certificate",
   "smime_cert_help": "Supports imported personal certificates (.p12/.pfx) and security key certificates; defaults to the newest valid certificate.",
   "smime_cert_auto": "Automatically choose newest valid certificate",
@@ -4331,6 +4333,21 @@
       }
     }
   },
+  "smime_err_weak_key_size": "Certificate “{arg1}” uses a key length below the system minimum ({arg2}; requires at least {arg3}-bit)",
+  "@smime_err_weak_key_size": {
+    "placeholders": {
+      "arg1": {
+        "type": "String"
+      },
+      "arg2": {
+        "type": "String"
+      },
+      "arg3": {
+        "type": "String"
+      }
+    }
+  },
+  "smime_err_weak_key_size_generic": "Certificate key length is below system security requirements (typically at least 2048-bit RSA)",
   "error_smime_bcc_encrypt": "Send to Bcc recipients separately when encrypting so the recipient list stays private",
   "error_smime_manual_send": "S/MIME protected messages must be sent manually from Godwit",
   "error_smime_invalid_address": "Invalid email address",

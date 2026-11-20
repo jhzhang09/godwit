@@ -11,6 +11,7 @@ import (
 	"encoding/asn1"
 	"encoding/base64"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"math/big"
 	"net/mail"
@@ -393,11 +394,14 @@ func TestCertificateBundleListAndProtectWith(t *testing.T) {
 
 func TestOpenForReadDeliversBodyOnVerifyFailure(t *testing.T) {
 	now := time.Now()
+	var serial int64
 	makeCert := func(email string) (*rsa.PrivateKey, *smx509.Certificate) {
+		serial++
 		k, err := rsa.GenerateKey(rand.Reader, 2048)
 		require.NoError(t, err)
 		tmpl := &x509.Certificate{
-			SerialNumber:   big.NewInt(now.UnixNano()),
+			SerialNumber:   big.NewInt(serial),
+			Subject:        pkix.Name{CommonName: email},
 			EmailAddresses: []string{email},
 			NotBefore:      now.Add(-time.Hour),
 			NotAfter:       now.Add(24 * time.Hour),
@@ -447,6 +451,7 @@ func TestOpenForReadDeliversBodyOnVerifyFailure(t *testing.T) {
 	require.True(t, opened.Encrypted)
 	require.Contains(t, string(opened.Entity), "decrypted plaintext body")
 	require.Contains(t, opened.VerifyErr, "无效的密钥大小")
+	require.ErrorIs(t, opened.VerifyErrCause, bobUntrustedProv.trustErr)
 	require.Empty(t, opened.Signer)
 	require.Nil(t, opened.SignerCert)
 	require.Equal(t, CertSHA256(aliceCert.Raw), CertSHA256(opened.UnverifiedCert))
@@ -570,4 +575,114 @@ func TestInspectCertificate(t *testing.T) {
 	require.Equal(t, "RSA (2048 bit)", nd.PublicKeyAlgo)
 	require.Contains(t, nd.KeyUsages, "digital_signature")
 	require.Contains(t, nd.KeyUsages, "key_encipherment")
+}
+
+type recordingVerifyProvider struct {
+	softwareProvider
+	allowFlags []bool
+}
+
+func (p *recordingVerifyProvider) VerifyTrust(ctx context.Context, usage, email string, certsDER [][]byte) error {
+	p.allowFlags = append(p.allowFlags, AllowWeakKeySize(ctx))
+	return p.softwareProvider.VerifyTrust(ctx, usage, email, certsDER)
+}
+
+func (p *recordingVerifyProvider) VerifyCMS(ctx context.Context, email string, der, detached []byte) (cmsVerifyResult, error) {
+	p.allowFlags = append(p.allowFlags, AllowWeakKeySize(ctx))
+	return p.softwareProvider.VerifyCMS(ctx, email, der, detached)
+}
+
+func TestWeakKeySizeContextAndError(t *testing.T) {
+	require.False(t, AllowWeakKeySize(nil))
+	require.False(t, AllowWeakKeySize(t.Context()))
+
+	trueCtx := WithAllowWeakKeySize(t.Context(), true)
+	require.True(t, AllowWeakKeySize(trueCtx))
+	require.False(t, AllowWeakKeySize(WithAllowWeakKeySize(trueCtx, false)))
+
+	cases := []struct {
+		err  *WeakKeySizeError
+		want string
+	}{
+		{
+			err:  &WeakKeySizeError{Subject: "yczhang", KeyAlgo: "RSA", KeyBits: 1024, MinBits: 2048},
+			want: `certificate "yczhang" uses a key length below system requirements (RSA 1024-bit; requires at least 2048-bit)`,
+		},
+		{
+			err:  &WeakKeySizeError{Subject: "yczhang"},
+			want: `certificate "yczhang" uses a key length below system security requirements`,
+		},
+		{
+			err:  &WeakKeySizeError{KeyAlgo: "ECDSA", KeyBits: 224, MinBits: 256},
+			want: `certificate uses a key length below system requirements (ECDSA 224-bit; requires at least 256-bit)`,
+		},
+		{
+			err:  &WeakKeySizeError{},
+			want: ErrWeakKeySize.Error(),
+		},
+	}
+	for _, tc := range cases {
+		require.ErrorIs(t, tc.err, ErrWeakKeySize)
+		msg := tc.err.Error()
+		require.Equal(t, tc.want, msg)
+		require.NotContains(t, msg, "broken key size")
+		require.NotContains(t, msg, "无效的密钥大小")
+	}
+
+	now := time.Now()
+	makeCert := func(email string, serial int64) (*rsa.PrivateKey, *smx509.Certificate) {
+		k, err := rsa.GenerateKey(rand.Reader, 2048)
+		require.NoError(t, err)
+		tmpl := &x509.Certificate{
+			SerialNumber:   big.NewInt(serial),
+			Subject:        pkix.Name{CommonName: email},
+			EmailAddresses: []string{email},
+			NotBefore:      now.Add(-time.Hour),
+			NotAfter:       now.Add(24 * time.Hour),
+			KeyUsage:       x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &k.PublicKey, k)
+		require.NoError(t, err)
+		cert, err := ParseCertificate(der)
+		require.NoError(t, err)
+		return k, cert
+	}
+
+	aliceKey, aliceCert := makeCert("alice@example.org", 101)
+	bobKey, bobCert := makeCert("bob@example.org", 102)
+
+	recProv := &recordingVerifyProvider{
+		softwareProvider: softwareProvider{
+			identities: []RawIdentity{{DER: aliceCert.Raw}},
+			keys:       map[string]*rsa.PrivateKey{CertSHA256(aliceCert.Raw): aliceKey},
+		},
+	}
+	ctx := context.WithValue(t.Context(), providerKey{}, recProv)
+	raw := []byte("From: alice@example.org\r\nTo: bob@example.org\r\nSubject: Compat\r\nContent-Type: text/plain\r\n\r\nhello compat")
+	protected, err := ProtectWith(ctx, raw, "alice@example.org", []string{"bob@example.org"}, ProtectOptions{
+		Sign:         true,
+		Encrypt:      true,
+		AllowWeakKey: true,
+	}, func(ctx context.Context, _ []string) (map[string][]*smx509.Certificate, error) {
+		require.True(t, AllowWeakKeySize(ctx))
+		return map[string][]*smx509.Certificate{"bob@example.org": {bobCert}}, nil
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, recProv.allowFlags)
+	for _, f := range recProv.allowFlags {
+		require.True(t, f)
+	}
+
+	wkErr := &WeakKeySizeError{Subject: "alice@example.org", KeyAlgo: "RSA", KeyBits: 1024, MinBits: 2048}
+	bobProv := &softwareProvider{
+		identities: []RawIdentity{{DER: bobCert.Raw}},
+		keys:       map[string]*rsa.PrivateKey{CertSHA256(bobCert.Raw): bobKey},
+		trustErr:   wkErr,
+	}
+	opened, err := OpenForRead(context.WithValue(t.Context(), providerKey{}, bobProv), protected)
+	require.NoError(t, err)
+	var gotWK *WeakKeySizeError
+	require.ErrorAs(t, opened.VerifyErrCause, &gotWK)
+	require.Equal(t, 1024, gotWK.KeyBits)
+	require.True(t, errors.Is(opened.VerifyErrCause, ErrWeakKeySize))
 }

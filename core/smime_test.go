@@ -16,12 +16,14 @@ import (
 	"github.com/godwit-email/godwit/core/internal/testllm"
 	"github.com/godwit-email/godwit/core/store"
 	"github.com/godwit-email/godwit/internal/carddav"
+	"github.com/godwit-email/godwit/internal/i18n"
 	"github.com/godwit-email/godwit/internal/smime"
 	"io"
 	"math/big"
 	"net/mail"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -744,5 +746,105 @@ func TestSMIMEStandardCertificateSourcesAndSelection(t *testing.T) {
 
 	require.NoError(t, e.s.DeleteDraft(ctx, d.ID))
 	rows := e.rows(t, "SELECT value FROM settings WHERE key = ?", draftSMIMEKey(d.ID))
+	require.Empty(t, rows)
+}
+
+func TestSMIMEAllowWeakKeyAccountAndFormat(t *testing.T) {
+	e := newSendEnv(t, false)
+	ctx := WithUISession(t.Context(), e.s)
+
+	require.False(t, e.acc.SMIMEAllowWeakKey)
+	allow, err := e.s.accountAllowsWeakSMIMEKey(ctx, e.acc.Email)
+	require.NoError(t, err)
+	require.False(t, allow)
+
+	on := true
+	updated, err := e.s.UpdateAccount(ctx, e.acc.ID, AccountPatch{SMIMEAllowWeakKey: &on})
+	require.NoError(t, err)
+	require.True(t, updated.SMIMEAllowWeakKey)
+
+	accs, err := e.s.ListAccounts(ctx)
+	require.NoError(t, err)
+	require.Len(t, accs, 1)
+	require.True(t, accs[0].SMIMEAllowWeakKey)
+
+	allow, err = e.s.accountAllowsWeakSMIMEKey(ctx, e.acc.Email)
+	require.NoError(t, err)
+	require.True(t, allow)
+
+	prevLang := i18n.Language()
+	t.Cleanup(func() { i18n.SetLanguage(prevLang) })
+	wk := &smime.WeakKeySizeError{Subject: "yczhang", KeyAlgo: "RSA", KeyBits: 1024, MinBits: 2048}
+
+	i18n.SetLanguage("zh-Hans")
+	require.Equal(t, "“yczhang”证书的密钥长度过短（RSA 1024 bit，系统要求至少 2048 位）", FormatWeakKeySizeError(wk))
+	require.Equal(t, FormatWeakKeySizeError(wk), FormatSMIMEError(fmt.Errorf("wrapped: %w", wk)))
+	require.Equal(t, "证书的密钥长度低于系统安全要求（通常需要至少 2048 位 RSA 密钥）", FormatWeakKeySizeError(&smime.WeakKeySizeError{}))
+	require.Equal(t, "other error", FormatSMIMEError(fmt.Errorf("other error")))
+
+	i18n.SetLanguage("en")
+	enMsg := FormatWeakKeySizeError(wk)
+	require.Contains(t, enMsg, "2048-bit")
+	require.NotContains(t, enMsg, "2,048")
+	require.NotContains(t, enMsg, "broken key size")
+
+	// Verify DraftSMIMEStatus, ListOwnSMIMECertificates, and protectOutgoing honor SMIMEAllowWeakKey on darwin.
+	if smime.Supported() && runtime.GOOS == "darwin" {
+		bobKey, err := rsa.GenerateKey(rand.Reader, 1024)
+		require.NoError(t, err)
+		bobTmpl := &x509.Certificate{
+			SerialNumber:   big.NewInt(9001),
+			Subject:        pkix.Name{CommonName: "Bob 1024"},
+			EmailAddresses: []string{"bob@example.com"},
+			NotBefore:      time.Now().Add(-time.Hour),
+			NotAfter:       time.Now().Add(24 * time.Hour),
+			KeyUsage:       x509.KeyUsageKeyEncipherment,
+			ExtKeyUsage:    []x509.ExtKeyUsage{x509.ExtKeyUsageEmailProtection},
+		}
+		bob1024DER, err := x509.CreateCertificate(rand.Reader, bobTmpl, bobTmpl, &bobKey.PublicKey, bobKey)
+		require.NoError(t, err)
+		bob1024Cert, err := smime.ParseCertificate(bob1024DER)
+		require.NoError(t, err)
+		require.NoError(t, e.s.exec(ctx, upsertSMIMECertStmt("bob@example.com", CertSourceImported, bob1024Cert, time.Now().Unix())))
+
+		d, err := e.s.NewDraft(ctx, e.acc.ID, "new", 0)
+		require.NoError(t, err)
+		d.To = []string{"bob@example.com"}
+		d, err = e.s.SaveDraft(ctx, d)
+		require.NoError(t, err)
+
+		off := false
+		accOff, err := e.s.UpdateAccount(ctx, e.acc.ID, AccountPatch{SMIMEAllowWeakKey: &off, SMIMEEncrypt: &on})
+		require.NoError(t, err)
+		i18n.SetLanguage("zh-Hans")
+		stOff, err := e.s.DraftSMIMEStatus(ctx, d.ID)
+		require.NoError(t, err)
+		require.Len(t, stOff.Recipients, 1)
+		require.False(t, stOff.Recipients[0].Ready)
+		require.Contains(t, stOff.Recipients[0].Error, "密钥长度过短")
+
+		raw := []byte("From: " + e.acc.Email + "\r\nTo: bob@example.com\r\nContent-Type: text/plain\r\n\r\nhi")
+		_, err = e.s.protectOutgoing(ctx, accOff, d, []string{"bob@example.com"}, raw)
+		require.ErrorIs(t, err, smime.ErrWeakKeySize)
+
+		accOn, err := e.s.UpdateAccount(ctx, e.acc.ID, AccountPatch{SMIMEAllowWeakKey: &on})
+		require.NoError(t, err)
+		stOn, err := e.s.DraftSMIMEStatus(ctx, d.ID)
+		require.NoError(t, err)
+		require.Len(t, stOn.Recipients, 1)
+		require.False(t, stOn.Recipients[0].Ready)
+		require.NotContains(t, stOn.Recipients[0].Error, "密钥长度过短")
+
+		_, err = e.s.ListOwnSMIMECertificates(ctx, e.acc.Email)
+		require.NoError(t, err)
+
+		_, err = e.s.protectOutgoing(ctx, accOn, d, []string{"bob@example.com"}, raw)
+		require.Error(t, err)
+		require.NotErrorIs(t, err, smime.ErrWeakKeySize)
+	}
+
+	// RemoveAccount removes smime.allow_weak_key.<id>.
+	require.NoError(t, e.s.RemoveAccount(ctx, e.acc.ID))
+	rows := e.rows(t, "SELECT value FROM settings WHERE key = ?", fmt.Sprintf("smime.allow_weak_key.%d", e.acc.ID))
 	require.Empty(t, rows)
 }

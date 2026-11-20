@@ -326,6 +326,7 @@ func TestSMIMECopyAndStandardWorkflows(t *testing.T) {
 	t.Cleanup(func() { i18n.SetLanguage(prevLang) })
 	keys := []string{
 		"smime.sign", "smime.sign.help", "smime.encrypt", "smime.encrypt.help",
+		"smime.allow_weak_key", "smime.allow_weak_key.help", "smime.err.weak_key_size_generic",
 		"smime.cert", "smime.cert.help", "smime.cert.view", "smime.cert.detail_title",
 		"smime.contacts.title", "smime.contacts.empty", "smime.compose.sign", "smime.compose.encrypt",
 	}
@@ -386,6 +387,7 @@ func TestSMIMECopyAndStandardWorkflows(t *testing.T) {
 	h.see("个人 S/MIME 证书")
 	h.see("默认对发出邮件进行数字签名")
 	h.see("默认对发出邮件进行加密")
+	h.see("兼容 1024 位旧证书")
 
 	// Return to mail sidebar, open Contacts, and verify bob@example.com S/MIME certificate panel + import + select + remove.
 	h.resize(1440, 2000)
@@ -578,4 +580,92 @@ func TestReaderSMIMEVerifiedSignatureViewCert(t *testing.T) {
 	h.until("verified cert dialog closed", func() bool {
 		return !h.app.smimeCertOpen && !h.tt.HasText("证书详情")
 	})
+}
+
+func TestReaderSMIMEWeakKeyWarningAndAccountCompat(t *testing.T) {
+	if !smime.Supported() {
+		t.Skip("S/MIME not supported on this platform")
+	}
+	prevLang := i18n.Language()
+	t.Cleanup(func() { i18n.SetLanguage(prevLang) })
+	i18n.SetLanguage("zh-Hans")
+
+	h, accs := mailHarness(t, nil, "alice@example.com")
+	h.app.cards = smime.NewSession(h.app.ctx)
+
+	key, err := rsa.GenerateKey(rand.Reader, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafTmpl := &x509.Certificate{
+		SerialNumber:   big.NewInt(0x1024),
+		Subject:        pkix.Name{CommonName: "yczhang"},
+		EmailAddresses: []string{"bob@example.com"},
+		NotBefore:      time.Now().Add(-time.Hour),
+		NotAfter:       time.Now().Add(24 * time.Hour),
+		KeyUsage:       x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:    []x509.ExtKeyUsage{x509.ExtKeyUsageEmailProtection},
+	}
+	bobDER, err := x509.CreateCertificate(rand.Reader, leafTmpl, leafTmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var calls atomic.Int32
+	var sawAllowTrue atomic.Bool
+	h.app.mail.reader.openCMSFull = func(ctx context.Context, fromHeader string, der []byte) (smime.Opened, error) {
+		calls.Add(1)
+		if smime.AllowWeakKeySize(ctx) {
+			sawAllowTrue.Store(true)
+			return smime.Opened{
+				Entity:     []byte("Content-Type: text/html; charset=utf-8\r\n\r\n<p>Compat verified</p>"),
+				Encrypted:  true,
+				Signer:     "bob@example.com",
+				SignerCert: bobDER,
+			}, nil
+		}
+		wk := &smime.WeakKeySizeError{Subject: "yczhang", KeyAlgo: "RSA", KeyBits: 1024, MinBits: 2048}
+		return smime.Opened{
+			Entity:         []byte("Content-Type: text/html; charset=utf-8\r\n\r\n<p>Unverified 1024</p>"),
+			Encrypted:      true,
+			VerifyErr:      wk.Error(),
+			VerifyErrCause: wk,
+			UnverifiedCert: bobDER,
+		}, nil
+	}
+	msg := h.deliverOne(accs[0], makeRawSMIME("Bob <bob@example.com>", accs[0].Email, "weak1024@x", "Legacy 1024 Mail", "opaque-cms"))
+
+	h.openThread(msg.ThreadID)
+	wantShow := fmt.Sprintf("ShowSecureBody %d", msg.ID)
+	h.until("unverified 1024 banner rendered", func() bool {
+		return callIndex(h.plat.Calls(), wantShow) >= 0 && h.tt.HasText("已解密 · 无法验证邮件签名")
+	})
+	h.click("显示详细信息")
+	h.see("“yczhang”证书的密钥长度过短（RSA 1024 bit，系统要求至少 2048 位）")
+	if h.tt.HasText("无效的密钥大小") {
+		t.Fatal("must not display Apple's misleading translation 无效的密钥大小")
+	}
+
+	// Enabling SMIMEAllowWeakKey in Account Settings invalidates the reader secure cache
+	// and re-runs verification with AllowWeakKeySize(ctx) == true.
+	h.openSettings(accountRoute(accs[0].ID))
+	h.see("兼容 1024 位旧证书")
+	h.click("兼容 1024 位旧证书")
+	h.until("account compat saved", func() bool {
+		for _, a := range h.app.accounts {
+			if a.ID == accs[0].ID {
+				return a.SMIMEAllowWeakKey
+			}
+		}
+		return false
+	})
+
+	h.click("返回邮件")
+	h.openThread(msg.ThreadID)
+	h.until("compat verified banner rendered", func() bool {
+		return sawAllowTrue.Load() && h.tt.HasText("签名已验证 · bob@example.com") && !h.tt.HasText("无法验证邮件签名")
+	})
+	if calls.Load() < 2 {
+		t.Fatalf("expected openCMSFull to re-run after toggling compat, got %d calls", calls.Load())
+	}
 }

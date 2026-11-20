@@ -16,6 +16,7 @@ import (
 	"github.com/godwit-email/godwit/core/ai"
 	"github.com/godwit-email/godwit/core/auth"
 	"github.com/godwit-email/godwit/core/plugins"
+	"github.com/godwit-email/godwit/internal/smime"
 	"github.com/godwit-email/godwit/rpc"
 )
 
@@ -210,6 +211,11 @@ func NewCodec() *rpc.Codec {
 	rpc.RegisterType(c, "ai_error",
 		func(e *ai.Error) any { return ai.Error{Code: e.Code, Msg: e.Msg, Detail: e.Detail} },
 		rpc.DecodeDetail[ai.Error])
+	rpc.RegisterType(c, "smime_weak_key_size",
+		func(e *smime.WeakKeySizeError) any {
+			return smime.WeakKeySizeError{Subject: e.Subject, KeyAlgo: e.KeyAlgo, KeyBits: e.KeyBits, MinBits: e.MinBits}
+		},
+		rpc.DecodeDetail[smime.WeakKeySizeError])
 	for _, e := range table {
 		if e.Code != "" {
 			c.RegisterSentinel(e.Code, e.Err, e.Err.Error())

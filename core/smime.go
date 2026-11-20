@@ -3,12 +3,15 @@ package core
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
+	"strconv"
 
 	"github.com/egoist/mygo/plugins/sqlite"
 	"github.com/emmansun/gmsm/smx509"
 	gomail "github.com/godwit-email/godwit/core/mail"
 	"github.com/godwit-email/godwit/core/store"
+	"github.com/godwit-email/godwit/internal/i18n"
 	"github.com/godwit-email/godwit/internal/smime"
 )
 
@@ -61,14 +64,38 @@ func (s *Service) protectOutgoing(ctx context.Context, a Account, d Draft, rcpts
 	for k, v := range draftPins {
 		pinned[k] = v
 	}
+	if a.SMIMEAllowWeakKey {
+		ctx = smime.WithAllowWeakKeySize(ctx, true)
+	}
 	return smime.ProtectWith(ctx, raw, a.Email, rcpts, smime.ProtectOptions{
-		Sign:        sign,
-		Encrypt:     encrypt,
-		OwnCertSHA:  a.SMIMECert,
-		PinnedCerts: pinned,
+		Sign:         sign,
+		Encrypt:      encrypt,
+		OwnCertSHA:   a.SMIMECert,
+		PinnedCerts:  pinned,
+		AllowWeakKey: a.SMIMEAllowWeakKey,
 	}, func(ctx context.Context, addresses []string) (map[string][]*smx509.Certificate, error) {
 		return s.mailboxCertificates(ctx, a.ID, addresses)
 	})
+}
+
+// FormatWeakKeySizeError formats a structured weak key-size error in the active UI language.
+func FormatWeakKeySizeError(wk *smime.WeakKeySizeError) string {
+	if wk != nil && wk.Subject != "" && wk.KeyAlgo != "" && wk.KeyBits > 0 && wk.MinBits > 0 {
+		return i18n.Tf("smime.err.weak_key_size", wk.Subject, fmt.Sprintf("%s %d bit", wk.KeyAlgo, wk.KeyBits), strconv.Itoa(wk.MinBits))
+	}
+	return i18n.T("smime.err.weak_key_size_generic")
+}
+
+// FormatSMIMEError formats err for display, translating typed S/MIME errors into localized messages.
+func FormatSMIMEError(err error) string {
+	if err == nil {
+		return ""
+	}
+	var wk *smime.WeakKeySizeError
+	if errors.As(err, &wk) {
+		return FormatWeakKeySizeError(wk)
+	}
+	return err.Error()
 }
 
 // DecryptedBody holds reader-decrypted S/MIME content transiently in memory

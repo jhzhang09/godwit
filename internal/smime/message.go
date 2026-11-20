@@ -28,6 +28,7 @@ type Opened struct {
 	SignerCert     []byte
 	UnverifiedCert []byte
 	VerifyErr      string
+	VerifyErrCause error
 }
 
 func IsCMSPart(contentType, name string) bool {
@@ -294,9 +295,10 @@ func openMIME(ctx context.Context, from string, raw []byte, startDepth int, resu
 	return Opened{}, errors.New("S/MIME nesting too deep")
 }
 
-func recordVerifyFailure(result *Opened, reason string, certDER []byte) {
-	if result.VerifyErr == "" {
-		result.VerifyErr = reason
+func recordVerifyFailure(result *Opened, err error, certDER []byte) {
+	if result.VerifyErr == "" && err != nil {
+		result.VerifyErr = err.Error()
+		result.VerifyErrCause = err
 	}
 	result.Signer = ""
 	result.SignerCert = nil
@@ -319,7 +321,7 @@ func unwrapCMS(ctx context.Context, from string, der, detached []byte, result *O
 			if !allowUnverified {
 				return nil, res.verifyErr
 			}
-			recordVerifyFailure(result, res.verifyErr.Error(), res.signerDER)
+			recordVerifyFailure(result, res.verifyErr, res.signerDER)
 			return res.content, nil
 		}
 		if result.VerifyErr == "" {
@@ -364,7 +366,7 @@ func unwrapCMS(ctx context.Context, from string, der, detached []byte, result *O
 				if !allowUnverified {
 					return nil, err
 				}
-				recordVerifyFailure(result, err.Error(), signerDER)
+				recordVerifyFailure(result, err, signerDER)
 				return raw, nil
 			}
 			if result.VerifyErr == "" {
@@ -385,7 +387,7 @@ func unwrapCMS(ctx context.Context, from string, der, detached []byte, result *O
 		if !allowUnverified {
 			return nil, err
 		}
-		recordVerifyFailure(result, err.Error(), signerDER)
+		recordVerifyFailure(result, err, signerDER)
 		return p.Content, nil
 	}
 	if result.VerifyErr == "" {
@@ -441,10 +443,11 @@ type Lookup func(context.Context, []string) (map[string][]*smx509.Certificate, e
 
 // ProtectOptions configures signing, encrypting, and explicit certificate selection.
 type ProtectOptions struct {
-	Sign        bool
-	Encrypt     bool
-	OwnCertSHA  string
-	PinnedCerts map[string]string // lower(addr) -> pinned SHA-256
+	Sign         bool
+	Encrypt      bool
+	OwnCertSHA   string
+	PinnedCerts  map[string]string // lower(addr) -> pinned SHA-256
+	AllowWeakKey bool
 }
 
 // Protect 在入队之前完成签名和加密，重发直接使用同一份 MIME。
@@ -454,6 +457,9 @@ func Protect(ctx context.Context, raw []byte, from string, rcpts []string, sign,
 
 // ProtectWith signs and/or encrypts raw using standard OS/contact certificates and optional pinned SHA-256s.
 func ProtectWith(ctx context.Context, raw []byte, from string, rcpts []string, opts ProtectOptions, lookup Lookup) ([]byte, error) {
+	if opts.AllowWeakKey {
+		ctx = WithAllowWeakKeySize(ctx, true)
+	}
 	if ctx.Value(sessionKey{}) == nil && ctx.Value(providerKey{}) == nil {
 		p := newPlatformProvider(false)
 		defer p.Close()

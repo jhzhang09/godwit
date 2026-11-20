@@ -710,7 +710,7 @@ func (s *Service) collectCertificatesFor(ctx context.Context, addresses []string
 			trusted := true
 			if err := smime.VerifyTrust(ctx, "encrypt", addr, e.cert); err != nil {
 				trusted = false
-				trustErr = err.Error()
+				trustErr = FormatSMIMEError(err)
 			}
 			list = append(list, buildSMIMECertificate(sha, addr, e.source, e.cert, trusted, trustErr, prefSHA != "" && sha == prefSHA))
 		}
@@ -778,12 +778,31 @@ func (s *Service) mailboxCertificates(ctx context.Context, _ int64, addresses []
 	return result, nil
 }
 
+func (s *Service) accountAllowsWeakSMIMEKey(ctx context.Context, email string) (bool, error) {
+	if email == "" {
+		return false, nil
+	}
+	rows, err := s.db.Query(ctx,
+		`SELECT 1 FROM accounts a JOIN settings st ON st.key = 'smime.allow_weak_key.' || a.id WHERE lower(a.email) = ? LIMIT 1`,
+		email)
+	if err != nil {
+		return false, err
+	}
+	return len(rows.Values) > 0, nil
+}
+
 // ListOwnSMIMECertificates returns personal S/MIME identities matching email (or all identities if empty).
 func (s *Service) ListOwnSMIMECertificates(ctx context.Context, email string) ([]SMIMEIdentity, error) {
 	if !smime.Supported() {
 		return nil, nil
 	}
-	items, err := smime.ListIdentities(ctx, normalizeCertAddr(email))
+	addr := normalizeCertAddr(email)
+	if !smime.AllowWeakKeySize(ctx) && addr != "" {
+		if allow, err := s.accountAllowsWeakSMIMEKey(ctx, addr); err == nil && allow {
+			ctx = smime.WithAllowWeakKeySize(ctx, true)
+		}
+	}
+	items, err := smime.ListIdentities(ctx, addr)
 	if err != nil {
 		return nil, err
 	}
@@ -989,7 +1008,7 @@ func (s *Service) ImportContactCertificateFile(ctx context.Context, address, pat
 			trusted := true
 			if terr := smime.VerifyTrust(ctx, "encrypt", addr, cert); terr != nil {
 				trusted = false
-				trustErr = terr.Error()
+				trustErr = FormatSMIMEError(terr)
 			}
 			imported = append(imported, buildSMIMECertificate(sha, addr, CertSourceImported, cert, trusted, trustErr, false))
 		}
@@ -1107,6 +1126,9 @@ func (s *Service) DraftSMIMEStatus(ctx context.Context, draftID int64) (DraftSMI
 	acc, err := s.account(ctx, d.AccountID)
 	if err != nil {
 		return DraftSMIMEStatus{}, err
+	}
+	if acc.SMIMEAllowWeakKey {
+		ctx = smime.WithAllowWeakKeySize(ctx, true)
 	}
 	sign, encrypt, pinned, err := s.effectiveDraftSMIME(ctx, acc, draftID)
 	if err != nil {

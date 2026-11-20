@@ -12,6 +12,7 @@ import (
 	"github.com/godwit-email/godwit/core"
 	"github.com/godwit-email/godwit/core/ai"
 	"github.com/godwit-email/godwit/internal/i18n"
+	"github.com/godwit-email/godwit/internal/smime"
 	"github.com/godwit-email/godwit/rpcbind"
 )
 
@@ -34,9 +35,12 @@ func humanize(err error) string {
 	var check *core.CheckError
 	var blocked *core.SendBlockedError
 	var aiErr *ai.Error
+	var weakKey *smime.WeakKeySizeError
 	switch cats := core.MaskBlocked(err); {
 	case cats != nil:
 		return i18n.Tf("error.ai.blocked", maskCategories(cats))
+	case errors.As(err, &weakKey):
+		return core.FormatWeakKeySizeError(weakKey)
 	case errors.As(err, &check):
 		for _, s := range check.Report.Steps {
 			if !s.OK && !s.Skipped {

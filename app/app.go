@@ -473,13 +473,21 @@ func (a *App) load() {
 		a.loadFailing = false
 		first := !a.loaded
 		avatars := settingsSettled
+		var weakKeyChanged []int64
 		for _, old := range a.accounts {
-			if !slices.ContainsFunc(accs, func(acc core.Account) bool { return acc.ID == old.ID }) {
+			idx := slices.IndexFunc(accs, func(acc core.Account) bool { return acc.ID == old.ID })
+			if idx < 0 {
 				avatars = trustChanged
-				break
+			} else if accs[idx].SMIMEAllowWeakKey != old.SMIMEAllowWeakKey {
+				weakKeyChanged = append(weakKeyChanged, old.ID)
 			}
 		}
 		a.accounts, a.accountsGen, a.unread, a.loaded = accs, a.loads.Gen(), unread, true
+		if len(weakKeyChanged) > 0 && a.mail != nil && a.mail.reader != nil {
+			for _, accID := range weakKeyChanged {
+				a.mail.reader.invalidateSMIMEForAccount(accID)
+			}
+		}
 		if a.cards != nil && !a.cardsPrepared && len(accs) > 0 {
 			var emails []string
 			for _, acc := range accs {

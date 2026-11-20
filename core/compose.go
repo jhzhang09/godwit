@@ -854,7 +854,7 @@ func (s *Service) enqueue(ctx context.Context, draftID, rev int64, checked []str
 		if err != nil {
 			return err
 		}
-		if curSign != smimeSign || curEncrypt != smimeEncrypt || current.SMIMECert != acc.SMIMECert || !maps.Equal(curPins, smimePins) || !slices.Equal(checkerIDs(s.sendCheckersLocked()), checked) {
+		if curSign != smimeSign || curEncrypt != smimeEncrypt || current.SMIMECert != acc.SMIMECert || current.SMIMEAllowWeakKey != acc.SMIMEAllowWeakKey || !maps.Equal(curPins, smimePins) || !slices.Equal(checkerIDs(s.sendCheckersLocked()), checked) {
 			return ErrStaleDraft
 		}
 	}

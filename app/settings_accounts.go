@@ -263,12 +263,17 @@ func (p *settingsPage) write(id int64, patch core.AccountPatch, done func(saved 
 
 // mergeAccount shows acc in place of the account's older copy.
 func (a *App) mergeAccount(acc core.Account) {
+	weakKeyChanged := false
 	for i := range a.accounts {
 		if a.accounts[i].ID == acc.ID {
+			weakKeyChanged = a.accounts[i].SMIMEAllowWeakKey != acc.SMIMEAllowWeakKey
 			a.accounts[i] = acc
 		} else if acc.IsDefault {
 			a.accounts[i].IsDefault = false
 		}
+	}
+	if weakKeyChanged && a.mail != nil && a.mail.reader != nil {
+		a.mail.reader.invalidateSMIMEForAccount(acc.ID)
 	}
 }
 
@@ -673,6 +678,15 @@ func (p *settingsPage) accountView(c *ui.Context, acc core.Account) {
 			encrypt := acc.SMIMEEncrypt
 			if kit.SwitchRow(c, &encrypt, i18n.T("smime.encrypt"), i18n.T("smime.encrypt.help")).Changed() {
 				p.patch(acc.ID, core.AccountPatch{SMIMEEncrypt: &encrypt}, nil)
+			}
+		}, func() {
+			allowWeak := acc.SMIMEAllowWeakKey
+			if kit.SwitchRow(c, &allowWeak, i18n.T("smime.allow_weak_key"), i18n.T("smime.allow_weak_key.help")).Changed() {
+				p.patch(acc.ID, core.AccountPatch{SMIMEAllowWeakKey: &allowWeak}, func(err error) {
+					if err == nil {
+						p.loadSMIMECerts(acc, true)
+					}
+				})
 			}
 		})
 	}

@@ -14,6 +14,23 @@ func Supported() bool {
 
 type providerKey struct{}
 
+type allowWeakKeySizeKey struct{}
+
+// WithAllowWeakKeySize returns a context controlling whether legacy weak key-size
+// compatibility (such as 1024-bit RSA) is enabled for OS trust evaluation.
+func WithAllowWeakKeySize(ctx context.Context, allow bool) context.Context {
+	return context.WithValue(ctx, allowWeakKeySizeKey{}, allow)
+}
+
+// AllowWeakKeySize reports whether legacy weak key-size compatibility is enabled on ctx.
+func AllowWeakKeySize(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	v, _ := ctx.Value(allowWeakKeySizeKey{}).(bool)
+	return v
+}
+
 // RawIdentity describes one personal identity (cert DER + private key) in the OS store.
 type RawIdentity struct {
 	DER      []byte

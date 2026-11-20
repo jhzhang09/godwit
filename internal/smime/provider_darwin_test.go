@@ -3,12 +3,18 @@
 package smime
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"crypto/x509/pkix"
+	"errors"
 	"math/big"
+	"os/exec"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/emmansun/gmsm/pkcs7"
 	"github.com/emmansun/gmsm/smx509"
@@ -98,4 +104,205 @@ func TestDarwinProviderPureGo(t *testing.T) {
 	tampered[len(tampered)-1] ^= 0xff
 	_, err = sess.OpenCMS(t.Context(), "untrusted@example.org", tampered)
 	require.Error(t, err)
+}
+
+func TestDarwinVerifyTrustWeakKeyCompat(t *testing.T) {
+	d, err := loadDarwinAPI()
+	require.NoError(t, err)
+
+	evalChain := func(usage, email string, chainDER, anchorDER [][]byte, allowWeak bool) error {
+		var usageKey uintptr
+		switch usage {
+		case "sign":
+			usageKey = d.kSecPolicyKUDigitalSig
+		case "encrypt":
+			usageKey = d.kSecPolicyKUKeyEncipherment
+		default:
+			t.Fatalf("unknown usage %q", usage)
+		}
+		cfEmail := d.cfString(email)
+		require.NotZero(t, cfEmail)
+		defer d.release(cfEmail)
+
+		certs := make([]uintptr, 0, len(chainDER))
+		defer func() {
+			for _, c := range certs {
+				d.release(c)
+			}
+		}()
+		for _, der := range chainDER {
+			data := d.cfData(der)
+			cert := d.secCertificateCreateWithData(0, data)
+			d.release(data)
+			require.NotZero(t, cert)
+			certs = append(certs, cert)
+		}
+		cfCerts := d.cfArrayCreate(0, unsafe.Pointer(&certs[0]), len(certs), d.kCFTypeArrayCB)
+		require.NotZero(t, cfCerts)
+		defer d.release(cfCerts)
+
+		props := d.cfDict([]uintptr{d.kSecPolicyName, usageKey}, []uintptr{cfEmail, d.kCFBooleanTrue})
+		require.NotZero(t, props)
+		defer d.release(props)
+
+		policy := d.secPolicyCreateWithProperties(d.kSecPolicyAppleSMIME, props)
+		require.NotZero(t, policy)
+		defer d.release(policy)
+
+		var trust uintptr
+		st := d.secTrustCreateWithCertificates(cfCerts, policy, &trust)
+		require.Equal(t, errSecSuccess, st)
+		require.NotZero(t, trust)
+		defer d.release(trust)
+
+		anchors := make([]uintptr, 0, len(anchorDER))
+		defer func() {
+			for _, a := range anchors {
+				d.release(a)
+			}
+		}()
+		for _, der := range anchorDER {
+			data := d.cfData(der)
+			cert := d.secCertificateCreateWithData(0, data)
+			d.release(data)
+			require.NotZero(t, cert)
+			anchors = append(anchors, cert)
+		}
+		var ancPtr unsafe.Pointer
+		if len(anchors) > 0 {
+			ancPtr = unsafe.Pointer(&anchors[0])
+		}
+		cfAnchors := d.cfArrayCreate(0, ancPtr, len(anchors), d.kCFTypeArrayCB)
+		require.NotZero(t, cfAnchors)
+		defer d.release(cfAnchors)
+
+		require.Equal(t, errSecSuccess, d.secTrustSetAnchorCertificates(trust, cfAnchors))
+		require.Equal(t, errSecSuccess, d.secTrustSetNetworkFetchAllowed(trust, false))
+		return d.evaluateTrust(trust, allowWeak)
+	}
+
+	now := time.Now()
+	ca2kKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	ca2kTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "Corp CA 2048"},
+		NotBefore:             now.Add(-24 * time.Hour),
+		NotAfter:              now.Add(365 * 24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	ca2kDER, err := x509.CreateCertificate(rand.Reader, ca2kTmpl, ca2kTmpl, &ca2kKey.PublicKey, ca2kKey)
+	require.NoError(t, err)
+	ca2kCert, err := x509.ParseCertificate(ca2kDER)
+	require.NoError(t, err)
+
+	ca1kKey, err := rsa.GenerateKey(rand.Reader, 1024)
+	require.NoError(t, err)
+	ca1kTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(2),
+		Subject:               pkix.Name{CommonName: "Corp CA 1024"},
+		NotBefore:             now.Add(-24 * time.Hour),
+		NotAfter:              now.Add(365 * 24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	ca1kDER, err := x509.CreateCertificate(rand.Reader, ca1kTmpl, ca1kTmpl, &ca1kKey.PublicKey, ca1kKey)
+	require.NoError(t, err)
+	ca1kCert, err := x509.ParseCertificate(ca1kDER)
+	require.NoError(t, err)
+
+	key1k, err := rsa.GenerateKey(rand.Reader, 1024)
+	require.NoError(t, err)
+	mkLeaf := func(serial int64, cn, email string, nb, na time.Time, ku x509.KeyUsage, sigAlg x509.SignatureAlgorithm, parent *x509.Certificate, pKey any, pub any) []byte {
+		tmpl := &x509.Certificate{
+			SerialNumber:   big.NewInt(serial),
+			Subject:        pkix.Name{CommonName: cn},
+			EmailAddresses: []string{email},
+			NotBefore:      nb,
+			NotAfter:       na,
+			KeyUsage:       ku,
+			ExtKeyUsage:    []x509.ExtKeyUsage{x509.ExtKeyUsageEmailProtection},
+			SignatureAlgorithm: sigAlg,
+		}
+		if parent == nil {
+			parent = tmpl
+		}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, parent, pub, pKey)
+		require.NoError(t, err)
+		return der
+	}
+
+	validNB, validNA := now.Add(-time.Hour), now.Add(24*time.Hour)
+	leafUnder2k := mkLeaf(10, "yczhang", "yczhang@tendyron.com", validNB, validNA, x509.KeyUsageDigitalSignature|x509.KeyUsageKeyEncipherment, x509.SHA256WithRSA, ca2kCert, ca2kKey, &key1k.PublicKey)
+	leafUnder1k := mkLeaf(11, "yczhang", "yczhang@tendyron.com", validNB, validNA, x509.KeyUsageDigitalSignature|x509.KeyUsageKeyEncipherment, x509.SHA256WithRSA, ca1kCert, ca1kKey, &key1k.PublicKey)
+	leafExpired := mkLeaf(12, "yczhang-exp", "yczhang@tendyron.com", now.Add(-48*time.Hour), now.Add(-time.Hour), x509.KeyUsageDigitalSignature, x509.SHA256WithRSA, ca2kCert, ca2kKey, &key1k.PublicKey)
+	leafEncryptOnly := mkLeaf(13, "yczhang-enc", "yczhang@tendyron.com", validNB, validNA, x509.KeyUsageKeyEncipherment, x509.SHA256WithRSA, ca2kCert, ca2kKey, &key1k.PublicKey)
+	leafSHA1 := mkLeaf(14, "yczhang-sha1", "yczhang@tendyron.com", validNB, validNA, x509.KeyUsageDigitalSignature, x509.SHA1WithRSA, ca2kCert, ca2kKey, &key1k.PublicKey)
+
+	leaf512, err := exec.Command("openssl", "req", "-x509", "-newkey", "rsa:512", "-nodes", "-keyout", "/dev/null",
+		"-subj", "/CN=yczhang-512", "-addext", "subjectAltName=email:yczhang@tendyron.com",
+		"-addext", "keyUsage=digitalSignature", "-days", "1", "-outform", "DER").Output()
+	require.NoError(t, err)
+
+	key224, err := ecdsa.GenerateKey(elliptic.P224(), rand.Reader)
+	require.NoError(t, err)
+	leaf224 := mkLeaf(16, "yczhang-p224", "yczhang@tendyron.com", validNB, validNA, x509.KeyUsageDigitalSignature, x509.ECDSAWithSHA256, nil, key224, &key224.PublicKey)
+
+	// 1. Anchored 1024-bit RSA leaf under 2048-bit CA.
+	err = evalChain("sign", "yczhang@tendyron.com", [][]byte{leafUnder2k, ca2kDER}, [][]byte{ca2kDER}, false)
+	var wk *WeakKeySizeError
+	require.ErrorAs(t, err, &wk)
+	require.Equal(t, "yczhang", wk.Subject)
+	require.Equal(t, "RSA", wk.KeyAlgo)
+	require.Equal(t, 1024, wk.KeyBits)
+	require.Equal(t, 2048, wk.MinBits)
+	require.NoError(t, evalChain("sign", "yczhang@tendyron.com", [][]byte{leafUnder2k, ca2kDER}, [][]byte{ca2kDER}, true))
+
+	// 2. Anchored 1024-bit RSA leaf under 1024-bit CA.
+	err = evalChain("sign", "yczhang@tendyron.com", [][]byte{leafUnder1k, ca1kDER}, [][]byte{ca1kDER}, false)
+	require.ErrorAs(t, err, &wk)
+	require.NoError(t, evalChain("sign", "yczhang@tendyron.com", [][]byte{leafUnder1k, ca1kDER}, [][]byte{ca1kDER}, true))
+
+	// 3. Untrusted (no anchor) 1024-bit RSA leaf.
+	err = evalChain("sign", "yczhang@tendyron.com", [][]byte{leafUnder2k, ca2kDER}, nil, false)
+	require.ErrorAs(t, err, &wk)
+	err = evalChain("sign", "yczhang@tendyron.com", [][]byte{leafUnder2k, ca2kDER}, nil, true)
+	require.Error(t, err)
+	require.False(t, errors.Is(err, ErrWeakKeySize), "untrusted 1024-bit chain must still fail trust even with compat on: %v", err)
+
+	// 4. Expired anchored 1024-bit RSA leaf.
+	err = evalChain("sign", "yczhang@tendyron.com", [][]byte{leafExpired, ca2kDER}, [][]byte{ca2kDER}, true)
+	require.Error(t, err)
+	require.False(t, errors.Is(err, ErrWeakKeySize))
+
+	// 5. Wrong email anchored 1024-bit RSA leaf.
+	err = evalChain("sign", "other@tendyron.com", [][]byte{leafUnder2k, ca2kDER}, [][]byte{ca2kDER}, true)
+	require.Error(t, err)
+	require.False(t, errors.Is(err, ErrWeakKeySize))
+
+	// 6. Wrong KeyUsage (keyEncipherment checked as sign) anchored 1024-bit RSA leaf.
+	err = evalChain("sign", "yczhang@tendyron.com", [][]byte{leafEncryptOnly, ca2kDER}, [][]byte{ca2kDER}, true)
+	require.Error(t, err)
+	require.False(t, errors.Is(err, ErrWeakKeySize))
+
+	// 7. SHA-1 signed anchored 1024-bit RSA leaf.
+	err = evalChain("sign", "yczhang@tendyron.com", [][]byte{leafSHA1, ca2kDER}, [][]byte{ca2kDER}, true)
+	require.Error(t, err)
+	require.False(t, errors.Is(err, ErrWeakKeySize))
+
+	// 8. Anchored 512-bit RSA leaf must still fail with compat ON.
+	err = evalChain("sign", "yczhang@tendyron.com", [][]byte{leaf512}, [][]byte{leaf512}, true)
+	wk = nil
+	require.ErrorAs(t, err, &wk)
+	require.Equal(t, 512, wk.KeyBits)
+
+	// 9. Anchored ECDSA P-224 leaf must still fail with compat ON.
+	err = evalChain("sign", "yczhang@tendyron.com", [][]byte{leaf224}, [][]byte{leaf224}, true)
+	wk = nil
+	require.ErrorAs(t, err, &wk)
+	require.Equal(t, "ECDSA", wk.KeyAlgo)
+	require.Equal(t, 224, wk.KeyBits)
 }

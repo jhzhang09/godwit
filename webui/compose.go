@@ -11,6 +11,7 @@ import (
 	"github.com/godwit-email/godwit/core"
 	"github.com/godwit-email/godwit/core/mail"
 	"github.com/godwit-email/godwit/internal/i18n"
+	"github.com/godwit-email/godwit/internal/smime"
 )
 
 var (
@@ -432,6 +433,7 @@ func (p *ComposePage) Send(ctx context.Context, revision int64, digest string, a
 	res := SendResult{Warnings: []SendWarning{}}
 	var we *core.SendWarningsError
 	var be *core.SendBlockedError
+	var wk *smime.WeakKeySizeError
 	switch {
 	case err == nil:
 		res.Sent, s.gone = true, true
@@ -444,6 +446,8 @@ func (p *ComposePage) Send(ctx context.Context, revision int64, digest string, a
 		res.Digest, err = we.Check.Digest, nil
 	case errors.As(err, &be):
 		res.Blocked, err = &SendWarning{Plugin: be.Plugin, Message: be.Message}, nil
+	case errors.As(err, &wk):
+		res, err = SendResult{}, errors.New(core.FormatWeakKeySizeError(wk))
 	default:
 		res = SendResult{}
 	}

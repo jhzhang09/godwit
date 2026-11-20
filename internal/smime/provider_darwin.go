@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto"
+	"crypto/rsa"
 	"errors"
 	"fmt"
 	"runtime"
@@ -21,13 +22,19 @@ import (
 )
 
 const (
-	cfStringUTF8 uint32 = 0x08000100
+	cfStringUTF8         uint32 = 0x08000100
+	kCFNumberSInt64Type  int    = 4
 
-	errSecSuccess      int32 = 0
-	errSecUserCanceled int32 = -128
-	errSecAuthFailed   int32 = -25293
-	errSecItemNotFound int32 = -25300
-	laErrorUserCancel  int   = -2
+	errSecSuccess            int32 = 0
+	errSecUserCanceled       int32 = -128
+	errSecAuthFailed         int32 = -25293
+	errSecItemNotFound       int32 = -25300
+	errSecUnsupportedKeySize int   = -67735
+	laErrorUserCancel        int   = -2
+
+	kSecTrustResultRecoverableTrustFailure int64 = 5
+	cssmErrCSPUnsupportedKeySize           int64 = -2147415784
+	minCompatRSAKeyBits                    int   = 1024
 
 	kSecKeyOperationTypeSign    int = 0
 	kSecKeyOperationTypeDecrypt int = 3
@@ -39,6 +46,12 @@ const (
 type darwinAPI struct {
 	cfRelease                        func(uintptr)
 	cfRetain                         func(uintptr) uintptr
+	cfGetTypeID                      func(uintptr) uintptr
+	cfDictionaryGetTypeID            func() uintptr
+	cfArrayGetTypeID                 func() uintptr
+	cfStringGetTypeID                func() uintptr
+	cfNumberGetTypeID                func() uintptr
+	cfBooleanGetTypeID               func() uintptr
 	cfDataCreate                     func(uintptr, unsafe.Pointer, int) uintptr
 	cfDataGetBytePtr                 func(uintptr) uintptr
 	cfDataGetLength                  func(uintptr) int
@@ -48,9 +61,13 @@ type darwinAPI struct {
 	cfStringGetCString               func(uintptr, unsafe.Pointer, int, uint32) bool
 	cfDictionaryCreate               func(uintptr, unsafe.Pointer, unsafe.Pointer, int, uintptr, uintptr) uintptr
 	cfDictionaryGetValue             func(uintptr, uintptr) uintptr
+	cfDictionaryGetCount             func(uintptr) int
+	cfDictionaryGetKeysAndValues     func(uintptr, unsafe.Pointer, unsafe.Pointer)
 	cfArrayCreate                    func(uintptr, unsafe.Pointer, int, uintptr) uintptr
 	cfArrayGetCount                  func(uintptr) int
 	cfArrayGetValueAtIndex           func(uintptr, int) uintptr
+	cfNumberGetValue                 func(uintptr, int, unsafe.Pointer) bool
+	cfBooleanGetValue                func(uintptr) bool
 	cfErrorGetCode                   func(uintptr) int
 	cfErrorCopyDescription           func(uintptr) uintptr
 	secCopyErrorMessageString        func(int32, uintptr) uintptr
@@ -66,8 +83,11 @@ type darwinAPI struct {
 	secKeyCreateDecryptedData        func(uintptr, uintptr, uintptr, *uintptr) uintptr
 	secPolicyCreateWithProperties    func(uintptr, uintptr) uintptr
 	secTrustCreateWithCertificates   func(uintptr, uintptr, *uintptr) int32
+	secTrustSetAnchorCertificates    func(uintptr, uintptr) int32
 	secTrustSetNetworkFetchAllowed   func(uintptr, bool) int32
 	secTrustEvaluateWithError        func(uintptr, *uintptr) bool
+	secTrustCopyResult               func(uintptr) uintptr
+	secTrustCopyCertificateChain     func(uintptr) uintptr
 	cmsDecoderCreate                 func(*uintptr) int32
 	cmsDecoderUpdateMessage          func(uintptr, unsafe.Pointer, uintptr) int32
 	cmsDecoderFinalizeMessage        func(uintptr) int32
@@ -125,6 +145,12 @@ var loadDarwinAPI = sync.OnceValues(func() (*darwinAPI, error) {
 	d := &darwinAPI{}
 	purego.RegisterLibFunc(&d.cfRelease, cf, "CFRelease")
 	purego.RegisterLibFunc(&d.cfRetain, cf, "CFRetain")
+	purego.RegisterLibFunc(&d.cfGetTypeID, cf, "CFGetTypeID")
+	purego.RegisterLibFunc(&d.cfDictionaryGetTypeID, cf, "CFDictionaryGetTypeID")
+	purego.RegisterLibFunc(&d.cfArrayGetTypeID, cf, "CFArrayGetTypeID")
+	purego.RegisterLibFunc(&d.cfStringGetTypeID, cf, "CFStringGetTypeID")
+	purego.RegisterLibFunc(&d.cfNumberGetTypeID, cf, "CFNumberGetTypeID")
+	purego.RegisterLibFunc(&d.cfBooleanGetTypeID, cf, "CFBooleanGetTypeID")
 	purego.RegisterLibFunc(&d.cfDataCreate, cf, "CFDataCreate")
 	purego.RegisterLibFunc(&d.cfDataGetBytePtr, cf, "CFDataGetBytePtr")
 	purego.RegisterLibFunc(&d.cfDataGetLength, cf, "CFDataGetLength")
@@ -134,9 +160,13 @@ var loadDarwinAPI = sync.OnceValues(func() (*darwinAPI, error) {
 	purego.RegisterLibFunc(&d.cfStringGetCString, cf, "CFStringGetCString")
 	purego.RegisterLibFunc(&d.cfDictionaryCreate, cf, "CFDictionaryCreate")
 	purego.RegisterLibFunc(&d.cfDictionaryGetValue, cf, "CFDictionaryGetValue")
+	purego.RegisterLibFunc(&d.cfDictionaryGetCount, cf, "CFDictionaryGetCount")
+	purego.RegisterLibFunc(&d.cfDictionaryGetKeysAndValues, cf, "CFDictionaryGetKeysAndValues")
 	purego.RegisterLibFunc(&d.cfArrayCreate, cf, "CFArrayCreate")
 	purego.RegisterLibFunc(&d.cfArrayGetCount, cf, "CFArrayGetCount")
 	purego.RegisterLibFunc(&d.cfArrayGetValueAtIndex, cf, "CFArrayGetValueAtIndex")
+	purego.RegisterLibFunc(&d.cfNumberGetValue, cf, "CFNumberGetValue")
+	purego.RegisterLibFunc(&d.cfBooleanGetValue, cf, "CFBooleanGetValue")
 	purego.RegisterLibFunc(&d.cfErrorGetCode, cf, "CFErrorGetCode")
 	purego.RegisterLibFunc(&d.cfErrorCopyDescription, cf, "CFErrorCopyDescription")
 
@@ -153,8 +183,11 @@ var loadDarwinAPI = sync.OnceValues(func() (*darwinAPI, error) {
 	purego.RegisterLibFunc(&d.secKeyCreateDecryptedData, sec, "SecKeyCreateDecryptedData")
 	purego.RegisterLibFunc(&d.secPolicyCreateWithProperties, sec, "SecPolicyCreateWithProperties")
 	purego.RegisterLibFunc(&d.secTrustCreateWithCertificates, sec, "SecTrustCreateWithCertificates")
+	purego.RegisterLibFunc(&d.secTrustSetAnchorCertificates, sec, "SecTrustSetAnchorCertificates")
 	purego.RegisterLibFunc(&d.secTrustSetNetworkFetchAllowed, sec, "SecTrustSetNetworkFetchAllowed")
 	purego.RegisterLibFunc(&d.secTrustEvaluateWithError, sec, "SecTrustEvaluateWithError")
+	purego.RegisterLibFunc(&d.secTrustCopyResult, sec, "SecTrustCopyResult")
+	purego.RegisterLibFunc(&d.secTrustCopyCertificateChain, sec, "SecTrustCopyCertificateChain")
 	purego.RegisterLibFunc(&d.cmsDecoderCreate, sec, "CMSDecoderCreate")
 	purego.RegisterLibFunc(&d.cmsDecoderUpdateMessage, sec, "CMSDecoderUpdateMessage")
 	purego.RegisterLibFunc(&d.cmsDecoderFinalizeMessage, sec, "CMSDecoderFinalizeMessage")
@@ -752,7 +785,203 @@ func (p *darwinProvider) Decrypt(_ context.Context, certDER, ciphertext []byte) 
 	return d.goBytes(out), nil
 }
 
-func (p *darwinProvider) VerifyTrust(_ context.Context, usage, email string, certsDER [][]byte) error {
+type darwinTrustDetails struct {
+	hasDetails       bool
+	resultValue      int64
+	hasKeySizeFail   bool
+	hasWeakKeyFail   bool
+	allKeySizeCompat bool
+	otherFailureKey  string
+	otherStatusCode  bool
+	firstKeySizeFail *WeakKeySizeError
+}
+
+func darwinTrustFailureError(key string) error {
+	switch key {
+	case "AnchorTrusted", "ValidRoot", "MissingIntermediate":
+		return errors.New("certificate is not trusted")
+	case "TemporalValidity", "NotValidBefore":
+		return errors.New("certificate has expired or is not yet valid")
+	case "Email":
+		return errors.New("signer certificate email does not match sender")
+	case "KeyUsage", "ExtendedKeyUsage":
+		return errors.New("certificate key usage is not permitted")
+	case "SignatureHashAlgorithms", "WeakSignature":
+		return errors.New("certificate uses an unsupported signature hash algorithm")
+	case "Revocation", "RevocationResponseRequired":
+		return errors.New("certificate has been revoked")
+	default:
+		return errors.New("certificate is not trusted")
+	}
+}
+
+func (d *darwinAPI) inspectTrustResult(trustResult, chain uintptr) darwinTrustDetails {
+	if trustResult == 0 || d.cfGetTypeID(trustResult) != d.cfDictionaryGetTypeID() {
+		return darwinTrustDetails{}
+	}
+	var info darwinTrustDetails
+	if kVal := d.cfString("TrustResultValue"); kVal != 0 {
+		if val := d.cfDictionaryGetValue(trustResult, kVal); val != 0 && d.cfGetTypeID(val) == d.cfNumberGetTypeID() {
+			var rv int64
+			if d.cfNumberGetValue(val, kCFNumberSInt64Type, unsafe.Pointer(&rv)) {
+				info.resultValue = rv
+			}
+		}
+		d.release(kVal)
+	}
+	kDet := d.cfString("TrustResultDetails")
+	if kDet == 0 {
+		return info
+	}
+	detailsArr := d.cfDictionaryGetValue(trustResult, kDet)
+	d.release(kDet)
+	if detailsArr == 0 || d.cfGetTypeID(detailsArr) != d.cfArrayGetTypeID() {
+		return info
+	}
+	n := d.cfArrayGetCount(detailsArr)
+	if n <= 0 {
+		return info
+	}
+	info.hasDetails = true
+	info.allKeySizeCompat = true
+
+	chainLen := 0
+	if chain != 0 && d.cfGetTypeID(chain) == d.cfArrayGetTypeID() {
+		chainLen = d.cfArrayGetCount(chain)
+	}
+
+	dictTypeID := d.cfDictionaryGetTypeID()
+	strTypeID := d.cfStringGetTypeID()
+	boolTypeID := d.cfBooleanGetTypeID()
+	arrTypeID := d.cfArrayGetTypeID()
+	numTypeID := d.cfNumberGetTypeID()
+
+	for i := range n {
+		elem := d.cfArrayGetValueAtIndex(detailsArr, i)
+		if elem == 0 || d.cfGetTypeID(elem) != dictTypeID {
+			if info.otherFailureKey == "" {
+				info.otherFailureKey = "unknown"
+			}
+			info.allKeySizeCompat = false
+			continue
+		}
+		cnt := d.cfDictionaryGetCount(elem)
+		if cnt <= 0 {
+			continue
+		}
+		keys := make([]uintptr, cnt)
+		vals := make([]uintptr, cnt)
+		d.cfDictionaryGetKeysAndValues(elem, unsafe.Pointer(&keys[0]), unsafe.Pointer(&vals[0]))
+		certHasKeySize := false
+		for j := range cnt {
+			kRef, v := keys[j], vals[j]
+			if kRef == 0 || d.cfGetTypeID(kRef) != strTypeID {
+				if info.otherFailureKey == "" {
+					info.otherFailureKey = "unknown"
+				}
+				continue
+			}
+			k := d.goString(kRef)
+			switch k {
+			case "KeySize":
+				if v != 0 && d.cfGetTypeID(v) == boolTypeID {
+					if !d.cfBooleanGetValue(v) {
+						certHasKeySize = true
+						info.hasKeySizeFail = true
+					}
+				} else if info.otherFailureKey == "" {
+					info.otherFailureKey = k
+				}
+			case "WeakKeySize":
+				certHasKeySize = true
+				info.hasKeySizeFail = true
+				info.hasWeakKeyFail = true
+				info.allKeySizeCompat = false
+			case "StatusCodes":
+				if v == 0 || d.cfGetTypeID(v) != arrTypeID {
+					info.otherStatusCode = true
+					continue
+				}
+				scCount := d.cfArrayGetCount(v)
+				for si := range scCount {
+					scRef := d.cfArrayGetValueAtIndex(v, si)
+					if scRef == 0 || d.cfGetTypeID(scRef) != numTypeID {
+						info.otherStatusCode = true
+						continue
+					}
+					var sc int64
+					if !d.cfNumberGetValue(scRef, kCFNumberSInt64Type, unsafe.Pointer(&sc)) || sc != cssmErrCSPUnsupportedKeySize {
+						info.otherStatusCode = true
+					}
+				}
+			default:
+				if info.otherFailureKey == "" {
+					info.otherFailureKey = k
+				}
+			}
+		}
+		if certHasKeySize {
+			if i >= chainLen {
+				info.allKeySizeCompat = false
+				continue
+			}
+			certRef := d.cfArrayGetValueAtIndex(chain, i)
+			var der []byte
+			if certRef != 0 {
+				derData := d.secCertificateCopyData(certRef)
+				der = d.goBytes(derData)
+				d.release(derData)
+			}
+			cert, err := ParseCertificate(der)
+			if err != nil {
+				info.allKeySizeCompat = false
+				continue
+			}
+			wk := weakKeySizeErrorFromCert(cert)
+			if info.firstKeySizeFail == nil {
+				info.firstKeySizeFail = wk
+			}
+			pub, ok := cert.PublicKey.(*rsa.PublicKey)
+			if !ok || pub == nil || pub.N == nil || pub.N.BitLen() < minCompatRSAKeyBits {
+				info.allKeySizeCompat = false
+			}
+		}
+	}
+	return info
+}
+
+func (d *darwinAPI) evaluateTrust(trust uintptr, allowWeakRSA bool) error {
+	var cfErr uintptr
+	if d.secTrustEvaluateWithError(trust, &cfErr) {
+		d.release(cfErr)
+		return nil
+	}
+	code, origErr := d.cfErr(cfErr, "certificate is not trusted")
+	d.release(cfErr)
+
+	trustResult := d.secTrustCopyResult(trust)
+	defer d.release(trustResult)
+	chain := d.secTrustCopyCertificateChain(trust)
+	defer d.release(chain)
+
+	info := d.inspectTrustResult(trustResult, chain)
+	if allowWeakRSA && info.hasDetails && info.resultValue == kSecTrustResultRecoverableTrustFailure &&
+		info.hasKeySizeFail && !info.hasWeakKeyFail && info.otherFailureKey == "" && !info.otherStatusCode && info.allKeySizeCompat {
+		return nil
+	}
+	if allowWeakRSA && code == errSecUnsupportedKeySize && info.allKeySizeCompat {
+		return darwinTrustFailureError(info.otherFailureKey)
+	}
+	if code == errSecUnsupportedKeySize || (info.hasKeySizeFail && (!allowWeakRSA || !info.allKeySizeCompat)) {
+		if info.firstKeySizeFail != nil {
+			return info.firstKeySizeFail
+		}
+		return &WeakKeySizeError{}
+	}
+	return origErr
+}
+
+func (p *darwinProvider) VerifyTrust(ctx context.Context, usage, email string, certsDER [][]byte) error {
 	d, err := loadDarwinAPI()
 	if err != nil {
 		return err
@@ -821,17 +1050,10 @@ func (p *darwinProvider) VerifyTrust(_ context.Context, usage, email string, cer
 	if st := d.secTrustSetNetworkFetchAllowed(trust, false); st != errSecSuccess {
 		return d.secErr(st)
 	}
-	var cfErr uintptr
-	if !d.secTrustEvaluateWithError(trust, &cfErr) {
-		_, e := d.cfErr(cfErr, "certificate is not trusted")
-		d.release(cfErr)
-		return e
-	}
-	d.release(cfErr)
-	return nil
+	return d.evaluateTrust(trust, AllowWeakKeySize(ctx))
 }
 
-func (p *darwinProvider) VerifyCMS(_ context.Context, email string, cmsDER, detached []byte) (cmsVerifyResult, error) {
+func (p *darwinProvider) VerifyCMS(ctx context.Context, email string, cmsDER, detached []byte) (cmsVerifyResult, error) {
 	d, err := loadDarwinAPI()
 	if err != nil {
 		return cmsVerifyResult{}, err
@@ -941,52 +1163,46 @@ func (p *darwinProvider) VerifyCMS(_ context.Context, email string, cmsDER, deta
 				verifyErr = errors.New("invalid S/MIME signature")
 			} else if st := d.secTrustSetNetworkFetchAllowed(trust, false); st != errSecSuccess {
 				verifyErr = d.secErr(st)
+			} else if err := d.evaluateTrust(trust, AllowWeakKeySize(ctx)); err != nil {
+				verifyErr = err
 			} else {
-				var cfErr uintptr
-				if !d.secTrustEvaluateWithError(trust, &cfErr) {
-					_, e := d.cfErr(cfErr, "certificate is not trusted")
-					d.release(cfErr)
-					verifyErr = e
+				var signer uintptr
+				if st := d.cmsDecoderCopySignerCert(decoder, 0, &signer); st != errSecSuccess {
+					d.release(signer)
+					verifyErr = d.secErr(st)
+				} else if signer == 0 {
+					verifyErr = errors.New("missing signer certificate")
 				} else {
-					d.release(cfErr)
-					var signer uintptr
-					if st := d.cmsDecoderCopySignerCert(decoder, 0, &signer); st != errSecSuccess {
-						d.release(signer)
-						verifyErr = d.secErr(st)
-					} else if signer == 0 {
-						verifyErr = errors.New("missing signer certificate")
-					} else {
-						defer d.release(signer)
-						if len(signerDER) == 0 {
-							certData := d.secCertificateCopyData(signer)
-							signerDER = d.goBytes(certData)
-							d.release(certData)
-						}
+					defer d.release(signer)
+					if len(signerDER) == 0 {
+						certData := d.secCertificateCopyData(signer)
+						signerDER = d.goBytes(certData)
+						d.release(certData)
+					}
 
-						var addrs uintptr
-						if st := d.secCertificateCopyEmailAddresses(signer, &addrs); st != errSecSuccess {
-							d.release(addrs)
-							verifyErr = d.secErr(st)
-						} else {
-							matched := false
-							if addrs != 0 {
-								n := d.cfArrayGetCount(addrs)
-								for i := range n {
-									if strings.EqualFold(d.goString(d.cfArrayGetValueAtIndex(addrs, i)), email) {
-										matched = true
-										break
-									}
-								}
-								d.release(addrs)
-							}
-							if !matched && len(signerDER) > 0 {
-								if cert, err := ParseCertificate(signerDER); err == nil && MatchesMailbox(cert, email) {
+					var addrs uintptr
+					if st := d.secCertificateCopyEmailAddresses(signer, &addrs); st != errSecSuccess {
+						d.release(addrs)
+						verifyErr = d.secErr(st)
+					} else {
+						matched := false
+						if addrs != 0 {
+							n := d.cfArrayGetCount(addrs)
+							for i := range n {
+								if strings.EqualFold(d.goString(d.cfArrayGetValueAtIndex(addrs, i)), email) {
 									matched = true
+									break
 								}
 							}
-							if !matched {
-								verifyErr = errors.New("signer certificate email does not match sender")
+							d.release(addrs)
+						}
+						if !matched && len(signerDER) > 0 {
+							if cert, err := ParseCertificate(signerDER); err == nil && MatchesMailbox(cert, email) {
+								matched = true
 							}
+						}
+						if !matched {
+							verifyErr = errors.New("signer certificate email does not match sender")
 						}
 					}
 				}

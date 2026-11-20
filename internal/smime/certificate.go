@@ -23,6 +23,62 @@ import (
 	"github.com/emmansun/gmsm/smx509"
 )
 
+// ErrWeakKeySize reports that a certificate uses a key length below OS minimum security requirements.
+var ErrWeakKeySize = errors.New("certificate key size below system security requirement")
+
+// WeakKeySizeError describes a certificate rejected due to an insufficient cryptographic key length.
+type WeakKeySizeError struct {
+	Subject string
+	KeyAlgo string
+	KeyBits int
+	MinBits int
+}
+
+// Unwrap allows errors.Is(err, ErrWeakKeySize) matching.
+func (e *WeakKeySizeError) Unwrap() error { return ErrWeakKeySize }
+
+// Error returns a clear English summary of the insufficient key size.
+func (e *WeakKeySizeError) Error() string {
+	if e == nil {
+		return ErrWeakKeySize.Error()
+	}
+	hasAlgo := e.KeyAlgo != "" && e.KeyBits > 0 && e.MinBits > 0
+	switch {
+	case e.Subject != "" && hasAlgo:
+		return fmt.Sprintf("certificate %q uses a key length below system requirements (%s %d-bit; requires at least %d-bit)", e.Subject, e.KeyAlgo, e.KeyBits, e.MinBits)
+	case e.Subject != "":
+		return fmt.Sprintf("certificate %q uses a key length below system security requirements", e.Subject)
+	case hasAlgo:
+		return fmt.Sprintf("certificate uses a key length below system requirements (%s %d-bit; requires at least %d-bit)", e.KeyAlgo, e.KeyBits, e.MinBits)
+	default:
+		return ErrWeakKeySize.Error()
+	}
+}
+
+func weakKeySizeErrorFromCert(cert *smx509.Certificate) *WeakKeySizeError {
+	if cert == nil {
+		return &WeakKeySizeError{}
+	}
+	wk := &WeakKeySizeError{
+		Subject: CertDisplaySubject(cert),
+	}
+	switch k := cert.PublicKey.(type) {
+	case *rsa.PublicKey:
+		if k != nil && k.N != nil {
+			wk.KeyAlgo = "RSA"
+			wk.KeyBits = k.N.BitLen()
+			wk.MinBits = 2048
+		}
+	case *ecdsa.PublicKey:
+		if k != nil && k.Curve != nil {
+			wk.KeyAlgo = "ECDSA"
+			wk.KeyBits = k.Curve.Params().BitSize
+			wk.MinBits = 256
+		}
+	}
+	return wk
+}
+
 // ParseCertificate 保留旧卡使用的有符号序列号；仅提取制信所需的元数据。
 // 信任判断始终将原始 DER 交给 macOS，无需放宽整个进程的 TLS 证书解析策略。
 func ParseCertificate(der []byte) (*smx509.Certificate, error) {

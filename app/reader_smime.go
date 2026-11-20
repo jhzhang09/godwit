@@ -34,15 +34,17 @@ type secureMessage struct {
 }
 
 type cachedSecure struct {
-	id        int64
-	result    secureMessage
-	html      string
-	modelHTML string
-	text      string
-	truncated bool
-	modelAtts []core.AttachmentInfo
-	syncModel bool
-	size      int
+	id           int64
+	accountID    int64
+	allowWeakKey bool
+	result       secureMessage
+	html         string
+	modelHTML    string
+	text         string
+	truncated    bool
+	modelAtts    []core.AttachmentInfo
+	syncModel    bool
+	size         int
 }
 
 func (c cachedSecure) decryptedBody() core.DecryptedBody {
@@ -71,9 +73,9 @@ func buildModelAttachments(atts []mail.Attachment) []core.AttachmentInfo {
 }
 
 // 仅在阅读会话内存中保留最近解封的少量结果，不落盘，切换回看时无需再次访问硬件 Key。
-func (r *reader) lookupSecure(id int64) (cachedSecure, bool) {
+func (r *reader) lookupSecure(id int64, allowWeakKey bool) (cachedSecure, bool) {
 	for i, e := range r.openedSecure {
-		if e.id == id {
+		if e.id == id && e.allowWeakKey == allowWeakKey {
 			if i > 0 {
 				r.openedSecure = slices.Insert(slices.Delete(r.openedSecure, i, i+1), 0, e)
 			}
@@ -81,6 +83,62 @@ func (r *reader) lookupSecure(id int64) (cachedSecure, bool) {
 		}
 	}
 	return cachedSecure{}, false
+}
+
+func (r *reader) messageAccountID(m core.MessageSummary) int64 {
+	if r == nil || r.p == nil {
+		return 0
+	}
+	if f, ok := r.p.folder(m.FolderID); ok && f.AccountID != 0 {
+		return f.AccountID
+	}
+	for _, fid := range m.FolderIDs {
+		if f, ok := r.p.folder(fid); ok && f.AccountID != 0 {
+			return f.AccountID
+		}
+	}
+	return 0
+}
+
+func (r *reader) smimeAllowWeakKey(m core.MessageSummary) bool {
+	accID := r.messageAccountID(m)
+	if accID == 0 {
+		return false
+	}
+	for _, acc := range r.p.a.accounts {
+		if acc.ID == accID {
+			return acc.SMIMEAllowWeakKey
+		}
+	}
+	return false
+}
+
+func (r *reader) invalidateSMIMEForAccount(accountID int64) {
+	if r == nil || accountID == 0 {
+		return
+	}
+	r.openedSecure = slices.DeleteFunc(r.openedSecure, func(e cachedSecure) bool {
+		return e.accountID == 0 || e.accountID == accountID
+	})
+	if r.session == nil {
+		return
+	}
+	for id, b := range r.bodies {
+		if b == nil {
+			continue
+		}
+		accID := r.messageAccountID(b.msg.MessageSummary)
+		if accID != 0 && accID != accountID {
+			continue
+		}
+		b.smimeResult = nil
+		b.smimePending = nil
+		b.smimeErr = nil
+		b.smimeSynced = false
+		if r.open[id] && r.p.a.cards != nil && protectedMail(b.msg) && !b.smimeRead.loading {
+			r.openSMIME(id, b, false)
+		}
+	}
 }
 
 func (r *reader) forgetSecure(id int64) {
@@ -264,10 +322,13 @@ func (r *reader) flushSMIMEView(id int64, b *msgBody) {
 
 func (r *reader) openSMIME(id int64, b *msgBody, retry bool) {
 	a, session, customOpen, customOpenFull := r.p.a, r.session, r.openCMS, r.openCMSFull
+	msg := b.msg
+	accountID := r.messageAccountID(msg.MessageSummary)
+	allowWeak := r.smimeAllowWeakKey(msg.MessageSummary)
 	b.smimePending = nil
 	if retry {
 		r.forgetSecure(id)
-	} else if cached, ok := r.lookupSecure(id); ok {
+	} else if cached, ok := r.lookupSecure(id, allowWeak); ok {
 		res := cached.result
 		b.smimeErr = nil
 		b.smimeResult = &res
@@ -302,7 +363,6 @@ func (r *reader) openSMIME(id int64, b *msgBody, retry bool) {
 	var modelAtts []core.AttachmentInfo
 	var truncated, syncModel, synced bool
 	var cachedSize int
-	msg := b.msg
 	cmsAtt, useAttCache := singleP7MAttachment(msg)
 	b.smimeErr = nil
 	b.smimeSynced = false
@@ -314,6 +374,7 @@ func (r *reader) openSMIME(id int64, b *msgBody, retry bool) {
 				return err
 			}
 		}
+		openCtx := smime.WithAllowWeakKeySize(ctx, allowWeak)
 		var opened smime.Opened
 		if useAttCache {
 			tAtt := time.Now()
@@ -330,13 +391,13 @@ func (r *reader) openSMIME(id int64, b *msgBody, retry bool) {
 			}
 			tOpen := time.Now()
 			if customOpenFull != nil {
-				opened, err = customOpenFull(ctx, msg.From, der)
+				opened, err = customOpenFull(openCtx, msg.From, der)
 			} else if customOpen != nil {
-				entity, enc, signer, oerr := customOpen(ctx, msg.From, der)
+				entity, enc, signer, oerr := customOpen(openCtx, msg.From, der)
 				opened = smime.Opened{Entity: entity, Encrypted: enc, Signer: signer}
 				err = oerr
 			} else {
-				opened, err = a.cards.OpenCMSForRead(ctx, msg.From, der)
+				opened, err = a.cards.OpenCMSForRead(openCtx, msg.From, der)
 			}
 			openDur = time.Since(tOpen)
 			if err != nil {
@@ -350,7 +411,7 @@ func (r *reader) openSMIME(id int64, b *msgBody, retry bool) {
 				return fmt.Errorf("read raw message: %w", err)
 			}
 			tOpen := time.Now()
-			opened, err = a.cards.OpenForRead(ctx, raw)
+			opened, err = a.cards.OpenForRead(openCtx, raw)
 			openDur = time.Since(tOpen)
 			if err != nil {
 				return err
@@ -361,7 +422,11 @@ func (r *reader) openSMIME(id int64, b *msgBody, retry bool) {
 		if err != nil {
 			return fmt.Errorf("parse decrypted body: %w", err)
 		}
-		result.signer, result.encrypted, result.verifyErr = opened.Signer, opened.Encrypted, opened.VerifyErr
+		result.signer, result.encrypted = opened.Signer, opened.Encrypted
+		result.verifyErr = opened.VerifyErr
+		if opened.VerifyErrCause != nil {
+			result.verifyErr = core.FormatSMIMEError(opened.VerifyErrCause)
+		}
 		certDER := opened.SignerCert
 		if len(certDER) == 0 {
 			certDER = opened.UnverifiedCert
@@ -426,8 +491,10 @@ func (r *reader) openSMIME(id int64, b *msgBody, retry bool) {
 			return
 		}
 		r.rememberSecure(cachedSecure{
-			id:        id,
-			result:    result,
+			id:           id,
+			accountID:    accountID,
+			allowWeakKey: allowWeak,
+			result:       result,
 			html:      safe,
 			modelHTML: modelHTML,
 			text:      text,
