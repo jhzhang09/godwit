@@ -39,7 +39,7 @@ func InsertLocal(ctx context.Context, db *store.DB, accountID, folderID int64, p
 	args := append([]any{accountID}, plan.args...)
 	args = append(args, nullable(p.MessageID), nullable(p.InReplyTo), nullable(strings.Join(p.References, " ")), p.Subject, p.From,
 		jsonList(p.To), jsonList(p.Cc), nullable(p.ReplyTo), p.Date.Unix(), `\Seen`, size,
-		mail.Snippet(p.Text), p.Text, nullable(p.HTML), p.Truncated, len(p.Attachments) > 0, nullable(labelFP(p, size)),
+		mail.Snippet(p.Text), p.Text, nullable(p.HTML), p.Truncated, hasRealAttachments(p.Attachments), nullable(labelFP(p, size)),
 		p.ListUnsubscribe, p.ListUnsubscribePost, p.ListID, p.AutoSubmitted, p.Precedence, p.AuthenticationResults, secStatus, secReason, now, p.RuleSent, now, hash)
 	stmts := append(plan.pre, sqlite.Statement{
 		SQL: `INSERT INTO messages(account_id, thread_id,

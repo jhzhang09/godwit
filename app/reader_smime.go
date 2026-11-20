@@ -14,8 +14,10 @@ import (
 	"github.com/godwit-email/godwit/core"
 	"github.com/godwit-email/godwit/core/mail"
 	"github.com/godwit-email/godwit/internal/i18n"
+	"github.com/godwit-email/godwit/internal/icons"
 	"github.com/godwit-email/godwit/internal/kit"
 	"github.com/godwit-email/godwit/internal/smime"
+	"github.com/godwit-email/godwit/internal/theme"
 )
 
 type secureBody struct {
@@ -34,9 +36,37 @@ type cachedSecure struct {
 	id        int64
 	result    secureMessage
 	html      string
+	modelHTML string
 	text      string
 	truncated bool
+	modelAtts []core.AttachmentInfo
+	syncModel bool
 	size      int
+}
+
+func (c cachedSecure) decryptedBody() core.DecryptedBody {
+	return core.DecryptedBody{
+		HTML:        c.modelHTML,
+		Text:        c.text,
+		Truncated:   c.truncated,
+		Attachments: slices.Clone(c.modelAtts),
+	}
+}
+
+func buildModelAttachments(atts []mail.Attachment) []core.AttachmentInfo {
+	var out []core.AttachmentInfo
+	for _, att := range atts {
+		if smime.IsPart(att.ContentType, att.Filename) {
+			continue
+		}
+		out = append(out, core.AttachmentInfo{
+			Filename:    att.Filename,
+			ContentType: att.ContentType,
+			Size:        att.Size,
+			Inline:      att.Inline,
+		})
+	}
+	return out
 }
 
 // 仅在阅读会话内存中保留最近解封的少量结果，不落盘，切换回看时无需再次访问硬件 Key。
@@ -96,31 +126,37 @@ func smimeText(key string, args ...any) string {
 	}
 	texts := map[string]map[string]string{
 		"zh-Hans": {
-			"smime.sign":         "发送时数字签名",
-			"smime.sign.help":    "使用此账户的硬件 Key，优先 SHA-256，旧卡可能需要 SHA-1。",
-			"smime.encrypt":      "发送时加密",
-			"smime.encrypt.help": "从邮箱名片文件夹读取收件人证书。缺少可用证书时保留草稿。",
-			"smime.decrypted":    "已解密",
-			"smime.verified":     "签名已验证 · %s",
-			"smime.save":         "保存 %s",
+			"smime.sign":            "发送时数字签名",
+			"smime.sign.help":       "使用此账户的硬件 Key，优先 SHA-256，旧卡可能需要 SHA-1。",
+			"smime.encrypt":         "发送时加密",
+			"smime.encrypt.help":    "从邮箱名片文件夹读取收件人证书。缺少可用证书时保留草稿。",
+			"smime.decrypted":       "已解密",
+			"smime.verified":        "签名已验证 · %s",
+			"smime.save":            "保存 %s",
+			"smime.badge.encrypted": "加密邮件",
+			"smime.badge.signed":    "数字签名",
 		},
 		"zh-Hant": {
-			"smime.sign":         "寄送時數位簽章",
-			"smime.sign.help":    "使用此帳號的硬體金鑰，優先採用 SHA-256；舊卡可能需要 SHA-1。",
-			"smime.encrypt":      "寄送時加密",
-			"smime.encrypt.help": "從「邮箱名片」資料夾讀取收件人憑證。缺少憑證時保留草稿。",
-			"smime.decrypted":    "已解密",
-			"smime.verified":     "已驗證簽章 · %s",
-			"smime.save":         "儲存 %s",
+			"smime.sign":            "寄送時數位簽章",
+			"smime.sign.help":       "使用此帳號的硬體金鑰，優先採用 SHA-256；舊卡可能需要 SHA-1。",
+			"smime.encrypt":         "寄送時加密",
+			"smime.encrypt.help":    "從「邮箱名片」資料夾讀取收件人憑證。缺少憑證時保留草稿。",
+			"smime.decrypted":       "已解密",
+			"smime.verified":        "已驗證簽章 · %s",
+			"smime.save":            "儲存 %s",
+			"smime.badge.encrypted": "加密郵件",
+			"smime.badge.signed":    "數位簽章",
 		},
 		"en": {
-			"smime.sign":         "Sign outgoing mail",
-			"smime.sign.help":    "Use the hardware key for this account. Prefer SHA-256; older keys may require SHA-1.",
-			"smime.encrypt":      "Encrypt outgoing mail",
-			"smime.encrypt.help": "Use recipient certificates from the 邮箱名片 mail folder. A missing certificate stops the send.",
-			"smime.decrypted":    "Decrypted",
-			"smime.verified":     "Signature verified · %s",
-			"smime.save":         "Save %s",
+			"smime.sign":            "Sign outgoing mail",
+			"smime.sign.help":       "Use the hardware key for this account. Prefer SHA-256; older keys may require SHA-1.",
+			"smime.encrypt":         "Encrypt outgoing mail",
+			"smime.encrypt.help":    "Use recipient certificates from the 邮箱名片 mail folder. A missing certificate stops the send.",
+			"smime.decrypted":       "Decrypted",
+			"smime.verified":        "Signature verified · %s",
+			"smime.save":            "Save %s",
+			"smime.badge.encrypted": "Encrypted",
+			"smime.badge.signed":    "Signed",
 		},
 	}
 	msg := texts[lang][key]
@@ -133,19 +169,41 @@ func smimeText(key string, args ...any) string {
 	return msg
 }
 
+func smimeListIcon(c *ui.Context, kind string) {
+	icon, labelKey := "", ""
+	switch kind {
+	case "encrypted":
+		icon, labelKey = "lock", "smime.badge.encrypted"
+	case "signed":
+		icon, labelKey = "shield-check", "smime.badge.signed"
+	default:
+		return
+	}
+	ui.Icon(c, icons.Get(icon)).Size(theme.IconXs, theme.IconXs).TextColor(theme.Of(c).Muted).Label(smimeText(labelKey))
+}
+
 func (r *reader) smimeNotice(c *ui.Context, id int64, b *msgBody) {
 	if r.p.a.cards == nil {
 		return
 	}
 	if result := b.smimeResult; result != nil {
 		var labels []string
+		icon := "shield-check"
 		if result.encrypted {
+			icon = "lock"
 			labels = append(labels, smimeText("smime.decrypted"))
 		}
 		if result.signer != "" {
 			labels = append(labels, smimeText("smime.verified", result.signer))
 		}
-		ui.Text(c, strings.Join(labels, " · ")).Selectable()
+		if len(labels) == 0 {
+			return
+		}
+		t, th := theme.Of(c), c.Theme()
+		ui.Row(c).Gap(th.Space(1.5)).AlignItems(ui.Center).Children(func() {
+			ui.Icon(c, icons.Get(icon)).Size(theme.IconXs, theme.IconXs).TextColor(t.Muted)
+			ui.Text(c, strings.Join(labels, " · ")).Selectable()
+		})
 		return
 	}
 	if b.smimeRead.loading {
@@ -155,6 +213,27 @@ func (r *reader) smimeNotice(c *ui.Context, id int64, b *msgBody) {
 			kit.AlertAction(c, kit.Danger, i18n.T("common.retry"), func() { r.openSMIME(id, b, true) })
 		})
 	}
+}
+
+func (r *reader) needsSMIMEDecrypt(id int64) bool {
+	if r.p.a.cards == nil {
+		return false
+	}
+	if b := r.bodies[id]; b != nil && b.smimeResult != nil && b.smimeSynced {
+		return false
+	}
+	if i := slices.IndexFunc(r.msgs, func(m core.MessageSummary) bool { return m.ID == id }); i >= 0 && r.msgs[i].SMIME == "encrypted" {
+		return true
+	}
+	if b := r.bodies[id]; b != nil && b.ready {
+		if b.msg.SMIME == "encrypted" {
+			return true
+		}
+		return slices.ContainsFunc(b.msg.Attachments, func(att core.AttachmentInfo) bool {
+			return smime.IsCMSPart(att.ContentType, att.Filename)
+		})
+	}
+	return false
 }
 
 // prepareSMIMEView 在创建正文 WebView 之前提前启动密文解封，使构建页面与硬件激活并行。
@@ -171,6 +250,7 @@ func (r *reader) prepareSMIMEView(id int64, b *msgBody) {
 func (r *reader) flushSMIMEView(id int64, b *msgBody) {
 	if p := b.smimePending; p != nil {
 		b.smimePending = nil
+		b.translation = nil
 		r.p.a.plat.ShowSecureBody(id, p.html, p.text, p.truncated)
 		return
 	}
@@ -188,21 +268,41 @@ func (r *reader) openSMIME(id int64, b *msgBody, retry bool) {
 		res := cached.result
 		b.smimeErr = nil
 		b.smimeResult = &res
+		b.translation = nil
 		if b.view != nil {
 			a.plat.ShowSecureBody(id, cached.html, cached.text, cached.truncated)
 		} else {
 			b.smimePending = &secureBody{html: cached.html, text: cached.text, truncated: cached.truncated}
 		}
+		if !cached.syncModel {
+			b.smimeSynced = true
+			return
+		}
+		b.smimeSynced = false
+		body := cached.decryptedBody()
+		b.smimeRead.Run(a, func(ctx context.Context) error {
+			return a.svc.SetDecryptedBody(ctx, id, body)
+		}, func(err error) {
+			if !r.has(session) || !r.open[id] || r.bodies[id] != b {
+				return
+			}
+			if err == nil {
+				b.smimeSynced = true
+				r.onSMIMEDecrypted(id)
+			}
+		})
 		return
 	}
 
 	var result secureMessage
-	var safe, text string
-	var truncated bool
+	var safe, modelHTML, text string
+	var modelAtts []core.AttachmentInfo
+	var truncated, syncModel, synced bool
 	var cachedSize int
 	msg := b.msg
 	cmsAtt, useAttCache := singleP7MAttachment(msg)
 	b.smimeErr = nil
+	b.smimeSynced = false
 	b.smimeRead.Run(a, func(ctx context.Context) error {
 		t0 := time.Now()
 		var attDur, readDur, openDur, parseDur time.Duration
@@ -269,6 +369,28 @@ func (r *reader) openSMIME(id int64, b *msgBody, retry bool) {
 		}
 		safe, _, _ = mail.Sanitize(parsed.HTML, inline, false)
 		text, truncated = parsed.Text, parsed.Truncated
+		syncModel = result.encrypted || (msg.HTML == "" && msg.Text == "")
+		if syncModel {
+			modelHTML, _, _ = mail.Sanitize(parsed.HTML, nil, false)
+			modelAtts = buildModelAttachments(result.attachments)
+			if err := a.svc.SetDecryptedBody(ctx, id, core.DecryptedBody{
+				HTML:        modelHTML,
+				Text:        text,
+				Truncated:   truncated,
+				Attachments: modelAtts,
+			}); err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				if readerTiming {
+					log.Printf("smime timing: message %d SetDecryptedBody error: %v", id, err)
+				}
+			} else {
+				synced = true
+			}
+		} else {
+			synced = true
+		}
 		cachedSize += len(safe) + len(text)
 		parseDur = time.Since(tParse)
 		if readerTiming {
@@ -290,15 +412,23 @@ func (r *reader) openSMIME(id int64, b *msgBody, retry bool) {
 			id:        id,
 			result:    result,
 			html:      safe,
+			modelHTML: modelHTML,
 			text:      text,
 			truncated: truncated,
+			modelAtts: modelAtts,
+			syncModel: syncModel,
 			size:      cachedSize,
 		})
 		b.smimeResult = &result
+		b.smimeSynced = synced
+		b.translation = nil
 		if b.view != nil {
 			a.plat.ShowSecureBody(id, safe, text, truncated)
 		} else {
 			b.smimePending = &secureBody{html: safe, text: text, truncated: truncated}
+		}
+		if syncModel && synced {
+			r.onSMIMEDecrypted(id)
 		}
 	})
 }

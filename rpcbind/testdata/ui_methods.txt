@@ -26,6 +26,7 @@ ReplaceUIBackend
 SendLater
 SenderAvatar
 SetComposeOpen
+SetDecryptedBody
 SetInboxOnly
 SetTimeZone
 SetUIForeground

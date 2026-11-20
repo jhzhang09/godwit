@@ -12,6 +12,7 @@ import (
 	"github.com/godwit-email/godwit/core/gateway"
 	gomail "github.com/godwit-email/godwit/core/mail"
 	"github.com/godwit-email/godwit/core/store"
+	"github.com/godwit-email/godwit/internal/smime"
 )
 
 // mailItem is one message as handed to a model: every mail-derived field sits
@@ -38,6 +39,26 @@ const truncatedNote = "\n[truncated]"
 var errMailNotFound = errors.New("not found")
 
 func (s *Service) mailForModel(ctx context.Context, id int64) (Message, error) {
+	m, err := s.mailForModelDB(ctx, id)
+	if err != nil {
+		return Message{}, err
+	}
+	if dec, ok := s.decryptedBody(ctx, m.ID); ok {
+		m.HTML = dec.HTML
+		m.Text = dec.Text
+		m.Truncated = dec.Truncated
+		m.Attachments = dec.Attachments
+		return m, nil
+	}
+	if m.HTML != "" || m.Text != "" {
+		m.Attachments = slices.DeleteFunc(slices.Clone(m.Attachments), func(a AttachmentInfo) bool {
+			return smime.IsPart(a.ContentType, a.Filename)
+		})
+	}
+	return m, nil
+}
+
+func (s *Service) mailForModelDB(ctx context.Context, id int64) (Message, error) {
 	id, err := s.resolveID(ctx, id)
 	if err != nil {
 		return Message{}, err

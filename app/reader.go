@@ -28,6 +28,7 @@ import (
 	"github.com/godwit-email/godwit/internal/i18n"
 	"github.com/godwit-email/godwit/internal/icons"
 	"github.com/godwit-email/godwit/internal/kit"
+	"github.com/godwit-email/godwit/internal/smime"
 	"github.com/godwit-email/godwit/internal/theme"
 )
 
@@ -159,6 +160,7 @@ type msgBody struct {
 	smimeResult  *secureMessage
 	smimePending *secureBody
 	smimeErr     error
+	smimeSynced  bool
 
 	view        ui.NativeWebView // the body's page; nil while folded, not read yet, or when it could not be made
 	close       func()           // closes view: unbinds and destroys it
@@ -350,6 +352,7 @@ func (r *reader) load(k [2]int64) {
 			if prev, ok := known[m.ID]; ok {
 				if b := r.bodies[m.ID]; b != nil {
 					b.msg.FromName = m.FromName
+					b.msg.SMIME = m.SMIME
 					if prev.folder != m.FolderID {
 						b.msg.MessageSummary = m
 						b.trusted = false
@@ -1919,7 +1922,7 @@ func (r *reader) column(c *ui.Context) ui.Element {
 func (r *reader) attachments(c *ui.Context, b *msgBody) {
 	var files []core.AttachmentInfo
 	for _, att := range b.msg.Attachments {
-		if !att.Inline {
+		if !att.Inline && !smime.IsPart(att.ContentType, att.Filename) {
 			files = append(files, att)
 		}
 	}

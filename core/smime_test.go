@@ -9,6 +9,8 @@ import (
 	"encoding/base64"
 	"fmt"
 	"github.com/emmansun/gmsm/pkcs7"
+	"github.com/godwit-email/godwit/core/gateway"
+	"github.com/godwit-email/godwit/core/internal/testllm"
 	"github.com/godwit-email/godwit/core/store"
 	"github.com/godwit-email/godwit/internal/carddav"
 	"github.com/godwit-email/godwit/internal/smime"
@@ -21,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -387,4 +390,201 @@ func TestSMIMEPrefetchPrioritizesViewedFolderAndOpenThread(t *testing.T) {
 	require.NotEmpty(t, got["team-open@x"], "当前打开会话的 S/MIME 密文应最高优先预取")
 	require.NotEmpty(t, got["team-visible@x"], "当前列表视图中的子文件夹邮件应先于全局其他文件夹预取")
 	require.Empty(t, got["global-new@x"], "其他文件夹较新邮件应排在打开会话与当前列表视图之后")
+}
+
+func makeTestSigned(id, date, body string, withRealAttachment bool) string {
+	const sigB64 = "c2lnbmF0dXJlLWJ5dGVz"
+	var bodyPart string
+	if withRealAttachment {
+		bodyPart = "--inner-bnd\r\n" +
+			"Content-Type: text/plain; charset=utf-8\r\n\r\n" +
+			body + "\r\n" +
+			"--inner-bnd\r\n" +
+			"Content-Type: application/pdf; name=\"report.pdf\"\r\n" +
+			"Content-Disposition: attachment; filename=\"report.pdf\"\r\n" +
+			"Content-Transfer-Encoding: base64\r\n\r\n" +
+			"JVBERi0xLjQK\r\n" +
+			"--inner-bnd--\r\n"
+		bodyPart = "Content-Type: multipart/mixed; boundary=\"inner-bnd\"\r\n\r\n" + bodyPart
+	} else {
+		bodyPart = "Content-Type: text/plain; charset=utf-8\r\n\r\n" + body + "\r\n"
+	}
+	return fmt.Sprintf("Message-ID: <%s>\r\nFrom: bob@example.com\r\nTo: alice@example.com\r\nSubject: %s\r\nDate: %s\r\nMIME-Version: 1.0\r\nContent-Type: multipart/signed; protocol=\"application/pkcs7-signature\"; micalg=sha-256; boundary=\"sig-bnd\"\r\n\r\n--sig-bnd\r\n%s\r\n--sig-bnd\r\nContent-Type: application/pkcs7-signature; name=\"smime.p7s\"\r\nContent-Disposition: attachment; filename=\"smime.p7s\"\r\nContent-Transfer-Encoding: base64\r\n\r\n%s\r\n--sig-bnd--\r\n",
+		id, id, date, bodyPart, sigB64)
+}
+
+func TestSMIMEHasAttachmentsSMIMEKindAndRepair(t *testing.T) {
+	e := newSendEnv(t, false)
+	e.put(t, "INBOX", makeTestP7M("p7m-only@x", "Wed, 07 Oct 2026 09:00:00 +0000", "cipher"))
+	e.put(t, "INBOX", makeTestSigned("p7s-only@x", "Tue, 06 Oct 2026 09:00:00 +0000", "signed text", false))
+	e.put(t, "INBOX", makeTestSigned("p7s-att@x", "Mon, 05 Oct 2026 09:00:00 +0000", "signed with pdf", true))
+	e.sync(t)
+
+	tp, err := e.s.ListThreads(t.Context(), View{Unified: "inbox"}, "", 50)
+	require.NoError(t, err)
+	threads := map[string]ThreadSummary{}
+	for _, it := range tp.Items {
+		threads[it.Subject] = it
+	}
+	assert.False(t, threads["p7m-only@x"].HasAttachments, "smime.p7m-only thread must not show paperclip")
+	assert.Equal(t, "encrypted", threads["p7m-only@x"].SMIME)
+	assert.False(t, threads["p7s-only@x"].HasAttachments, "smime.p7s-only thread must not show paperclip")
+	assert.Equal(t, "signed", threads["p7s-only@x"].SMIME)
+	assert.True(t, threads["p7s-att@x"].HasAttachments, "smime.p7s + real PDF must keep paperclip")
+	assert.Equal(t, "signed", threads["p7s-att@x"].SMIME)
+
+	mp, err := e.s.ListMessages(t.Context(), View{Unified: "inbox"}, "", 50)
+	require.NoError(t, err)
+	msgs := map[string]MessageSummary{}
+	for _, m := range mp.Items {
+		msgs[m.Subject] = m
+	}
+	assert.False(t, msgs["p7m-only@x"].HasAttachments)
+	assert.Equal(t, "encrypted", msgs["p7m-only@x"].SMIME)
+	assert.False(t, msgs["p7s-only@x"].HasAttachments)
+	assert.Equal(t, "signed", msgs["p7s-only@x"].SMIME)
+	assert.True(t, msgs["p7s-att@x"].HasAttachments)
+	assert.Equal(t, "signed", msgs["p7s-att@x"].SMIME)
+
+	sr, err := e.s.SearchWith(t.Context(), SearchQuery{From: "bob@example.com"}, 50)
+	require.NoError(t, err)
+	assert.Len(t, sr, 3)
+	for _, m := range sr {
+		assert.Equal(t, msgs[m.Subject].SMIME, m.SMIME)
+		assert.Equal(t, msgs[m.Subject].HasAttachments, m.HasAttachments)
+	}
+
+	th, err := e.s.GetThread(t.Context(), threads["p7m-only@x"].ID)
+	require.NoError(t, err)
+	require.Len(t, th.Messages, 1)
+	assert.Equal(t, "encrypted", th.Messages[0].SMIME)
+	assert.False(t, th.Messages[0].HasAttachments)
+
+	foundSMIME, err := e.s.Find(t.Context(), FindQuery{Kind: "attachment", SearchQuery: SearchQuery{Text: "smime"}})
+	require.NoError(t, err)
+	assert.Empty(t, foundSMIME.Attachments.Items, "smime.p7m/smime.p7s must be excluded from attachment search")
+
+	foundPDF, err := e.s.Find(t.Context(), FindQuery{Kind: "attachment", SearchQuery: SearchQuery{Text: "report"}})
+	require.NoError(t, err)
+	require.Len(t, foundPDF.Attachments.Items, 1)
+	assert.Equal(t, "report.pdf", foundPDF.Attachments.Items[0].Filename)
+
+	// Simulate pre-existing DB rows where S/MIME parts marked has_attachments = 1, then run startup repair.
+	_, err = e.s.db.Execute(t.Context(), `UPDATE messages SET has_attachments = 1`)
+	require.NoError(t, err)
+	require.NoError(t, e.s.repairSMIMEHasAttachments(t.Context()))
+
+	mp2, err := e.s.ListMessages(t.Context(), View{Unified: "inbox"}, "", 50)
+	require.NoError(t, err)
+	for _, m := range mp2.Items {
+		assert.Equal(t, m.Subject == "p7s-att@x", m.HasAttachments, "repaired has_attachments for %s", m.Subject)
+	}
+}
+
+func TestSMIMEDecryptedBodyUIOnlySkillsWitAndCacheBypass(t *testing.T) {
+	e := newSkillEnv(t)
+	encID := addMessage(t, e.s, "Secret Q4", "Bob <bob@x>", "", "", 1_700_000_200)
+	_, err := e.s.db.Execute(t.Context(), "UPDATE messages SET thread_id = 1 WHERE id = ?", encID)
+	require.NoError(t, err)
+	_, err = e.s.db.Execute(t.Context(), `INSERT INTO attachments(message_id, part, filename, content_type, size, inline)
+		VALUES (?, '1', 'smime.p7m', 'application/pkcs7-mime', 128, 0)`, encID)
+	require.NoError(t, err)
+
+	// Running summarize before decryption must neither leak/cache into ai_cache
+	// nor poison subsequent decrypted runs.
+	e.srv.Script(testllm.Turn{Text: []string{"placeholder before decrypt"}})
+	chBefore, err := e.s.RunSkill(t.Context(), "summarize", Target{Kind: "message", ID: encID})
+	require.NoError(t, err)
+	_ = drain(chBefore)
+	require.Equal(t, 0, e.cacheRows(t), "encrypted message must not populate ai_cache before decryption")
+
+	// Also seed a dummy ai_cache row to verify all decrypted AI/translation runs leave ai_cache untouched.
+	_, err = e.s.db.Execute(t.Context(), `INSERT INTO ai_cache(key, account_id, output, created_at)
+		VALUES ('stale-key', 1, 'stale empty ciphertext summary', 1700000000)`)
+	require.NoError(t, err)
+	initialCacheRows := e.cacheRows(t)
+
+	rawUI, cancelUI := context.WithCancel(t.Context())
+	uiCtx := WithUISession(rawUI, e.s)
+
+	const secretPlain = "Confidential Q4 budget is approved for $99M."
+	const secretHTML = "<p>Confidential Q4 budget is approved for $99M.</p>"
+	require.NoError(t, e.s.SetDecryptedBody(uiCtx, encID, DecryptedBody{
+		HTML:        secretHTML,
+		Text:        secretPlain,
+		Attachments: []AttachmentInfo{{Filename: "budget.pdf", ContentType: "application/pdf", Size: 2048}},
+	}))
+
+	// 1. UI session sees decrypted content and decrypted attachment metadata, without smime.p7m.
+	uiItems, err := e.s.mailContext(uiCtx, &gateway.Scope{}, []int64{encID}, defaultMailBudget)
+	require.NoError(t, err)
+	require.Len(t, uiItems, 1)
+	assert.Contains(t, uiItems[0].Block, secretPlain)
+	assert.Contains(t, uiItems[0].Block, "budget.pdf")
+	assert.NotContains(t, uiItems[0].Block, "smime.p7m")
+
+	// 2. Non-UI context (no uiSession) and plugins (pluginMail even under uiCtx) NEVER see decrypted content.
+	nonUIItems, err := e.s.mailContext(t.Context(), &gateway.Scope{}, []int64{encID}, defaultMailBudget)
+	require.NoError(t, err)
+	require.Len(t, nonUIItems, 1)
+	assert.NotContains(t, nonUIItems[0].Block, secretPlain)
+	assert.Contains(t, nonUIItems[0].Block, "smime.p7m")
+
+	pm, err := e.s.pluginMail(uiCtx, encID)
+	require.NoError(t, err)
+	assert.Empty(t, pm.Text)
+	assert.Empty(t, pm.HTML)
+
+	// 3. Summarize, whole-body translate, QuickReplies, MessageGist, and Wit AskWith all receive decrypted plaintext.
+	e.srv.Script(
+		testllm.Turn{Text: []string{"Approved Q4 budget is $99M."}},
+		testllm.Turn{Text: []string{`{"texts":["机密第四季度预算已批准，金额为 9900 万美元。"],"source":"en"}`}},
+		testllm.Turn{Text: []string{`{"replies":[{"label":"收到","html":"<p>收到，已确认第四季度预算。</p>"}]}`}},
+		testllm.Turn{Text: []string{"第四季度 9900 万美元预算已批"}},
+		testllm.Turn{Text: []string{"预算为 9900 万美元。"}},
+	)
+
+	chSum, err := e.s.RunSkill(uiCtx, "summarize", Target{Kind: "message", ID: encID})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"Approved Q4 budget is $99M."}, texts(drain(chSum)))
+
+	chTr, err := e.s.RunSkill(uiCtx, "translate", Target{Kind: "message", ID: encID, PreserveHTML: true})
+	require.NoError(t, err)
+	trEvs := drain(chTr)
+	require.GreaterOrEqual(t, len(trEvs), 2)
+	assert.Equal(t, "机密第四季度预算已批准，金额为 9900 万美元。", trEvs[1].Translations[secretPlain])
+
+	qrs, err := e.s.QuickReplies(uiCtx, encID)
+	require.NoError(t, err)
+	require.Len(t, qrs, 1)
+
+	gist, err := e.s.MessageGist(uiCtx, encID)
+	require.NoError(t, err)
+	assert.Contains(t, gist, "9900")
+
+	conv, err := e.s.NewConversation(uiCtx, "ask", 0)
+	require.NoError(t, err)
+	chWit, err := e.s.AskWith(uiCtx, conv.ID, "How much is the budget?", []int64{encID})
+	require.NoError(t, err)
+	witEvs := drainWit(t, chWit)
+	require.Equal(t, "done", witEvs[len(witEvs)-1].Kind)
+
+	reqs := e.srv.Requests()
+	require.Len(t, reqs, 6)
+	assert.Contains(t, string(reqs[0].Messages), "smime.p7m", "pre-decrypt call used encrypted DB view")
+	for i, req := range reqs[1:] {
+		body := string(req.Messages)
+		assert.Contains(t, body, secretPlain, "request %d did not receive decrypted plaintext", i+1)
+		assert.NotContains(t, body, "smime.p7m", "request %d leaked encrypted placeholder", i+1)
+	}
+
+	// 4. None of those AI/translation/gist/quick-reply runs wrote anything to ai_cache on disk.
+	assert.Equal(t, initialCacheRows, e.cacheRows(t), "ai_cache must not persist decrypted S/MIME outputs")
+
+	// 5. Disconnecting the UI session clears decrypted bodies from RAM immediately.
+	cancelUI()
+	require.Eventually(t, func() bool {
+		_, ok := e.s.decryptedBody(uiCtx, encID)
+		return !ok
+	}, time.Second, time.Millisecond)
 }

@@ -32,6 +32,7 @@ type ThreadSummary struct {
 	Flagged          int // messages starred
 	LastDate         time.Time
 	HasAttachments   bool
+	SMIME            string
 	Security         gomail.SecurityReport
 }
 
@@ -177,7 +178,7 @@ func (s *Service) fillThreads(ctx context.Context, items []ThreadSummary, only s
 			t.Participants = append(t.Participants, name)
 		}
 	}
-	return nil
+	return s.fillThreadSMIME(ctx, items)
 }
 
 // GetThread returns the thread's messages by date ascending.

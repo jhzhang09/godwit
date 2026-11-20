@@ -433,6 +433,10 @@ func New(ctx context.Context, opts Options) (*Service, error) {
 		s.startSecurityScanner()
 	}
 	s.startImagePrefetch()
+	if err := s.repairSMIMEHasAttachments(ctx); err != nil {
+		s.Close()
+		return nil, fmt.Errorf("smime attachments: %w", err)
+	}
 	s.initSMIME()
 	if opts.Registry != nil {
 		s.startRegistryRefresh()

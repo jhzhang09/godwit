@@ -777,6 +777,10 @@ func (cl *Client) SetConversationModel(ctx context.Context, id int64, ref string
 	return callErr(cl, ctx, "SetConversationModel", id, ref, effort)
 }
 
+func (cl *Client) SetDecryptedBody(ctx context.Context, messageID int64, body core.DecryptedBody) error {
+	return callErr(cl, ctx, "SetDecryptedBody", messageID, body)
+}
+
 func (cl *Client) SetDraftAccount(ctx context.Context, id int64, accountID int64, revision int64) (core.Draft, error) {
 	return call[core.Draft](cl, ctx, "SetDraftAccount", id, accountID, revision)
 }

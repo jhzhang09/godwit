@@ -41,6 +41,7 @@ type mailItem struct {
 	Date                   time.Time
 	Count, Unread, Flagged int
 	Attach                 bool
+	SMIME                  string
 	Msg                    core.MessageSummary // a message row's own summary
 	Labels                 []core.AppliedLabel
 	Security               gomail.SecurityReport
@@ -56,12 +57,12 @@ type mailItem struct {
 func threadItem(t core.ThreadSummary) mailItem {
 	return mailItem{ID: t.ID, Thread: true, Who: strings.Join(t.Participants, ", "), Subject: t.Subject, Snippet: t.Snippet,
 		Date: t.LastDate, Count: t.Count, Unread: t.Unread, Flagged: t.Flagged, Attach: t.HasAttachments,
-		Security: t.Security, Msg: core.MessageSummary{From: t.From}}
+		SMIME: t.SMIME, Security: t.Security, Msg: core.MessageSummary{From: t.From, SMIME: t.SMIME}}
 }
 
 func messageItem(m core.MessageSummary) mailItem {
 	it := mailItem{ID: m.ID, Who: cmp.Or(m.FromName, displayName(m.From)), Subject: m.Subject, Snippet: m.Snippet, Date: m.Date,
-		Count: 1, Attach: m.HasAttachments, Msg: m, Security: m.Security}
+		Count: 1, Attach: m.HasAttachments, SMIME: m.SMIME, Msg: m, Security: m.Security}
 	if !slices.Contains(m.Flags, `\Seen`) {
 		it.Unread = 1
 	}
@@ -1277,6 +1278,7 @@ func (p *mailPage) resultRow(c *ui.Context, it mailItem) ui.Element {
 			securityIcon(c, p.a.settings, it.Security)
 			ui.Spacer(c)
 			p.starButton(c, it, col.Hovered())
+			smimeListIcon(c, it.SMIME)
 			if it.Attach {
 				ui.Icon(c, icons.Get("paperclip")).Size(theme.IconXs, theme.IconXs).TextColor(t.Muted).Label(i18n.T("mail.attachment"))
 			}
@@ -1436,6 +1438,7 @@ func (p *mailPage) row(c *ui.Context, it mailItem) ui.Element {
 			}
 			ui.Spacer(c)
 			p.starButton(c, it, col.Hovered())
+			smimeListIcon(c, it.SMIME)
 			if it.Attach {
 				ui.Icon(c, icons.Get("paperclip")).Size(theme.IconXs, theme.IconXs).TextColor(t.Muted).Label(i18n.T("mail.attachment"))
 			}

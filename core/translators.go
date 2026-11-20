@@ -297,7 +297,7 @@ func (s *Service) runPluginTranslate(ctx context.Context, end func(), plugin str
 	}
 
 	key := ""
-	if t.Kind == "message" || t.Kind == "thread" {
+	if (t.Kind == "message" || t.Kind == "thread") && !s.skipAICache(ctx, ids) {
 		key = cacheKey("translate-plugin", plugin, tr.version, t.Kind, t.ID, members, lang, keep)
 		if o, hit, err := s.cacheGet(ctx, key); err != nil {
 			return nil, err

@@ -102,7 +102,7 @@ func (s *Service) findMail(ctx context.Context, q FindQuery) (FindGroup[MessageS
 // a body; the filters apply to their messages.
 func (s *Service) findAttachments(ctx context.Context, q FindQuery) (FindGroup[FoundAttachment], error) {
 	fcond, fargs := searchFilter(q.SearchQuery)
-	cond := `a.inline = 0 AND a.filename LIKE ? ESCAPE '\' AND ` + fcond
+	cond := `a.inline = 0 AND NOT ` + smimePartPredicate + ` AND a.filename LIKE ? ESCAPE '\' AND ` + fcond
 	args := append([]any{likeArg(strings.TrimSpace(q.Text))}, fargs...)
 	from := " FROM attachments a JOIN messages m ON m.id = a.message_id WHERE " + cond
 	n, err := s.db.Query(ctx, "SELECT count(*)"+from, args...)

@@ -166,6 +166,7 @@ type Service interface {
 	SendRevision(ctx context.Context, draftID, revision int64) error
 	ApproveDraft(ctx context.Context, draftID, revision int64) error
 	SenderAvatar(ctx context.Context, messageID int64, allowRemote bool) (core.Avatar, error)
+	SetDecryptedBody(ctx context.Context, messageID int64, body core.DecryptedBody) error
 	SetFlags(ctx context.Context, ids []int64, add, remove []string) error
 	SetLabel(ctx context.Context, messageIDs []int64, labelID int64, on bool) error
 	SetMCPServerEnabled(ctx context.Context, id int64, enabled bool) error

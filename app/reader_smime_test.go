@@ -5,10 +5,13 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/godwit-email/godwit/core"
+	"github.com/godwit-email/godwit/core/coretest"
 	"github.com/godwit-email/godwit/internal/smime"
 )
 
@@ -231,4 +234,77 @@ func TestReaderSMIMENewBodyViewErrorAndSwitchStopsDecryption(t *testing.T) {
 			t.Fatalf("stale ShowSecureBody emitted: %v", h.plat.Calls())
 		}
 	})
+}
+
+func TestReaderSMIMEDefersAutoAIAndEnablesTranslateAndSummary(t *testing.T) {
+	h, acc, llm := aiHarness(t, true, noQuick)
+	h.app.cards = smime.NewSession(h.app.ctx)
+
+	msg := h.deliverOne(acc, makeRawSMIME("bob@example.com", acc.Email, "ai-s1@x", "Encrypted Plan", "cipher"))
+	other := h.deliverOne(acc, coretest.Msg("carol@example.com", acc.Email, "Plain Note", "plain body"))
+	h.waitMail("both messages listed", func() bool { return len(h.items()) == 2 })
+
+	// 列表条目应区分加密标识与真实附件标识：纯 smime.p7m 邮件不显示回形针。
+	bySub := map[string]mailItem{}
+	for _, it := range h.items() {
+		bySub[it.Subject] = it
+	}
+	if bySub["Encrypted Plan"].Attach || bySub["Encrypted Plan"].SMIME != "encrypted" {
+		t.Fatalf("encrypted item = %+v; want Attach=false SMIME=encrypted", bySub["Encrypted Plan"])
+	}
+	if signedAtt := threadItem(core.ThreadSummary{ID: 99, HasAttachments: true, SMIME: "signed"}); !signedAtt.Attach || signedAtt.SMIME != "signed" {
+		t.Fatalf("signed+att item = %+v; want Attach=true SMIME=signed", signedAtt)
+	}
+
+	r := h.app.mail.reader
+	var openStarted atomic.Bool
+	allowOpen := make(chan struct{})
+	r.openCMS = func(ctx context.Context, fromHeader string, der []byte) ([]byte, bool, string, error) {
+		openStarted.Store(true)
+		<-allowOpen
+		return []byte("Content-Type: text/html; charset=utf-8\r\n\r\n<p>Secret project launch is Monday.</p>"), true, "bob@example.com", nil
+	}
+
+	llm.Script(
+		coretest.Turn{Text: []string{"- Secret launch confirmed for Monday."}},
+		coretest.Turn{Text: []string{`{"texts":["秘密发布定于周一。"],"source":"en"}`}},
+		coretest.Turn{Text: []string{"- Plain note summary."}},
+	)
+
+	h.openThread(msg.ThreadID)
+	h.until("openCMS started", openStarted.Load)
+	if got := llm.Requests(); got != 0 {
+		t.Fatalf("auto-summary fired before decryption finished (%d LLM requests)", got)
+	}
+
+	close(allowOpen)
+	h.until("decrypted body shown and summary completed", func() bool {
+		st := r.ai[msg.ID]
+		return st != nil && st.summary != nil && st.summary.done && h.countCalls(fmt.Sprintf("ShowSecureBody %d", msg.ID)) >= 1
+	})
+	h.see("Secret launch confirmed for Monday.")
+
+	h.click("翻译")
+	h.seeTranslation(msg.ID, "秘密发布定于周一。")
+
+	reqs := llm.RequestLog()
+	if len(reqs) != 2 {
+		t.Fatalf("LLM requests = %d, want 2", len(reqs))
+	}
+	for i, req := range reqs {
+		body := string(req.Messages)
+		if !strings.Contains(body, "Secret project launch is Monday.") || strings.Contains(body, "smime.p7m") {
+			t.Fatalf("request %d did not carry decrypted text: %q", i, body)
+		}
+	}
+
+	// 切换走再切回：命中前端内存缓存时仍会重同步到后端，无需再次访问硬件 Key，且关闭会话时不落盘。
+	h.openThread(other.ThreadID)
+	h.seeBody(other.ID)
+	h.openThread(msg.ThreadID)
+	h.until("cache-hit re-sync complete", func() bool {
+		b := r.bodies[msg.ID]
+		return b != nil && b.smimeResult != nil && b.smimeSynced
+	})
+	h.see("Secret launch confirmed for Monday.")
 }

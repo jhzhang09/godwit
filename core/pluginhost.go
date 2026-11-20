@@ -132,7 +132,7 @@ func (s *Service) holdsMail(ctx context.Context, name string) (bool, error) {
 
 // pluginMail is message id for a plugin: from the database only, HTML sanitized.
 func (s *Service) pluginMail(ctx context.Context, id int64) (plugins.MailMessage, error) {
-	m, err := s.mailForModel(ctx, id)
+	m, err := s.mailForModelDB(ctx, id)
 	if err != nil {
 		return plugins.MailMessage{}, err
 	}

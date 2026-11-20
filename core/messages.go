@@ -39,6 +39,7 @@ type MessageSummary struct {
 	Date                    time.Time
 	Flags                   []string
 	HasAttachments          bool
+	SMIME                   string
 	AuthResults             string
 	Security                gomail.SecurityReport
 }
@@ -151,19 +152,18 @@ func (s *Service) fillFromNames(ctx context.Context, items []MessageSummary) err
 			keys = append(keys, k)
 		}
 	}
-	if len(keys) == 0 {
-		return nil
-	}
-	names, err := s.addressBookNames(ctx, keys)
-	if err != nil {
-		return err
-	}
-	for i := range items {
-		if items[i].FromName == "" {
-			items[i].FromName = names[gomail.AddrKey(items[i].From)]
+	if len(keys) > 0 {
+		names, err := s.addressBookNames(ctx, keys)
+		if err != nil {
+			return err
+		}
+		for i := range items {
+			if items[i].FromName == "" {
+				items[i].FromName = names[gomail.AddrKey(items[i].From)]
+			}
 		}
 	}
-	return nil
+	return s.fillMessageSMIME(ctx, items)
 }
 
 // scanFolderIDs reads a shownFolders column.

@@ -212,7 +212,7 @@ func (r *reader) stopAI() {
 // and its plugin cards. Each runs once.
 func (r *reader) startFor(id int64) {
 	st := r.state(id)
-	if last, _ := r.last(); id == last.ID && r.taskReady("summarize") && r.p.a.settings.Summary && st.summary == nil {
+	if last, _ := r.last(); id == last.ID && r.taskReady("summarize") && r.p.a.settings.Summary && st.summary == nil && !r.needsSMIMEDecrypt(id) {
 		st.summary = r.summarize(id)
 	}
 	r.loadCards(id, false)
@@ -250,7 +250,7 @@ func (r *reader) reloadPluginParts() {
 // small model, under Settings.Summary): "" until it comes, and when it
 // fails or there is no model, so the row keeps the start of its text.
 func (r *reader) gist(id int64) string {
-	if !r.taskReady("") || !r.p.a.settings.Summary {
+	if !r.taskReady("") || !r.p.a.settings.Summary || r.needsSMIMEDecrypt(id) {
 		return ""
 	}
 	st, get := r.state(id), r.gistFn
@@ -278,7 +278,7 @@ func (r *reader) startAI() {
 	for id := range r.open {
 		r.startFor(id)
 	}
-	if target, ok := r.replyTarget(); ok && r.taskReady("") && r.p.a.settings.QuickReplies {
+	if target, ok := r.replyTarget(); ok && r.taskReady("") && r.p.a.settings.QuickReplies && !r.needsSMIMEDecrypt(target.ID) {
 		r.loadQuick(target.ID, false)
 	}
 	r.loadSkills(false)
@@ -366,7 +366,7 @@ func (r *reader) toggleSummary() {
 	st := r.state(m.ID)
 	on := !r.summaryShown(st)
 	st.sumShown = &on
-	if on && (st.summary == nil || st.summary.err != nil) {
+	if on && (st.summary == nil || st.summary.err != nil) && !r.needsSMIMEDecrypt(m.ID) {
 		st.summary = r.summarize(m.ID)
 	}
 }
@@ -380,8 +380,34 @@ func (r *reader) toggleTranslate(id int64) {
 		return
 	}
 	st.showTr = true
+	if r.needsSMIMEDecrypt(id) {
+		return
+	}
 	if tr := st.translation; tr == nil || tr.err != nil || tr.lang != r.readingLang() {
 		st.translation = r.stream(id, "translate")
+	}
+}
+
+// onSMIMEDecrypted starts deferred reader AI work after message id has been
+// decrypted and registered in the UI backend session.
+func (r *reader) onSMIMEDecrypted(id int64) {
+	st := r.state(id)
+	if last, ok := r.last(); ok {
+		if id == last.ID {
+			if r.summaryShown(st) && (st.summary == nil || st.summary.err != nil) {
+				st.summary = r.summarize(id)
+			}
+		} else if len(r.msgs) > 1 {
+			if lst := r.ai[last.ID]; lst != nil && r.summaryShown(lst) && !r.needsSMIMEDecrypt(last.ID) {
+				lst.summary = r.summarize(last.ID)
+			}
+		}
+	}
+	if st.showTr && (st.translation == nil || st.translation.err != nil || st.translation.lang != r.readingLang()) {
+		st.translation = r.stream(id, "translate")
+	}
+	if target, ok := r.replyTarget(); ok && target.ID == id && r.taskReady("") && r.p.a.settings.QuickReplies && !st.quick.done && !st.quick.loading {
+		r.loadQuick(id, true)
 	}
 }
 

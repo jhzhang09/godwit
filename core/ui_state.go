@@ -15,6 +15,7 @@ type uiSession struct {
 	ready      bool // the interface takes requests on its events (SetUIReady)
 	compose    map[int64]struct{}
 	quitting   bool // closing for a quit (SetUIReady off, StopUIBackend): not another interface
+	decrypted  []decryptedEntry
 }
 
 // WithUISession binds a fresh UI session to ctx's lifetime for a RoleUI
@@ -39,6 +40,8 @@ func uiSessionFromContext(ctx context.Context) *uiSession {
 func (s *Service) removeUISession(sess *uiSession) {
 	s.uiMu.Lock()
 	prevFG := s.uiForegroundLocked()
+	clear(sess.decrypted)
+	sess.decrypted = nil
 	delete(s.uiSessions, sess)
 	nextFG := s.uiForegroundLocked()
 	var stop func()

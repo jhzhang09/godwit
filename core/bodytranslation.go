@@ -102,18 +102,26 @@ func (s *Service) runBodyTranslation(ctx context.Context, end func(), sk skills.
 			return res, nil
 		}
 	}
-	key := cacheKey("body-translate-v1", sk.Version, members, ref, version, lang, keep)
-	cached, hit, err := s.cacheGet(ctx, key)
-	if err != nil {
-		return nil, err
-	}
+	key := ""
+	hit := false
 	var result bodyTranslation
-	if hit {
-		if err := json.Unmarshal([]byte(cached), &result); err != nil {
+	if !s.skipAICache(ctx, []int64{t.ID}) {
+		key = cacheKey("body-translate-v1", sk.Version, members, ref, version, lang, keep)
+		var cached string
+		cached, hit, err = s.cacheGet(ctx, key)
+		if err != nil {
 			return nil, err
 		}
-	} else if err := s.gateway().Record(ctx, entry); err != nil {
-		return nil, err
+		if hit {
+			if err := json.Unmarshal([]byte(cached), &result); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if !hit {
+		if err := s.gateway().Record(ctx, entry); err != nil {
+			return nil, err
+		}
 	}
 	b, _ := json.Marshal([]mailSource{{MessageID: t.ID, Suspect: ai.InjectionQuote(strings.Join(originals, "\n")) != ""}})
 	out := make(chan ai.Event, 3)
@@ -130,7 +138,7 @@ func (s *Service) runBodyTranslation(ctx context.Context, end func(), sk skills.
 					result, err = translateRestored(ctx, originals, masked, func(tr, _ string) string { return bound.masker.Restore(tr) }, lang, keep, call)
 				}
 			}
-			if err == nil {
+			if err == nil && key != "" {
 				cached, _ := json.Marshal(result)
 				s.cachePut(ctx, key, account, string(cached), "translate")
 			}

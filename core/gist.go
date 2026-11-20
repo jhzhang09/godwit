@@ -42,9 +42,12 @@ func (s *Service) MessageGist(ctx context.Context, messageID int64) (string, err
 		return "", err
 	}
 	system := gistSystem + "\n\n" + ai.UntrustedSystemNote + "\n\nWrite it in " + s.readingLanguage(ctx) + "."
-	key := cacheKey("gist", messageID, members, model.ServiceID, model.Version, model.Model, system)
-	if o, hit, err := s.cacheGet(ctx, key); err != nil || hit {
-		return o, err
+	key := ""
+	if !s.skipAICache(ctx, ids) {
+		key = cacheKey("gist", messageID, members, model.ServiceID, model.Version, model.Model, system)
+		if o, hit, err := s.cacheGet(ctx, key); err != nil || hit {
+			return o, err
+		}
 	}
 
 	items, err := s.mailContext(ctx, &gateway.Scope{}, ids, defaultMailBudget)
@@ -64,7 +67,7 @@ func (s *Service) MessageGist(ctx context.Context, messageID int64) (string, err
 	}
 	// Its link references expanded here: the line is cut after, never a reference.
 	g := gistLine(s.expandLinks(ctx, r.Text))
-	if g != "" {
+	if g != "" && key != "" {
 		s.cachePut(ctx, key, account, g, "gist")
 	}
 	return g, nil

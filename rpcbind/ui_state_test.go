@@ -35,6 +35,7 @@ func TestUISessionForegroundAndRoleIsolation(t *testing.T) {
 	}{
 		{"SetUIForeground", []any{true}},
 		{"SetComposeOpen", []any{[]int64{1}}},
+		{"SetDecryptedBody", []any{int64(1), core.DecryptedBody{Text: "secret"}}},
 	} {
 		var fwe *rpc.WireError
 		require.ErrorAs(t, full.Call(ctx, call.method, nil, call.args...), &fwe, call.method)

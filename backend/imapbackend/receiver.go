@@ -93,7 +93,6 @@ func (r *Receiver) trace(err *error) { conn.LogTrace(r.c, *err) }
 
 // Close closes the connection; a second Close is harmless.
 func (r *Receiver) Close() error {
-	r.selFolder, r.selValidity = "", 0
 	if r.c == nil {
 		return nil
 	}

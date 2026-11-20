@@ -154,7 +154,7 @@ func (s *Service) runSkill(ctx context.Context, end func(), name string, t Targe
 	}
 
 	key := ""
-	if t.Kind == "message" || t.Kind == "thread" {
+	if (t.Kind == "message" || t.Kind == "thread") && !s.skipAICache(ctx, ids) {
 		parts := []any{sk.Name, sk.Version, t.Kind, t.ID, members, model.ServiceID, model.Version, model.Model, lang, keep}
 		if digest { // apart from summaries cached before the format
 			parts = append(parts, threadDigestFormat)
@@ -402,27 +402,30 @@ func (s *Service) QuickReplies(ctx context.Context, messageID int64) ([]QuickRep
 		tail += " The user's signature is added below the reply, so end it without a sign-off or name."
 	}
 	// members is the thread's content up to the message: new mail in it is a new key.
-	key := cacheKey("quick-replies", messageID, members, model.ServiceID, model.Version, model.Model, st.ReplyLanguage, system, tail)
-	if o, hit, err := s.cacheGet(ctx, key); err != nil || hit {
-		var rs []QuickReply
-		if hit {
-			err = json.Unmarshal([]byte(o), &rs)
-			if err == nil {
-				changed := false
-				for i := range rs {
-					if rs[i].Label == "" || len([]rune(rs[i].Label)) > QuickLabelMaxRunes || rs[i].Label == rs[i].Preview {
-						rs[i].Label = ExtractQuickLabel(rs[i].Preview)
-						changed = true
+	key := ""
+	if !s.skipAICache(ctx, ids) {
+		key = cacheKey("quick-replies", messageID, members, model.ServiceID, model.Version, model.Model, st.ReplyLanguage, system, tail)
+		if o, hit, err := s.cacheGet(ctx, key); err != nil || hit {
+			var rs []QuickReply
+			if hit {
+				err = json.Unmarshal([]byte(o), &rs)
+				if err == nil {
+					changed := false
+					for i := range rs {
+						if rs[i].Label == "" || len([]rune(rs[i].Label)) > QuickLabelMaxRunes || rs[i].Label == rs[i].Preview {
+							rs[i].Label = ExtractQuickLabel(rs[i].Preview)
+							changed = true
+						}
 					}
-				}
-				if changed {
-					if b, mErr := json.Marshal(rs); mErr == nil {
-						s.cachePut(ctx, key, account, string(b), "quick_replies")
+					if changed {
+						if b, mErr := json.Marshal(rs); mErr == nil {
+							s.cachePut(ctx, key, account, string(b), "quick_replies")
+						}
 					}
 				}
 			}
+			return rs, err
 		}
-		return rs, err
 	}
 
 	items, err := s.mailContext(ctx, &gateway.Scope{}, ids, defaultMailBudget)
@@ -447,8 +450,10 @@ func (s *Service) QuickReplies(ctx context.Context, messageID int64) ([]QuickRep
 	if err != nil {
 		return nil, err
 	}
-	b, _ := json.Marshal(rs)
-	s.cachePut(ctx, key, account, string(b), "quick_replies")
+	if key != "" {
+		b, _ := json.Marshal(rs)
+		s.cachePut(ctx, key, account, string(b), "quick_replies")
+	}
 	return rs, nil
 }
 

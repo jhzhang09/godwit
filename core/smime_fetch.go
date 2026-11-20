@@ -31,7 +31,9 @@ var (
 )
 
 const (
-	smimeP7MPredicate = `(lower(a.content_type) IN ('application/pkcs7-mime','application/x-pkcs7-mime') OR lower(a.filename) = 'smime.p7m')`
+	smimeP7MPredicate  = `(COALESCE(lower(a.content_type),'') IN ('application/pkcs7-mime','application/x-pkcs7-mime') OR COALESCE(lower(a.filename),'') = 'smime.p7m')`
+	smimeP7SPredicate  = `(COALESCE(lower(a.content_type),'') IN ('application/pkcs7-signature','application/x-pkcs7-signature') OR COALESCE(lower(a.filename),'') = 'smime.p7s')`
+	smimePartPredicate = `(` + smimeP7MPredicate + ` OR ` + smimeP7SPredicate + `)`
 
 	smimeTierUrgent = iota + 1
 	smimeTierVisible
@@ -399,6 +401,7 @@ func (s *Service) initSMIME() {
 }
 
 func (s *Service) closeSMIME() {
+	s.clearDecryptedBodies()
 	if s.smime != nil {
 		s.smime.closeAll()
 	}
@@ -625,7 +628,7 @@ func (s *Service) dialSMIMEConn(ctx context.Context, st *smimeState, accountID i
 			}
 			return nil, nil, derr
 		}
-		return recv, func() { dialCancel(); rel() }, nil
+		return recv, func() { rel(); dialCancel() }, nil
 	}
 
 	recv, rel, derr := dialAttempt()

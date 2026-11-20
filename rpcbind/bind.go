@@ -255,6 +255,8 @@ var uiOnly = map[string]bool{
 	"RecentLog": true, "SetTimeZone": true,
 	// Window foreground, open compose drafts, and background-round narrowing; external clients use SyncNow.
 	"SetUIForeground": true, "SetUIReady": true, "SetComposeOpen": true, "SetInboxOnly": true, "InboxOnly": true,
+	// Ephemeral RAM-only decrypted S/MIME body for the calling RoleUI session (never persisted, never exposed to full, mcp, or plugins).
+	"SetDecryptedBody": true,
 	// Quitting Godwit stops the backend its interface started; a user-started one refuses.
 	// Replace stops it for an interface of another version, even under 一直继续.
 	"StopUIBackend": true, "ReplaceUIBackend": true,
