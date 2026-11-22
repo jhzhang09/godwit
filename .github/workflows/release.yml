@@ -182,7 +182,7 @@ jobs:
     needs: [prepare, build]
     runs-on: ubuntu-latest
     env:
-      HAS_TAP_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN != '' }}
+      HAS_TAP_AUTH: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY != '' || secrets.TAP_GITHUB_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -241,10 +241,11 @@ jobs:
           fi
           gh "${args[@]}"
       - name: Update Homebrew tap
-        if: env.HAS_TAP_TOKEN == 'true' && needs.prepare.outputs.draft != 'true' && needs.prepare.outputs.prerelease != 'true'
+        if: env.HAS_TAP_AUTH == 'true' && needs.prepare.outputs.draft != 'true' && needs.prepare.outputs.prerelease != 'true'
         env:
+          HOMEBREW_TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
           TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
         run: scripts/update-homebrew-tap.sh "${{ needs.prepare.outputs.tag }}" release-assets/SHA256SUMS.txt
-      - name: Warn if TAP_GITHUB_TOKEN is not configured
-        if: env.HAS_TAP_TOKEN != 'true' && needs.prepare.outputs.draft != 'true' && needs.prepare.outputs.prerelease != 'true'
-        run: echo "::warning::TAP_GITHUB_TOKEN 未配置，已跳过自动更新 jhzhang09/homebrew-tap"
+      - name: Warn if Homebrew tap credentials are not configured
+        if: env.HAS_TAP_AUTH != 'true' && needs.prepare.outputs.draft != 'true' && needs.prepare.outputs.prerelease != 'true'
+        run: echo "::warning::HOMEBREW_TAP_DEPLOY_KEY 和 TAP_GITHUB_TOKEN 均未配置，已跳过自动更新 jhzhang09/homebrew-tap"

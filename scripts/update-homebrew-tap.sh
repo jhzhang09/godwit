@@ -3,9 +3,10 @@
 # 用法:
 #   scripts/update-homebrew-tap.sh <version> <checksums_file>
 # 环境变量:
-#   TAP_GITHUB_TOKEN  推送 tap 仓库用的令牌（CI 使用）；本地不设置时通过 SSH 克隆和推送
-#   TAP_REPO          目标 tap 仓库，默认 jhzhang09/homebrew-tap
-#   TAP_DRY_RUN       设为任意值时只把生成的文件写到 TAP_OUT（默认 ./tap-preview），不克隆、不推送
+#   HOMEBREW_TAP_DEPLOY_KEY  推送 tap 仓库用的 SSH Deploy Key 私钥（CI 优先使用）
+#   TAP_GITHUB_TOKEN         推送 tap 仓库用的 PAT 令牌（备用）；均未设置时使用本机 SSH
+#   TAP_REPO                 目标 tap 仓库，默认 jhzhang09/homebrew-tap
+#   TAP_DRY_RUN              设为任意值时只把生成的文件写到 TAP_OUT（默认 ./tap-preview），不克隆、不推送
 set -euo pipefail
 
 version_raw="${1:?usage: update-homebrew-tap.sh <version> <checksums_file>}"
@@ -90,7 +91,16 @@ fi
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
-if [[ -n "${TAP_GITHUB_TOKEN:-}" ]]; then
+if [[ -n "${HOMEBREW_TAP_DEPLOY_KEY:-}" ]]; then
+  key="$work/tap_key"
+  known_hosts="$work/known_hosts"
+  printf '%s\n' "$HOMEBREW_TAP_DEPLOY_KEY" > "$key"
+  chmod 600 "$key"
+  # api.github.com/meta 中的 github.com 官方 SSH 主机公钥
+  echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" > "$known_hosts"
+  export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$known_hosts"
+  remote="git@github.com:${tap_repo}.git"
+elif [[ -n "${TAP_GITHUB_TOKEN:-}" ]]; then
   remote="https://x-access-token:${TAP_GITHUB_TOKEN}@github.com/${tap_repo}.git"
 else
   remote="git@github.com:${tap_repo}.git"
@@ -98,7 +108,7 @@ fi
 git clone --quiet --depth 1 "$remote" "$work/tap"
 cd "$work/tap"
 # CI 中以 github-actions[bot] 署名；本地运行沿用维护者自己的 Git 身份。
-if [[ -n "${TAP_GITHUB_TOKEN:-}" ]]; then
+if [[ -n "${HOMEBREW_TAP_DEPLOY_KEY:-}" || -n "${TAP_GITHUB_TOKEN:-}" ]]; then
   git config user.name "github-actions[bot]"
   git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 fi
