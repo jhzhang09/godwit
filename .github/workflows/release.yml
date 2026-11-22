@@ -228,11 +228,15 @@ jobs:
           args=(
             release create "$TAG" release-assets/*
             --repo "$GITHUB_REPOSITORY"
-            --target "$GITHUB_SHA"
             --title "$TAG"
             --notes "$notes"
             --generate-notes
           )
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            args+=(--verify-tag)
+          else
+            args+=(--target "$GITHUB_REF_NAME")
+          fi
           if [[ "$DRAFT" == "true" ]]; then
             args+=(--draft)
           fi
