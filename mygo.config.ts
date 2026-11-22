@@ -34,16 +34,10 @@ export default {
     notarize: env.NOTARY_KEYCHAIN ? { keychainProfile: "notary", keychain: env.NOTARY_KEYCHAIN } : undefined,
   },
   windows: { signCommand: env.WINDOWS_SIGN_COMMAND },
-  // Installers and updates live in the R2 bucket that dl.godwit.email serves;
-  // installed apps check update-<platform>.json there. `mygo build -upload`
-  // puts them in with the R2 token in AWS_ACCESS_KEY_ID and
-  // AWS_SECRET_ACCESS_KEY, the manifests last.
+  // 通过本 Fork 仓库的 GitHub Releases 分发软件内自动更新，
+  // 对应的签名私钥保存在仓库 Actions Secret MYGO_UPDATER_PRIVATE_KEY 中。
   updates: {
-    publicKey: "CxE4iKi5zjKGP5eXJEzffin11gMKBzHmLVr5RhAyGqk=",
-    url: "https://dl.godwit.email",
-    s3: {
-      bucket: "godwit-downloads", // Godwit's alone: its files sit at the root, as dl.godwit.email/install.sh
-      endpoint: "https://9c578ed9cad837fb4a2564db7b36b483.r2.cloudflarestorage.com",
-    },
+    publicKey: "SmQx/Qg3FxUIuhPQ7rQkgT1uc3cgfmghUTu9QqSCi40=",
+    github: "jhzhang09/godwit",
   },
 };
