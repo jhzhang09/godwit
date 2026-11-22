@@ -10,7 +10,7 @@ import (
 )
 
 // starPath is the GitHub API path of the user's star on Godwit's repository.
-const starPath = "user/starred/godwit-email/godwit"
+const starPath = "user/starred/jhzhang09/godwit"
 
 // ghPath finds the GitHub CLI: on PATH, else where its installers put it,
 // as an app opened from the Finder gets only the system's PATH; "" without.

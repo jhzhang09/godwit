@@ -28,8 +28,8 @@ import (
 var Version = "dev"
 
 const (
-	siteURL = "https://godwit.email"
-	repoURL = "https://github.com/godwit-email/godwit"
+	siteURL = "https://github.com/jhzhang09/godwit"
+	repoURL = "https://github.com/jhzhang09/godwit"
 )
 
 var logo = ui.MustParseSVG(assets.Logo)
@@ -958,7 +958,7 @@ func (p *settingsPage) aboutView(c *ui.Context) {
 	rows := []func(){func() {
 		settingRow(c, i18n.T("settings.about.license"), "", func() ui.Element {
 			if value("Apache-2.0", "arrow-up-right") {
-				open(repoURL + "/blob/main/LICENSE")
+				open(repoURL + "/blob/HEAD/LICENSE")
 			}
 			return ui.Element{}
 		})
@@ -973,7 +973,7 @@ func (p *settingsPage) aboutView(c *ui.Context) {
 		})
 	}}
 	for _, l := range []struct{ key, value, url string }{
-		{"settings.about.site", "godwit.email", siteURL},
+		{"settings.about.site", "github.com/jhzhang09/godwit", siteURL},
 		{"settings.about.changelog", "GitHub Releases", repoURL + "/releases"},
 		{"settings.about.feedback", "GitHub Issues", repoURL + "/issues"},
 	} {

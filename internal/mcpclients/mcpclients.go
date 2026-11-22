@@ -235,7 +235,7 @@ func (e Env) openExtension(s Server) error {
 		"display_name":     "Godwit",
 		"version":          s.Version,
 		"description":      "Search and read your Godwit mail, and write drafts.",
-		"author":           map[string]any{"name": "Godwit", "url": "https://github.com/godwit-email/godwit"},
+		"author":           map[string]any{"name": "Godwit", "url": "https://github.com/jhzhang09/godwit"},
 		"icon":             "icon.png",
 		"server": map[string]any{
 			"type":        "binary",

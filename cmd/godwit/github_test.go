@@ -52,7 +52,7 @@ func TestStarRepo(t *testing.T) {
 	if err := (*platform)(nil).StarRepo(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if b, _ := os.ReadFile(out); string(b) != "api -X PUT user/starred/godwit-email/godwit\n" {
+	if b, _ := os.ReadFile(out); string(b) != "api -X PUT user/starred/jhzhang09/godwit\n" {
 		t.Errorf("gh got %q", b)
 	}
 }

@@ -477,7 +477,7 @@ func TestReportUnknownError(t *testing.T) {
 	h.app.toastErr(errors.New("dial tcp: lookup imap.acme.io: no such host for me@acme.io at " + home + "/x"))
 	h.click("报告问题")
 	u, err := url.Parse(h.callArg("OpenURL"))
-	if err != nil || u.Host != "github.com" || u.Path != "/godwit-email/godwit/issues/new" {
+	if err != nil || u.Host != "github.com" || u.Path != "/jhzhang09/godwit/issues/new" {
 		t.Fatalf("opened %v (%v)", u, err)
 	}
 	q := u.Query()

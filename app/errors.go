@@ -152,7 +152,7 @@ func issueURL(errText, logText string) string {
 	lines := strings.Split(maskReportLog(strings.TrimSpace(logText)), "\n")
 	for {
 		// The keys are field ids in .github/ISSUE_TEMPLATE/bug_report.yml; logs renders as code there.
-		u := "https://github.com/godwit-email/godwit/issues/new?" + url.Values{
+		u := repoURL + "/issues/new?" + url.Values{
 			"template":      {"bug_report.yml"},
 			"title":         {title},
 			"version":       {Version},

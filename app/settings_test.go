@@ -629,7 +629,7 @@ func TestSettingsPrivacyAndAbout(t *testing.T) {
 	h.see("版本 " + Version)
 	h.called("NewBirdView") // failed here: the logo stands in
 	h.click("加星标")          // no gh: GitHub stars it
-	h.called("OpenURL https://github.com/godwit-email/godwit")
+	h.called("OpenURL https://github.com/jhzhang09/godwit")
 	h.click("检查更新")
 	h.called("CheckForUpdates")
 	h.plat.mu.Lock()
