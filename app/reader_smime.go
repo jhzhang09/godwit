@@ -188,7 +188,7 @@ func smimeListIcon(c *ui.Context, kind string) {
 	default:
 		return
 	}
-	ui.Icon(c, icons.Get(icon)).Size(theme.IconXs, theme.IconXs).TextColor(theme.Of(c).Muted).Label(i18n.T(labelKey))
+	ui.Icon(c, icons.Get(icon)).Size(theme.IconXs, theme.IconXs).Shrink(0).TextColor(theme.Of(c).Muted).Label(i18n.T(labelKey))
 }
 
 func (r *reader) smimeNotice(c *ui.Context, id int64, b *msgBody) {
@@ -207,13 +207,13 @@ func (r *reader) smimeNotice(c *ui.Context, id int64, b *msgBody) {
 				btnLabel = i18n.T("smime.details.hide")
 			}
 			ui.Column(c).FillWidth().Gap(th.Space(1.5)).Children(func() {
-				kit.Alert(c, kit.Warning, title, func() {
-					kit.AlertAction(c, kit.Warning, btnLabel, func() {
+				kit.Alert(c, kit.ToneWarning, title, func() {
+					kit.Button(c, btnLabel, kit.ButtonOpts{Variant: kit.Outline, Size: kit.SizeSm, Tone: kit.ToneWarning}).Shrink(0).OnClick(func() {
 						b.smimeDetailOpen = !b.smimeDetailOpen
 					})
 				})
 				if b.smimeDetailOpen {
-					kit.Block(c, ui.Column(c), kit.ToneRaised).FillWidth().Padding(th.Space(2), th.Space(3)).Gap(th.Space(1.5)).Children(func() {
+					kit.Block(c, ui.Column(c), kit.ToneCard).FillWidth().Padding(th.Space(2), th.Space(3)).Gap(th.Space(1.5)).Children(func() {
 						kit.Text(c, result.verifyErr, t.Text.Xs).FontWeight(500).Selectable()
 						kit.Text(c, i18n.T("smime.unverified.hint"), t.Text.Xs).TextColor(t.Muted)
 						if result.signerCert != nil {
@@ -234,7 +234,7 @@ func (r *reader) smimeNotice(c *ui.Context, id int64, b *msgBody) {
 		if !result.encrypted && result.signer == "" {
 			return
 		}
-		kit.Block(c, ui.Row(c), kit.ToneRaised).Padding(th.Space(1.5), th.Space(2.5)).Gap(th.Space(2)).AlignItems(ui.Center).Children(func() {
+		kit.Block(c, ui.Row(c), kit.ToneCard).Padding(th.Space(1.5), th.Space(2.5)).Gap(th.Space(2)).AlignItems(ui.Center).Children(func() {
 			if result.encrypted {
 				ui.Icon(c, icons.Get("lock")).Size(theme.IconXs, theme.IconXs).TextColor(t.Muted)
 				kit.Text(c, i18n.T("smime.decrypted"), t.Text.Xs).FontWeight(500).TextColor(t.Muted).Selectable()
@@ -250,17 +250,7 @@ func (r *reader) smimeNotice(c *ui.Context, id int64, b *msgBody) {
 					openCert := func() {
 						r.p.a.openSMIMECertDialog(certViewFromDetails(cert, true, true, "", "", chain))
 					}
-					btn := ui.ButtonBase(c).AlignItems(ui.Center).Gap(th.Space(1.5)).Padding(th.Space(0.5), th.Space(1.5)).Radius(t.Radius.Sm).Label(sigLabel)
-					if btn.Hovered() {
-						btn.Background(t.HoverTint)
-					}
-					btn.Children(func() {
-						ui.Icon(c, icons.Get("shield-check")).Size(theme.IconXs, theme.IconXs).TextColor(t.Muted)
-						kit.Text(c, sigLabel, t.Text.Xs).FontWeight(500).TextColor(t.Muted)
-					})
-					if btn.Clicked() {
-						openCert()
-					}
+					kit.Button(c, sigLabel, kit.ButtonOpts{Variant: kit.Ghost, Size: kit.SizeXs, Icon: "shield-check"}).TextColor(t.Muted).OnClick(openCert)
 					kit.Button(c, i18n.T("smime.cert.view"), kit.ButtonOpts{Variant: kit.Link, Size: kit.SizeSm}).OnClick(openCert)
 				} else {
 					ui.Icon(c, icons.Get("shield-check")).Size(theme.IconXs, theme.IconXs).TextColor(t.Muted)
@@ -273,8 +263,8 @@ func (r *reader) smimeNotice(c *ui.Context, id int64, b *msgBody) {
 	if b.smimeRead.loading {
 		kit.Spinner(c)
 	} else if b.smimeErr != nil {
-		kit.Alert(c, kit.Danger, humanize(b.smimeErr), func() {
-			kit.AlertAction(c, kit.Danger, i18n.T("common.retry"), func() { r.openSMIME(id, b, true) })
+		kit.Alert(c, kit.ToneDanger, humanize(b.smimeErr), func() {
+			kit.Button(c, i18n.T("common.retry"), kit.ButtonOpts{Variant: kit.Outline, Size: kit.SizeSm, Tone: kit.ToneDanger}).Shrink(0).OnClick(func() { r.openSMIME(id, b, true) })
 		})
 	}
 }
@@ -501,13 +491,13 @@ func (r *reader) openSMIME(id int64, b *msgBody, retry bool) {
 			accountID:    accountID,
 			allowWeakKey: allowWeak,
 			result:       result,
-			html:      safe,
-			modelHTML: modelHTML,
-			text:      text,
-			truncated: truncated,
-			modelAtts: modelAtts,
-			syncModel: syncModel,
-			size:      cachedSize,
+			html:         safe,
+			modelHTML:    modelHTML,
+			text:         text,
+			truncated:    truncated,
+			modelAtts:    modelAtts,
+			syncModel:    syncModel,
+			size:         cachedSize,
 		})
 		b.smimeResult = &result
 		b.smimeSynced = synced

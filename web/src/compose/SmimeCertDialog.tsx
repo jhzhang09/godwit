@@ -1,5 +1,6 @@
 import { RiAlertLine, RiCheckboxCircleLine, RiCheckLine, RiFileCopyLine } from "@remixicon/react";
 import { useEffect, useState } from "react";
+import { Button } from "@/components/button";
 import {
   Dialog,
   DialogCancel,
@@ -10,12 +11,7 @@ import {
   DialogTitle,
 } from "@/components/dialog";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import type {
-  ComposeSMIMECert,
-  ComposeSMIMECertChainNode,
-  ComposeSMIMEIdentity,
-} from "@/mygo";
+import type { ComposeSMIMECert, ComposeSMIMECertChainNode, ComposeSMIMEIdentity } from "@/mygo";
 import type { T } from "@/shared/i18n";
 
 export interface SmimeCertView {
@@ -276,7 +272,7 @@ export function SmimeCertDialog({
               <div className="flex flex-col gap-2">
                 {chain.map((node, i) => (
                   <div
-                    key={`${node.sha256 || node.subject}-${i}`}
+                    key={node.sha256 || `${node.role}:${node.subject}:${node.issuer}`}
                     style={{ paddingLeft: `${i * 12}px` }}
                     className="flex flex-col gap-0.5"
                   >
@@ -285,7 +281,10 @@ export function SmimeCertDialog({
                         {i > 0 ? "└─ " : ""}
                         {node.subject || node.issuer}
                       </span>
-                      <Badge variant="outline" className="h-4 px-1.5 text-[10px] text-muted-foreground">
+                      <Badge
+                        variant="outline"
+                        className="h-4 px-1.5 text-[10px] text-muted-foreground"
+                      >
                         {roleLabel(node.role)}
                       </Badge>
                       {i === 0 && node.role === "root" && cert.trusted && (
@@ -298,9 +297,7 @@ export function SmimeCertDialog({
                       )}
                     </div>
                     {node.publicKeyAlgo && (
-                      <div
-                        className={`text-[11px] text-muted-foreground ${i > 0 ? "pl-4" : ""}`}
-                      >
+                      <div className={`text-[11px] text-muted-foreground ${i > 0 ? "pl-4" : ""}`}>
                         {node.publicKeyAlgo}
                       </div>
                     )}

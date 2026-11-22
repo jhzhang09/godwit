@@ -23,8 +23,8 @@ import (
 )
 
 const (
-	cfStringUTF8         uint32 = 0x08000100
-	kCFNumberSInt64Type  int    = 4
+	cfStringUTF8        uint32 = 0x08000100
+	kCFNumberSInt64Type int    = 4
 
 	errSecSuccess            int32 = 0
 	errSecUserCanceled       int32 = -128

@@ -218,13 +218,13 @@ func TestDarwinVerifyTrustWeakKeyCompat(t *testing.T) {
 	require.NoError(t, err)
 	mkLeaf := func(serial int64, cn, email string, nb, na time.Time, ku x509.KeyUsage, sigAlg x509.SignatureAlgorithm, parent *x509.Certificate, pKey any, pub any) []byte {
 		tmpl := &x509.Certificate{
-			SerialNumber:   big.NewInt(serial),
-			Subject:        pkix.Name{CommonName: cn},
-			EmailAddresses: []string{email},
-			NotBefore:      nb,
-			NotAfter:       na,
-			KeyUsage:       ku,
-			ExtKeyUsage:    []x509.ExtKeyUsage{x509.ExtKeyUsageEmailProtection},
+			SerialNumber:       big.NewInt(serial),
+			Subject:            pkix.Name{CommonName: cn},
+			EmailAddresses:     []string{email},
+			NotBefore:          nb,
+			NotAfter:           na,
+			KeyUsage:           ku,
+			ExtKeyUsage:        []x509.ExtKeyUsage{x509.ExtKeyUsageEmailProtection},
 			SignatureAlgorithm: sigAlg,
 		}
 		if parent == nil {

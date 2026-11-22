@@ -57,7 +57,6 @@ type Service interface {
 	RunConversation(ctx context.Context, runID int64) (int64, error)
 	SaveDraft(ctx context.Context, d core.Draft) (core.Draft, error)
 	SearchWith(ctx context.Context, q core.SearchQuery, limit int) ([]core.MessageSummary, error)
-	SelectContactCertificate(ctx context.Context, address, sha256 string) error
 	SendAcknowledgedRevision(ctx context.Context, draftID, revision int64, digest string) error
 	SendLater(ctx context.Context, draftID, revision int64, at time.Time, digest string) error
 	SendRevision(ctx context.Context, draftID, revision int64) error
