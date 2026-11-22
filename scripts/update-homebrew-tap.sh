@@ -49,7 +49,7 @@ cask "godwit" do
 
   url "https://github.com/jhzhang09/godwit/releases/download/v#{version}/godwit-#{version}-#{arch}.dmg"
   name "Godwit"
-  desc "Open-source, AI-native desktop email client"
+  desc "Unofficial fork of Godwit email client with native S/MIME support"
   homepage "https://github.com/jhzhang09/godwit"
 
   livecheck do

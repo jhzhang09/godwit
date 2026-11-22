@@ -222,6 +222,13 @@ jobs:
             后续可通过 `brew upgrade --cask godwit` 或软件内“检查更新”升级。
           - **Windows**：如触发 SmartScreen 未知发布者提示，点击“更多信息 → 仍要运行”即可安装。
           - **Linux**：直接安装 `.deb` 或解压 `.tar.gz` 使用。
+
+          ### 许可与归属（Apache-2.0 / NOTICE）
+          本项目是 [godwit-email/godwit](https://github.com/godwit-email/godwit) 的非官方衍生版本（新增原生 S/MIME 等特性），遵循 [Apache License 2.0](https://github.com/jhzhang09/godwit/blob/HEAD/LICENSE)。
+
+          > Godwit  
+          > Copyright 2026 The Godwit Authors  
+          > This product includes software developed by The Godwit Authors (https://github.com/godwit-email/godwit).
           EOF
           )
 
