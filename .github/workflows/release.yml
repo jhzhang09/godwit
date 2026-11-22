@@ -181,7 +181,10 @@ jobs:
   publish:
     needs: [prepare, build]
     runs-on: ubuntu-latest
+    env:
+      HAS_TAP_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN != '' }}
     steps:
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
           pattern: release-*
@@ -208,11 +211,15 @@ jobs:
 
           notes=$(cat <<'EOF'
           ### 安装与更新说明（无公证 / 自签名构建）
-          - **macOS**：首次下载 `.dmg` 安装后如提示“已损坏”或无法验证开发者，请在终端执行：
+          - **macOS（推荐 Homebrew）**：
+            ```sh
+            brew install --cask jhzhang09/tap/godwit
+            ```
+            通过 Homebrew 安装会自动去除隔离属性并注册 `godwit` 命令；如手动下载 `.dmg` 安装后提示“已损坏”或无法验证开发者，请在终端执行：
             ```sh
             xattr -dr com.apple.quarantine /Applications/Godwit.app
             ```
-            首次安装完成后，后续可通过软件内“检查更新”自动升级。
+            后续可通过 `brew upgrade --cask godwit` 或软件内“检查更新”升级。
           - **Windows**：如触发 SmartScreen 未知发布者提示，点击“更多信息 → 仍要运行”即可安装。
           - **Linux**：直接安装 `.deb` 或解压 `.tar.gz` 使用。
           EOF
@@ -233,3 +240,11 @@ jobs:
             args+=(--prerelease)
           fi
           gh "${args[@]}"
+      - name: Update Homebrew tap
+        if: env.HAS_TAP_TOKEN == 'true' && needs.prepare.outputs.draft != 'true' && needs.prepare.outputs.prerelease != 'true'
+        env:
+          TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+        run: scripts/update-homebrew-tap.sh "${{ needs.prepare.outputs.tag }}" release-assets/SHA256SUMS.txt
+      - name: Warn if TAP_GITHUB_TOKEN is not configured
+        if: env.HAS_TAP_TOKEN != 'true' && needs.prepare.outputs.draft != 'true' && needs.prepare.outputs.prerelease != 'true'
+        run: echo "::warning::TAP_GITHUB_TOKEN 未配置，已跳过自动更新 jhzhang09/homebrew-tap"
