@@ -5,8 +5,8 @@
 <p align="center">An open-source, AI-native email client you can extend.<br>AI helps with your mail. Your mail stays yours.</p>
 
 <p align="center">
-  <a href="https://godwit.email/#download">Download</a> ·
-  <a href="https://godwit.email">Website</a> ·
+  <a href="https://github.com/jhzhang09/godwit/releases/latest">Download</a> ·
+  <a href="https://github.com/godwit-email/godwit">Upstream</a> ·
   <a href="CHANGELOG.md">Changelog</a>
 </p>
 
@@ -14,11 +14,18 @@ https://github.com/user-attachments/assets/29ee980c-73a5-47f0-a736-b01828c22785
 
 Godwit is a desktop email client for macOS, Windows and Linux. It works with any IMAP/SMTP account and ships with an AI assistant, Wit, that reads, summarizes, translates and drafts mail with the model you choose. Before anything goes to a cloud model, names, account numbers, phone numbers and keys are masked on your machine. Everything AI in it, the built-in features included, runs through the same extension points open to you: drop in a `SKILL.md` and a button appears.
 
+> **About this fork (`jhzhang09/godwit`):** Built on top of [godwit-email/godwit](https://github.com/godwit-email/godwit) with native hardware-backed **S/MIME** signing/encryption, full per-account inbox folder hierarchy in the sidebar, 263Mail IMAP compatibility, and independent GitHub Releases / Homebrew distribution.
+
 The name comes from the bar-tailed godwit, which holds the record for the longest non-stop bird flight.
 
 ## Features
 
-- **Mail**: IMAP/SMTP accounts with sync, offline changes, conversations, and HTML compose with reply, forward, CC/BCC, drafts and recipients completed from your contacts. Setup is detected for Gmail, Outlook (sign in with Microsoft), iCloud, Yahoo, AOL, QQ Mail, 163/126 Mail, Tencent Exmail, Lark/Feishu and DingTalk Mail, hosted corporate mail by its MX records, and any other IMAP server. Local `.eml` files can be imported into a local archive.
+- **Mail**: IMAP/SMTP accounts with sync, offline changes, conversations, full per-account inbox folder trees in the sidebar, and HTML compose with reply, forward, CC/BCC, drafts and recipients completed from your contacts. Setup is detected for Gmail, Outlook (sign in with Microsoft), iCloud, Yahoo, AOL, QQ Mail, 163/126 Mail, Tencent Exmail, Lark/Feishu, DingTalk Mail, 263Mail, hosted corporate mail by its MX records, and any other IMAP server. Local `.eml` files can be imported into a local archive.
+- **S/MIME (native & hardware tokens)**:
+  - Uses the native OS certificate store and smart cards / USB tokens on **macOS** (Keychain & CryptoTokenKit) and **Windows** (CryptoAPI / CNG) for S/MIME signing, signature verification, encryption, and decryption, with automatic recipient certificate lookup (OS store & CardDAV).
+  - Supports RSA and ECDSA certificates, plus optional per-account legacy weak-key compatibility (such as 1024-bit RSA) for older enterprise certificates.
+  - Displays separate signing and encryption badges in the message list and reader, with dedicated inspection dialogs for **Encryption & Decryption details**, **Signature & Verification details** (CMS algorithms, recipient count, per-check verification results), and a **Certificate Viewer** showing certificate-chain trust propagation.
+  - Decrypted S/MIME messages remain usable with AI actions and Wit (still protected by local privacy masking before anything reaches a cloud model).
 - **Views**: questions that stay open in the sidebar, such as *To handle*, built from conditions and groups, across all your accounts. They never change the mail itself.
 - **Sign-in codes and links**: codes and magic links in 14 languages are recognized as they arrive, with a banner to copy or open them and a list of recent ones in the tray.
 - **Organize**: labels, set by the model or by hand and synced as IMAP keywords; local rules (when … if … then …) with condition groups; one-click unsubscribe (RFC 8058); and a **Contacts** page with unsubscribe, archive all and block per sender.
@@ -34,33 +41,37 @@ The name comes from the bar-tailed godwit, which holds the record for the longes
   - **Native plugins**: a shared library behind a small C ABI ([`sdk/native/godwit_plugin.h`](sdk/native/godwit_plugin.h)), for what a sandbox cannot do. It runs with all of Godwit's rights, so Godwit shows the risk and asks you to allow that exact file; a changed file needs your permission again.
   - **MCP servers**: give Wit external tools. Each server is approved once, and each write call every time.
 - **For other agents**: `godwit mcp` is an MCP server that lets Claude, Claude Code, Codex, Cursor and any other MCP app read your mail and create drafts. Sending through MCP is your setting: by default each send waits for you to confirm it, and you can turn it off or let it send directly. Turn on the Local API under **Settings › Intelligence › AI apps** and copy the client configuration from there.
-- **Updates itself** from dl.godwit.email (the Microsoft Store version is updated by the Store).
+- **Updates itself** from this fork's [GitHub Releases](https://github.com/jhzhang09/godwit/releases) (signed with this fork's Ed25519 update key); on macOS you can also install and upgrade via Homebrew.
 
 ## Install
 
-Download the latest build from [godwit.email](https://godwit.email/#download):
+Download the latest build from [GitHub Releases](https://github.com/jhzhang09/godwit/releases/latest):
 
-- **macOS**: the `.dmg`, or with [Homebrew](https://brew.sh):
-
-  ```sh
-  brew install godwit-email/tap/godwit
-  ```
-- **Windows**: the installer, which installs for the current user without admin rights, or [Godwit on the Microsoft Store](https://apps.microsoft.com/detail/9NS3Q2CGWD12), which the Store updates.
-- **Linux**: the `.deb`, or install for the current user (no root) with:
+- **macOS (recommended: [Homebrew](https://brew.sh))**:
 
   ```sh
-  curl -fsSL https://dl.godwit.email/install.sh | sh
+  brew install --cask jhzhang09/tap/godwit
   ```
+
+  Upgrade with `brew upgrade --cask godwit`. The cask installs `/Applications/Godwit.app`, links the `godwit` CLI, and automatically clears macOS quarantine.
+
+  You can also download the `.dmg` (`arm64` / `amd64`) directly from GitHub Releases. Because fork builds are ad-hoc signed and not Apple-notarized, run this once after copying to `/Applications` if Gatekeeper blocks it:
+
+  ```sh
+  xattr -dr com.apple.quarantine /Applications/Godwit.app
+  ```
+- **Windows**: download `godwit-setup-*-amd64.exe` (or `arm64.exe`) from GitHub Releases, which installs for the current user without admin rights. Unsigned builds may trigger a SmartScreen prompt (*More info → Run anyway*).
+- **Linux**: download the `.deb` or `.tar.gz` (`amd64` / `arm64`) from GitHub Releases.
 
 ### Verify a download
 
-Every release is built from its tag by [release.yml](.github/workflows/release.yml), which signs [build provenance](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations/using-artifact-attestations-to-establish-provenance-for-builds) for each file it uploads. Check that a download was built here, and from which commit, with the [GitHub CLI](https://cli.github.com):
+Every release is built by [release.yml](.github/workflows/release.yml) and publishes a `SHA256SUMS.txt` file alongside the installers. Verify a downloaded file with:
 
 ```sh
-gh attestation verify godwit-1.30.0-arm64.dmg --repo godwit-email/godwit
+shasum -a 256 -c SHA256SUMS.txt --ignore-missing
 ```
 
-For the Microsoft Store version, verify `Godwit.exe` in its install folder (`Get-AppxPackage BaranWang.Godwit` shows where). The app also records its commit: `go version -m` on the executable prints it as `vcs.revision`.
+The app also records its commit: `go version -m` on the executable prints it as `vcs.revision`.
 
 ## Command line
 
