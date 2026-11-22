@@ -89,6 +89,7 @@ type IdentityInfo struct {
 	Hardware      bool
 	CanSign       bool
 	CanEncrypt    bool
+	Chain         []CertChainNode
 }
 
 type parsedIdentity struct {
@@ -146,6 +147,16 @@ func VerifyTrust(ctx context.Context, usage, email string, cert *smx509.Certific
 	return trust(ctx, usage, email, cert, nil)
 }
 
+// VerifyTrustWithChain verifies cert via the OS S/MIME trust policy and returns
+// the resolved certificate chain ordered top-down from root/highest CA to leaf.
+func VerifyTrustWithChain(ctx context.Context, usage, email string, cert *smx509.Certificate) ([]CertChainNode, error) {
+	if cert == nil {
+		return nil, errors.New("invalid X.509 certificate")
+	}
+	ders, err := trustWithChain(ctx, usage, email, cert, nil)
+	return BuildCertChain(ders), err
+}
+
 // ListIdentities returns personal S/MIME certificates matching email (or all when email == "").
 func ListIdentities(ctx context.Context, email string) ([]IdentityInfo, error) {
 	items, err := parsedIdentities(ctx)
@@ -163,8 +174,27 @@ func ListIdentities(ctx context.Context, email string) ([]IdentityInfo, error) {
 				checkEmail = emails[0]
 			}
 		}
-		canSign := checkEmail != "" && trust(ctx, "sign", checkEmail, it.cert, nil) == nil
-		canEnc := checkEmail != "" && trust(ctx, "encrypt", checkEmail, it.cert, nil) == nil
+		var canSign, canEnc bool
+		var chainDER [][]byte
+		if checkEmail != "" {
+			signChain, signErr := trustWithChain(ctx, "sign", checkEmail, it.cert, nil)
+			canSign = signErr == nil
+			encChain, encErr := trustWithChain(ctx, "encrypt", checkEmail, it.cert, nil)
+			canEnc = encErr == nil
+			switch {
+			case canSign && len(signChain) > 0:
+				chainDER = signChain
+			case canEnc && len(encChain) > 0:
+				chainDER = encChain
+			case len(signChain) >= len(encChain):
+				chainDER = signChain
+			default:
+				chainDER = encChain
+			}
+		}
+		if len(chainDER) == 0 {
+			chainDER = [][]byte{it.cert.Raw}
+		}
 		meta := InspectCertificate(it.cert)
 		out = append(out, IdentityInfo{
 			SHA256:        it.sha256,
@@ -184,6 +214,7 @@ func ListIdentities(ctx context.Context, email string) ([]IdentityInfo, error) {
 			Hardware:      it.hardware,
 			CanSign:       canSign,
 			CanEncrypt:    canEnc,
+			Chain:         BuildCertChain(chainDER),
 		})
 	}
 	slices.SortFunc(out, func(a, b IdentityInfo) int {
@@ -221,8 +252,13 @@ func MatchesMailbox(cert *smx509.Certificate, email string) bool {
 }
 
 func trust(ctx context.Context, usage, email string, cert *smx509.Certificate, chain []*smx509.Certificate) error {
+	_, err := trustWithChain(ctx, usage, email, cert, chain)
+	return err
+}
+
+func trustWithChain(ctx context.Context, usage, email string, cert *smx509.Certificate, chain []*smx509.Certificate) ([][]byte, error) {
 	if !MatchesMailbox(cert, email) {
-		return fmt.Errorf("certificate email does not match %s", email)
+		return [][]byte{cert.Raw}, fmt.Errorf("certificate email does not match %s", email)
 	}
 	ders := [][]byte{cert.Raw}
 	for _, c := range chain {
@@ -230,9 +266,19 @@ func trust(ctx context.Context, usage, email string, cert *smx509.Certificate, c
 			ders = append(ders, c.Raw)
 		}
 	}
-	return withVerifyProvider(ctx, func(p provider) error {
+	var resolved [][]byte
+	err := withVerifyProvider(ctx, func(p provider) error {
+		if cv, ok := p.(chainVerifier); ok {
+			var verr error
+			resolved, verr = cv.VerifyTrustWithChain(ctx, usage, email, ders)
+			return verr
+		}
 		return p.VerifyTrust(ctx, usage, email, ders)
 	})
+	if len(resolved) == 0 {
+		resolved = [][]byte{cert.Raw}
+	}
+	return resolved, err
 }
 
 func ownCertificate(ctx context.Context, email, usage, preferredSHA256 string) (*smx509.Certificate, error) {

@@ -548,42 +548,67 @@ func (p *windowsProvider) Decrypt(_ context.Context, certDER, ciphertext []byte)
 	return buf[:dataLen], nil
 }
 
-func (p *windowsProvider) VerifyTrust(_ context.Context, usage, email string, certsDER [][]byte) error {
+func windowsChainDER(chain *windows.CertChainContext) [][]byte {
+	if chain == nil || chain.ChainCount == 0 || chain.Chains == nil {
+		return nil
+	}
+	simpleChains := unsafe.Slice(chain.Chains, chain.ChainCount)
+	simple := simpleChains[0]
+	if simple == nil || simple.NumElements == 0 || simple.Elements == nil {
+		return nil
+	}
+	elements := unsafe.Slice(simple.Elements, simple.NumElements)
+	out := make([][]byte, 0, len(elements))
+	for _, el := range elements {
+		if el == nil || el.CertContext == nil || el.CertContext.Length == 0 || el.CertContext.EncodedCert == nil {
+			continue
+		}
+		out = append(out, bytes.Clone(unsafe.Slice(el.CertContext.EncodedCert, el.CertContext.Length)))
+	}
+	return out
+}
+
+func (p *windowsProvider) VerifyTrust(ctx context.Context, usage, email string, certsDER [][]byte) error {
+	_, err := p.VerifyTrustWithChain(ctx, usage, email, certsDER)
+	return err
+}
+
+func (p *windowsProvider) VerifyTrustWithChain(_ context.Context, usage, email string, certsDER [][]byte) ([][]byte, error) {
 	if email == "" || len(certsDER) == 0 {
-		return errors.New("missing S/MIME certificate or email address")
+		return nil, errors.New("missing S/MIME certificate or email address")
 	}
 	leaf, err := ParseCertificate(certsDER[0])
 	if err != nil {
-		return errors.New("invalid X.509 certificate")
+		return nil, errors.New("invalid X.509 certificate")
 	}
 	if !MatchesMailbox(leaf, email) {
-		return fmt.Errorf("certificate email does not match %s", email)
+		return nil, fmt.Errorf("certificate email does not match %s", email)
 	}
 	if leaf.KeyUsage != 0 {
 		switch usage {
 		case "sign":
 			if leaf.KeyUsage&(smx509.KeyUsageDigitalSignature|smx509.KeyUsageContentCommitment) == 0 {
-				return errors.New("certificate key usage does not allow digital signatures")
+				return nil, errors.New("certificate key usage does not allow digital signatures")
 			}
 		case "encrypt":
 			if leaf.KeyUsage&smx509.KeyUsageKeyEncipherment == 0 {
-				return errors.New("certificate key usage does not allow key encipherment")
+				return nil, errors.New("certificate key usage does not allow key encipherment")
 			}
 		default:
-			return errors.New("unknown certificate usage")
+			return nil, errors.New("unknown certificate usage")
 		}
 	}
 
 	memStore, err := windows.CertOpenStore(windows.CERT_STORE_PROV_MEMORY, 0, 0, 0, 0)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer windows.CertCloseStore(memStore, 0)
 
 	var leafCtx *windows.CertContext
 	for i, der := range certsDER {
 		if len(der) == 0 {
-			return errors.New("invalid X.509 certificate")
+			return nil, errors.New("invalid X.509 certificate")
 		}
 		var ctx *windows.CertContext
 		var outArg uintptr
@@ -599,14 +624,14 @@ func (p *windowsProvider) VerifyTrust(_ context.Context, usage, email string, ce
 			outArg,
 		)
 		if r1 == 0 {
-			return e1
+			return nil, e1
 		}
 		if i == 0 {
 			leafCtx = ctx
 		}
 	}
 	if leafCtx == nil {
-		return errors.New("unable to load certificate for verification")
+		return nil, errors.New("unable to load certificate for verification")
 	}
 	defer windows.CertFreeCertificateContext(leafCtx)
 
@@ -622,21 +647,23 @@ func (p *windowsProvider) VerifyTrust(_ context.Context, usage, email string, ce
 	}
 	var chain *windows.CertChainContext
 	if err := windows.CertGetCertificateChain(0, leafCtx, nil, memStore, &para, certChainCacheOnlyURLRetrieval, 0, &chain); err != nil {
-		return fmt.Errorf("certificate is not trusted: %w", err)
+		return nil, fmt.Errorf("certificate is not trusted: %w", err)
 	}
 	defer windows.CertFreeCertificateChain(chain)
+
+	chainDER := windowsChainDER(chain)
 
 	var policyPara windows.CertChainPolicyPara
 	policyPara.Size = uint32(unsafe.Sizeof(policyPara))
 	var policyStatus windows.CertChainPolicyStatus
 	policyStatus.Size = uint32(unsafe.Sizeof(policyStatus))
 	if err := windows.CertVerifyCertificateChainPolicy(windows.CERT_CHAIN_POLICY_BASE, chain, &policyPara, &policyStatus); err != nil {
-		return fmt.Errorf("certificate is not trusted: %w", err)
+		return chainDER, fmt.Errorf("certificate is not trusted: %w", err)
 	}
 	if policyStatus.Error != 0 {
-		return fmt.Errorf("certificate is not trusted: %w", windows.Errno(policyStatus.Error))
+		return chainDER, fmt.Errorf("certificate is not trusted: %w", windows.Errno(policyStatus.Error))
 	}
-	return nil
+	return chainDER, nil
 }
 
 func (p *windowsProvider) VerifyCMS(ctx context.Context, email string, cmsDER, detached []byte) (cmsVerifyResult, error) {
@@ -760,10 +787,11 @@ func (p *windowsProvider) VerifyCMS(ctx context.Context, email string, cmsDER, d
 		}
 	}
 
-	if err := p.VerifyTrust(ctx, "sign", email, certsDER); err != nil {
-		return cmsVerifyResult{content: contentBytes, signerDER: signerDER, verifyErr: fmt.Errorf("signature intact, but sender certificate failed verification: %w", err)}, nil
+	chainDER, err := p.VerifyTrustWithChain(ctx, "sign", email, certsDER)
+	if err != nil {
+		return cmsVerifyResult{content: contentBytes, signerDER: signerDER, chainDER: chainDER, verifyErr: fmt.Errorf("signature intact, but sender certificate failed verification: %w", err)}, nil
 	}
-	return cmsVerifyResult{content: contentBytes, signerDER: signerDER}, nil
+	return cmsVerifyResult{content: contentBytes, signerDER: signerDER, chainDER: chainDER}, nil
 }
 
 func (p *windowsProvider) Retry(context.Context) error {

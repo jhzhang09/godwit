@@ -573,6 +573,26 @@ func smimeOf(ctx context.Context, svc Service, draftID int64) *ComposeSMIME {
 	return &out
 }
 
+func toComposeChainNodes(nodes []core.SMIMECertChainNode) []ComposeSMIMECertChainNode {
+	if len(nodes) == 0 {
+		return nil
+	}
+	out := make([]ComposeSMIMECertChainNode, len(nodes))
+	for i, n := range nodes {
+		out[i] = ComposeSMIMECertChainNode{
+			Subject:       n.Subject,
+			Issuer:        n.Issuer,
+			PublicKeyAlgo: n.PublicKeyAlgo,
+			NotBefore:     n.NotBefore.UnixMilli(),
+			NotAfter:      n.NotAfter.UnixMilli(),
+			SHA256:        n.SHA256,
+			Role:          n.Role,
+			SelfSigned:    n.SelfSigned,
+		}
+	}
+	return out
+}
+
 func toComposeSMIME(st core.DraftSMIMEStatus) ComposeSMIME {
 	own := make([]ComposeSMIMEIdentity, 0, len(st.OwnCerts))
 	for _, id := range st.OwnCerts {
@@ -594,6 +614,7 @@ func toComposeSMIME(st core.DraftSMIMEStatus) ComposeSMIME {
 			Hardware:      id.Hardware,
 			CanSign:       id.CanSign,
 			CanEncrypt:    id.CanEncrypt,
+			Chain:         toComposeChainNodes(id.Chain),
 		})
 	}
 	rcpts := make([]ComposeRecipientSMIME, 0, len(st.Recipients))
@@ -620,6 +641,7 @@ func toComposeSMIME(st core.DraftSMIMEStatus) ComposeSMIME {
 				Trusted:       c.Trusted,
 				TrustErr:      c.TrustErr,
 				Selected:      c.Selected,
+				Chain:         toComposeChainNodes(c.Chain),
 			})
 		}
 		rcpts = append(rcpts, ComposeRecipientSMIME{

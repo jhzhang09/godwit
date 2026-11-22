@@ -40,7 +40,12 @@ type RawIdentity struct {
 type cmsVerifyResult struct {
 	content   []byte
 	signerDER []byte
+	chainDER  [][]byte
 	verifyErr error
+}
+
+type chainVerifier interface {
+	VerifyTrustWithChain(ctx context.Context, usage, email string, certsDER [][]byte) ([][]byte, error)
 }
 
 type provider interface {

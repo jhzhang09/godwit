@@ -30,6 +30,39 @@ const (
 	CertSourceImported = "imported"
 )
 
+// SMIMECertChainNode summarizes one certificate in a resolved X.509 trust chain,
+// ordered top-down from root/highest CA to leaf.
+type SMIMECertChainNode struct {
+	Subject       string
+	Issuer        string
+	PublicKeyAlgo string
+	NotBefore     time.Time
+	NotAfter      time.Time
+	SHA256        string
+	Role          string
+	SelfSigned    bool
+}
+
+func toCoreChainNodes(nodes []smime.CertChainNode) []SMIMECertChainNode {
+	if len(nodes) == 0 {
+		return nil
+	}
+	out := make([]SMIMECertChainNode, len(nodes))
+	for i, n := range nodes {
+		out[i] = SMIMECertChainNode{
+			Subject:       n.Subject,
+			Issuer:        n.Issuer,
+			PublicKeyAlgo: n.PublicKeyAlgo,
+			NotBefore:     n.NotBefore,
+			NotAfter:      n.NotAfter,
+			SHA256:        n.SHA256,
+			Role:          n.Role,
+			SelfSigned:    n.SelfSigned,
+		}
+	}
+	return out
+}
+
 // SMIMEIdentity describes one personal S/MIME certificate from the local OS store or security key.
 type SMIMEIdentity struct {
 	SHA256        string
@@ -49,6 +82,7 @@ type SMIMEIdentity struct {
 	Hardware      bool
 	CanSign       bool
 	CanEncrypt    bool
+	Chain         []SMIMECertChainNode
 }
 
 // SMIMECertificate describes one recipient S/MIME public certificate resolved from standard sources.
@@ -72,6 +106,7 @@ type SMIMECertificate struct {
 	Trusted       bool
 	TrustErr      string
 	Selected      bool
+	Chain         []SMIMECertChainNode
 	DER           []byte `json:"-"`
 }
 
@@ -161,7 +196,7 @@ func certIssuerName(cert *smx509.Certificate) string {
 	return smime.InspectCertificate(cert).Issuer
 }
 
-func buildSMIMECertificate(sha, addr, source string, cert *smx509.Certificate, trusted bool, trustErr string, selected bool) SMIMECertificate {
+func buildSMIMECertificate(sha, addr, source string, cert *smx509.Certificate, trusted bool, trustErr string, selected bool, chain []SMIMECertChainNode) SMIMECertificate {
 	meta := smime.InspectCertificate(cert)
 	return SMIMECertificate{
 		SHA256:        sha,
@@ -183,6 +218,7 @@ func buildSMIMECertificate(sha, addr, source string, cert *smx509.Certificate, t
 		Trusted:       trusted,
 		TrustErr:      trustErr,
 		Selected:      selected,
+		Chain:         chain,
 		DER:           slices.Clone(cert.Raw),
 	}
 }
@@ -708,11 +744,12 @@ func (s *Service) collectCertificatesFor(ctx context.Context, addresses []string
 		for sha, e := range m {
 			trustErr := ""
 			trusted := true
-			if err := smime.VerifyTrust(ctx, "encrypt", addr, e.cert); err != nil {
+			chain, err := smime.VerifyTrustWithChain(ctx, "encrypt", addr, e.cert)
+			if err != nil {
 				trusted = false
 				trustErr = FormatSMIMEError(err)
 			}
-			list = append(list, buildSMIMECertificate(sha, addr, e.source, e.cert, trusted, trustErr, prefSHA != "" && sha == prefSHA))
+			list = append(list, buildSMIMECertificate(sha, addr, e.source, e.cert, trusted, trustErr, prefSHA != "" && sha == prefSHA, toCoreChainNodes(chain)))
 		}
 		slices.SortFunc(list, func(a, b SMIMECertificate) int {
 			if a.Selected != b.Selected {
@@ -826,6 +863,7 @@ func (s *Service) ListOwnSMIMECertificates(ctx context.Context, email string) ([
 			Hardware:      it.Hardware,
 			CanSign:       it.CanSign,
 			CanEncrypt:    it.CanEncrypt,
+			Chain:         toCoreChainNodes(it.Chain),
 		}
 	}
 	return out, nil
@@ -1006,11 +1044,12 @@ func (s *Service) ImportContactCertificateFile(ctx context.Context, address, pat
 			stmts = append(stmts, upsertSMIMECertStmt(addr, CertSourceImported, cert, now))
 			trustErr := ""
 			trusted := true
-			if terr := smime.VerifyTrust(ctx, "encrypt", addr, cert); terr != nil {
+			chain, terr := smime.VerifyTrustWithChain(ctx, "encrypt", addr, cert)
+			if terr != nil {
 				trusted = false
 				trustErr = FormatSMIMEError(terr)
 			}
-			imported = append(imported, buildSMIMECertificate(sha, addr, CertSourceImported, cert, trusted, trustErr, false))
+			imported = append(imported, buildSMIMECertificate(sha, addr, CertSourceImported, cert, trusted, trustErr, false, toCoreChainNodes(chain)))
 		}
 	}
 	if len(imported) == 0 {

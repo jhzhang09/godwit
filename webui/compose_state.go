@@ -7,48 +7,63 @@ type Account struct {
 	Email string `json:"email"`
 }
 
+// ComposeSMIMECertChainNode summarizes one certificate in a resolved X.509 trust chain,
+// ordered top-down from root/highest CA to leaf.
+type ComposeSMIMECertChainNode struct {
+	Subject       string `json:"subject"`
+	Issuer        string `json:"issuer"`
+	PublicKeyAlgo string `json:"publicKeyAlgo,omitempty"`
+	NotBefore     int64  `json:"notBefore"`
+	NotAfter      int64  `json:"notAfter"`
+	SHA256        string `json:"sha256"`
+	Role          string `json:"role"`
+	SelfSigned    bool   `json:"selfSigned"`
+}
+
 // ComposeSMIMEIdentity describes one personal S/MIME certificate for the sender account.
 type ComposeSMIMEIdentity struct {
-	SHA256        string   `json:"sha256"`
-	Subject       string   `json:"subject"`
-	SubjectDN     string   `json:"subjectDn,omitempty"`
-	Issuer        string   `json:"issuer"`
-	IssuerDN      string   `json:"issuerDn,omitempty"`
-	Emails        []string `json:"emails"`
-	SerialNumber  string   `json:"serialNumber,omitempty"`
-	NotBefore     int64    `json:"notBefore"`
-	NotAfter      int64    `json:"notAfter"`
-	PublicKeyAlgo string   `json:"publicKeyAlgo,omitempty"`
-	SignatureAlgo string   `json:"signatureAlgo,omitempty"`
-	KeyUsages     []string `json:"keyUsages"`
-	ExtKeyUsages  []string `json:"extKeyUsages"`
-	SHA1          string   `json:"sha1,omitempty"`
-	Hardware      bool     `json:"hardware"`
-	CanSign       bool     `json:"canSign"`
-	CanEncrypt    bool     `json:"canEncrypt"`
+	SHA256        string                      `json:"sha256"`
+	Subject       string                      `json:"subject"`
+	SubjectDN     string                      `json:"subjectDn,omitempty"`
+	Issuer        string                      `json:"issuer"`
+	IssuerDN      string                      `json:"issuerDn,omitempty"`
+	Emails        []string                    `json:"emails"`
+	SerialNumber  string                      `json:"serialNumber,omitempty"`
+	NotBefore     int64                       `json:"notBefore"`
+	NotAfter      int64                       `json:"notAfter"`
+	PublicKeyAlgo string                      `json:"publicKeyAlgo,omitempty"`
+	SignatureAlgo string                      `json:"signatureAlgo,omitempty"`
+	KeyUsages     []string                    `json:"keyUsages"`
+	ExtKeyUsages  []string                    `json:"extKeyUsages"`
+	SHA1          string                      `json:"sha1,omitempty"`
+	Hardware      bool                        `json:"hardware"`
+	CanSign       bool                        `json:"canSign"`
+	CanEncrypt    bool                        `json:"canEncrypt"`
+	Chain         []ComposeSMIMECertChainNode `json:"chain,omitempty"`
 }
 
 // ComposeSMIMECert describes one candidate S/MIME encryption certificate for a recipient.
 type ComposeSMIMECert struct {
-	SHA256        string   `json:"sha256"`
-	Address       string   `json:"address"`
-	Source        string   `json:"source"`
-	Subject       string   `json:"subject"`
-	SubjectDN     string   `json:"subjectDn,omitempty"`
-	Issuer        string   `json:"issuer"`
-	IssuerDN      string   `json:"issuerDn,omitempty"`
-	Emails        []string `json:"emails"`
-	SerialNumber  string   `json:"serialNumber,omitempty"`
-	NotBefore     int64    `json:"notBefore"`
-	NotAfter      int64    `json:"notAfter"`
-	PublicKeyAlgo string   `json:"publicKeyAlgo,omitempty"`
-	SignatureAlgo string   `json:"signatureAlgo,omitempty"`
-	KeyUsages     []string `json:"keyUsages"`
-	ExtKeyUsages  []string `json:"extKeyUsages"`
-	SHA1          string   `json:"sha1,omitempty"`
-	Trusted       bool     `json:"trusted"`
-	TrustErr      string   `json:"trustErr,omitempty"`
-	Selected      bool     `json:"selected"`
+	SHA256        string                      `json:"sha256"`
+	Address       string                      `json:"address"`
+	Source        string                      `json:"source"`
+	Subject       string                      `json:"subject"`
+	SubjectDN     string                      `json:"subjectDn,omitempty"`
+	Issuer        string                      `json:"issuer"`
+	IssuerDN      string                      `json:"issuerDn,omitempty"`
+	Emails        []string                    `json:"emails"`
+	SerialNumber  string                      `json:"serialNumber,omitempty"`
+	NotBefore     int64                       `json:"notBefore"`
+	NotAfter      int64                       `json:"notAfter"`
+	PublicKeyAlgo string                      `json:"publicKeyAlgo,omitempty"`
+	SignatureAlgo string                      `json:"signatureAlgo,omitempty"`
+	KeyUsages     []string                    `json:"keyUsages"`
+	ExtKeyUsages  []string                    `json:"extKeyUsages"`
+	SHA1          string                      `json:"sha1,omitempty"`
+	Trusted       bool                        `json:"trusted"`
+	TrustErr      string                      `json:"trustErr,omitempty"`
+	Selected      bool                        `json:"selected"`
+	Chain         []ComposeSMIMECertChainNode `json:"chain,omitempty"`
 }
 
 // ComposeRecipientSMIME describes S/MIME encryption certificate readiness for one recipient.

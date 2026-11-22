@@ -779,7 +779,7 @@ func TestSMIMEAllowWeakKeyAccountAndFormat(t *testing.T) {
 	i18n.SetLanguage("zh-Hans")
 	require.Equal(t, "“yczhang”证书的密钥长度过短（RSA 1024 bit，系统要求至少 2048 位）", FormatWeakKeySizeError(wk))
 	require.Equal(t, FormatWeakKeySizeError(wk), FormatSMIMEError(fmt.Errorf("wrapped: %w", wk)))
-	require.Equal(t, "证书的密钥长度低于系统安全要求（通常需要至少 2048 位 RSA 密钥）", FormatWeakKeySizeError(&smime.WeakKeySizeError{}))
+	require.Equal(t, "证书的密钥长度低于系统安全要求", FormatWeakKeySizeError(&smime.WeakKeySizeError{}))
 	require.Equal(t, "other error", FormatSMIMEError(fmt.Errorf("other error")))
 
 	i18n.SetLanguage("en")

@@ -16,6 +16,7 @@ import (
 
 type smimeCertView struct {
 	smime.CertDetails
+	Chain       []smime.CertChainNode
 	SourceLabel string
 	Verified    bool
 	Trusted     bool
@@ -44,9 +45,43 @@ func smimeSourceLabel(src string) string {
 	}
 }
 
-func certViewFromDetails(d smime.CertDetails, verified, trusted bool, source, statusErr string) smimeCertView {
+func smimeChainFromCore(nodes []core.SMIMECertChainNode) []smime.CertChainNode {
+	if len(nodes) == 0 {
+		return nil
+	}
+	out := make([]smime.CertChainNode, len(nodes))
+	for i, n := range nodes {
+		out[i] = smime.CertChainNode{
+			Subject:       n.Subject,
+			Issuer:        n.Issuer,
+			PublicKeyAlgo: n.PublicKeyAlgo,
+			NotBefore:     n.NotBefore,
+			NotAfter:      n.NotAfter,
+			SHA256:        n.SHA256,
+			Role:          n.Role,
+			SelfSigned:    n.SelfSigned,
+		}
+	}
+	return out
+}
+
+func certChainRoleLabel(role string) string {
+	switch role {
+	case "root":
+		return i18n.T("smime.cert.role_root")
+	case "intermediate":
+		return i18n.T("smime.cert.role_intermediate")
+	case "leaf":
+		return i18n.T("smime.cert.role_leaf")
+	default:
+		return role
+	}
+}
+
+func certViewFromDetails(d smime.CertDetails, verified, trusted bool, source, statusErr string, chain []smime.CertChainNode) smimeCertView {
 	return smimeCertView{
 		CertDetails: d,
+		Chain:       chain,
 		SourceLabel: smimeSourceLabel(source),
 		Verified:    verified,
 		Trusted:     trusted,
@@ -70,7 +105,7 @@ func certViewFromCoreCert(c core.SMIMECertificate) smimeCertView {
 		ExtKeyUsages:  c.ExtKeyUsages,
 		SHA256:        c.SHA256,
 		SHA1:          c.SHA1,
-	}, false, c.Trusted, c.Source, c.TrustErr)
+	}, false, c.Trusted, c.Source, c.TrustErr, smimeChainFromCore(c.Chain))
 }
 
 func certViewFromIdentity(id core.SMIMEIdentity) smimeCertView {
@@ -95,6 +130,7 @@ func certViewFromIdentity(id core.SMIMEIdentity) smimeCertView {
 			SHA256:        id.SHA256,
 			SHA1:          id.SHA1,
 		},
+		Chain:       smimeChainFromCore(id.Chain),
 		SourceLabel: src,
 		Trusted:     id.CanSign || id.CanEncrypt,
 	}
@@ -179,6 +215,9 @@ func (a *App) smimeCertDialog(c *ui.Context) {
 						kit.BadgeWith(c, i18n.T("smime.cert.status_expired"), kit.BadgeOpts{Tone: kit.BadgeDanger})
 					}
 				})
+				if (v.Verified || v.Trusted) && len(v.Chain) > 1 && v.Chain[0].Role == "root" {
+					kit.Text(c, i18n.Tf("smime.cert.trusted_via_root", cmp.Or(v.Chain[0].Subject, v.Chain[0].Issuer)), t.Text.Xs).TextColor(statusColor).Selectable()
+				}
 				if v.StatusError != "" && !v.Verified && !v.Trusted {
 					kit.Text(c, v.StatusError, t.Text.Xs).TextColor(statusColor).Selectable()
 				}
@@ -219,6 +258,36 @@ func (a *App) smimeCertDialog(c *ui.Context) {
 					row(i18n.T("smime.cert.field_source"), v.SourceLabel, "", false)
 				}
 			})
+
+			if len(v.Chain) > 1 {
+				kit.Block(c, ui.Column(c), kit.ToneOutline).FillWidth().Padding(th.Space(2.5), th.Space(3)).Gap(th.Space(2)).Children(func() {
+					kit.Text(c, i18n.T("smime.cert.chain"), t.Text.Xs).TextColor(t.Muted)
+					for i, node := range v.Chain {
+						indent := float32(i) * th.Space(3)
+						ui.Column(c).FillWidth().Padding(0, 0, 0, indent).Gap(th.Space(0.5)).Children(func() {
+							ui.Row(c).FillWidth().Wrap().Gap(th.Space(1.5)).AlignItems(ui.Center).Children(func() {
+								prefix := ""
+								if i > 0 {
+									prefix = "└─ "
+								}
+								name := cmp.Or(node.Subject, node.Issuer)
+								kit.Text(c, prefix+name, t.Text.Xs).FontWeight(500).Selectable()
+								kit.BadgeWith(c, certChainRoleLabel(node.Role), kit.BadgeOpts{Tone: kit.BadgeOutline, Muted: true})
+								if i == 0 && node.Role == "root" && (v.Verified || v.Trusted) {
+									kit.BadgeWith(c, i18n.T("smime.cert.root_trusted"), kit.BadgeOpts{Tone: kit.BadgeSuccess})
+								}
+							})
+							if node.PublicKeyAlgo != "" {
+								subPad := float32(0)
+								if i > 0 {
+									subPad = th.Space(3)
+								}
+								kit.Text(c, node.PublicKeyAlgo, t.Text.Xs).TextColor(t.Muted).Padding(0, 0, 0, subPad)
+							}
+						})
+					}
+				})
+			}
 
 			sha256Colon := formatFingerprintHex(v.SHA256)
 			sha1Colon := formatFingerprintHex(v.SHA1)

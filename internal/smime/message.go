@@ -26,6 +26,7 @@ type Opened struct {
 	Encrypted      bool
 	Signer         string
 	SignerCert     []byte
+	SignerChain    [][]byte
 	UnverifiedCert []byte
 	VerifyErr      string
 	VerifyErrCause error
@@ -143,22 +144,23 @@ func openEnvelope(ctx context.Context, p *pkcs7.PKCS7) ([]byte, error) {
 	return nil, errors.New("no matching personal S/MIME certificate or private key found for encrypted message")
 }
 
-func verify(ctx context.Context, p *pkcs7.PKCS7, from string) ([]byte, error) {
+func verify(ctx context.Context, p *pkcs7.PKCS7, from string) ([]byte, [][]byte, error) {
 	signer := p.GetOnlySigner()
 	var signerDER []byte
 	if signer != nil {
 		signerDER = bytes.Clone(signer.Raw)
 	}
 	if err := p.Verify(); err != nil {
-		return signerDER, fmt.Errorf("invalid S/MIME signature: %w", err)
+		return signerDER, nil, fmt.Errorf("invalid S/MIME signature: %w", err)
 	}
 	if signer == nil {
-		return nil, errors.New("unable to identify unique S/MIME signer")
+		return nil, nil, errors.New("unable to identify unique S/MIME signer")
 	}
-	if err := trust(ctx, "sign", from, signer, p.Certificates); err != nil {
-		return signerDER, fmt.Errorf("signature intact, but sender certificate failed verification: %w", err)
+	chainDER, err := trustWithChain(ctx, "sign", from, signer, p.Certificates)
+	if err != nil {
+		return signerDER, chainDER, fmt.Errorf("signature intact, but sender certificate failed verification: %w", err)
 	}
-	return signerDER, nil
+	return signerDER, chainDER, nil
 }
 
 var oidCMSSignedData = []byte{0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x07, 0x02}
@@ -295,7 +297,7 @@ func openMIME(ctx context.Context, from string, raw []byte, startDepth int, resu
 	return Opened{}, errors.New("S/MIME nesting too deep")
 }
 
-func recordVerifyFailure(result *Opened, err error, certDER []byte) {
+func recordVerifyFailure(result *Opened, err error, certDER []byte, chainDER [][]byte) {
 	if result.VerifyErr == "" && err != nil {
 		result.VerifyErr = err.Error()
 		result.VerifyErrCause = err
@@ -304,6 +306,9 @@ func recordVerifyFailure(result *Opened, err error, certDER []byte) {
 	result.SignerCert = nil
 	if len(certDER) > 0 && len(result.UnverifiedCert) == 0 {
 		result.UnverifiedCert = bytes.Clone(certDER)
+	}
+	if len(chainDER) > 0 && len(result.SignerChain) == 0 {
+		result.SignerChain = chainDER
 	}
 }
 
@@ -321,13 +326,16 @@ func unwrapCMS(ctx context.Context, from string, der, detached []byte, result *O
 			if !allowUnverified {
 				return nil, res.verifyErr
 			}
-			recordVerifyFailure(result, res.verifyErr, res.signerDER)
+			recordVerifyFailure(result, res.verifyErr, res.signerDER, res.chainDER)
 			return res.content, nil
 		}
 		if result.VerifyErr == "" {
 			result.Signer = from
 			if len(res.signerDER) > 0 {
 				result.SignerCert = res.signerDER
+			}
+			if len(res.chainDER) > 0 {
+				result.SignerChain = res.chainDER
 			}
 		}
 		return res.content, nil
@@ -361,17 +369,18 @@ func unwrapCMS(ctx context.Context, from string, der, detached []byte, result *O
 		result.Encrypted = true
 		if len(p.Signers) > 0 {
 			p.Content = raw
-			signerDER, err := verify(ctx, p, from)
+			signerDER, chainDER, err := verify(ctx, p, from)
 			if err != nil {
 				if !allowUnverified {
 					return nil, err
 				}
-				recordVerifyFailure(result, err, signerDER)
+				recordVerifyFailure(result, err, signerDER, chainDER)
 				return raw, nil
 			}
 			if result.VerifyErr == "" {
 				result.Signer = from
 				result.SignerCert = signerDER
+				result.SignerChain = chainDER
 			}
 		}
 		return raw, nil
@@ -382,17 +391,18 @@ func unwrapCMS(ctx context.Context, from string, der, detached []byte, result *O
 		}
 		p.Content = detached
 	}
-	signerDER, err := verify(ctx, p, from)
+	signerDER, chainDER, err := verify(ctx, p, from)
 	if err != nil {
 		if !allowUnverified {
 			return nil, err
 		}
-		recordVerifyFailure(result, err, signerDER)
+		recordVerifyFailure(result, err, signerDER, chainDER)
 		return p.Content, nil
 	}
 	if result.VerifyErr == "" {
 		result.Signer = from
 		result.SignerCert = signerDER
+		result.SignerChain = chainDER
 	}
 	return p.Content, nil
 }

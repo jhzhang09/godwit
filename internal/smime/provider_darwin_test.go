@@ -299,10 +299,14 @@ func TestDarwinVerifyTrustWeakKeyCompat(t *testing.T) {
 	require.ErrorAs(t, err, &wk)
 	require.Equal(t, 512, wk.KeyBits)
 
-	// 9. Anchored ECDSA P-224 leaf must still fail with compat ON.
-	err = evalChain("sign", "yczhang@tendyron.com", [][]byte{leaf224}, [][]byte{leaf224}, true)
+	// 9. Anchored ECDSA P-224 leaf fails strict verification, then succeeds with compat ON.
+	err = evalChain("sign", "yczhang@tendyron.com", [][]byte{leaf224}, [][]byte{leaf224}, false)
 	wk = nil
 	require.ErrorAs(t, err, &wk)
 	require.Equal(t, "ECDSA", wk.KeyAlgo)
 	require.Equal(t, 224, wk.KeyBits)
+	require.Equal(t, 256, wk.MinBits)
+
+	err = evalChain("sign", "yczhang@tendyron.com", [][]byte{leaf224}, [][]byte{leaf224}, true)
+	require.NoError(t, err)
 }

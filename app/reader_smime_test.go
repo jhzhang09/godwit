@@ -328,6 +328,7 @@ func TestSMIMECopyAndStandardWorkflows(t *testing.T) {
 		"smime.sign", "smime.sign.help", "smime.encrypt", "smime.encrypt.help",
 		"smime.allow_weak_key", "smime.allow_weak_key.help", "smime.err.weak_key_size_generic",
 		"smime.cert", "smime.cert.help", "smime.cert.view", "smime.cert.detail_title",
+		"smime.cert.chain", "smime.cert.role_root", "smime.cert.role_intermediate", "smime.cert.role_leaf", "smime.cert.root_trusted",
 		"smime.contacts.title", "smime.contacts.empty", "smime.compose.sign", "smime.compose.encrypt",
 	}
 	forbidden := []string{"邮箱名片", "旧卡", "舊卡", "硬件 Key", "硬體金鑰", "hardware key"}
@@ -387,7 +388,7 @@ func TestSMIMECopyAndStandardWorkflows(t *testing.T) {
 	h.see("个人 S/MIME 证书")
 	h.see("默认对发出邮件进行数字签名")
 	h.see("默认对发出邮件进行加密")
-	h.see("兼容 1024 位旧证书")
+	h.see("兼容旧版较短密钥证书")
 
 	// Return to mail sidebar, open Contacts, and verify bob@example.com S/MIME certificate panel + import + select + remove.
 	h.resize(1440, 2000)
@@ -649,8 +650,8 @@ func TestReaderSMIMEWeakKeyWarningAndAccountCompat(t *testing.T) {
 	// Enabling SMIMEAllowWeakKey in Account Settings invalidates the reader secure cache
 	// and re-runs verification with AllowWeakKeySize(ctx) == true.
 	h.openSettings(accountRoute(accs[0].ID))
-	h.see("兼容 1024 位旧证书")
-	h.click("兼容 1024 位旧证书")
+	h.see("兼容旧版较短密钥证书")
+	h.click("兼容旧版较短密钥证书")
 	h.until("account compat saved", func() bool {
 		for _, a := range h.app.accounts {
 			if a.ID == accs[0].ID {

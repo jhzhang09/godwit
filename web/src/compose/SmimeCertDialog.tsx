@@ -11,7 +11,11 @@ import {
 } from "@/components/dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import type { ComposeSMIMECert, ComposeSMIMEIdentity } from "@/mygo";
+import type {
+  ComposeSMIMECert,
+  ComposeSMIMECertChainNode,
+  ComposeSMIMEIdentity,
+} from "@/mygo";
 import type { T } from "@/shared/i18n";
 
 export interface SmimeCertView {
@@ -32,6 +36,7 @@ export interface SmimeCertView {
   sourceLabel?: string;
   trusted: boolean;
   trustErr?: string;
+  chain?: ComposeSMIMECertChainNode[];
 }
 
 export function formatFingerprintHex(hex?: string): string {
@@ -83,6 +88,7 @@ export function certViewFromRecipientCert(c: ComposeSMIMECert, t: T): SmimeCertV
     sourceLabel: srcLabel !== srcKey ? srcLabel : c.source,
     trusted: c.trusted,
     trustErr: c.trustErr,
+    chain: c.chain,
   };
 }
 
@@ -110,6 +116,7 @@ export function certViewFromOwnIdentity(
     sourceLabel: t(id.hardware ? "smime.cert.hardware" : "smime.cert.software"),
     trusted: id.canSign || id.canEncrypt,
     trustErr: ownErr,
+    chain: id.chain,
   };
 }
 
@@ -185,6 +192,22 @@ export function SmimeCertDialog({
     }
   };
 
+  const chain = cert.chain ?? [];
+  const rootTrustedNode =
+    cert.trusted && chain.length > 1 && chain[0]?.role === "root" ? chain[0] : undefined;
+  const roleLabel = (role: string) => {
+    switch (role) {
+      case "root":
+        return t("smime.cert.role_root");
+      case "intermediate":
+        return t("smime.cert.role_intermediate");
+      case "leaf":
+        return t("smime.cert.role_leaf");
+      default:
+        return role;
+    }
+  };
+
   return (
     <Dialog open={!!cert} onOpenChange={onOpenChange}>
       <DialogContent size="md" close={t("common.close")} onKeyDown={(e) => e.stopPropagation()}>
@@ -216,6 +239,14 @@ export function SmimeCertDialog({
                 </Badge>
               )}
             </div>
+            {rootTrustedNode && (
+              <div className="text-[11px] opacity-90 select-text">
+                {t(
+                  "smime.cert.trusted_via_root",
+                  rootTrustedNode.subject || rootTrustedNode.issuer,
+                )}
+              </div>
+            )}
             {!cert.trusted && cert.trustErr && (
               <div className="text-[11px] opacity-90 select-text">{cert.trustErr}</div>
             )}
@@ -238,6 +269,46 @@ export function SmimeCertDialog({
             <DetailRow label={t("smime.cert.field_validity")} value={validity} />
             <DetailRow label={t("smime.cert.field_source")} value={cert.sourceLabel} />
           </div>
+
+          {chain.length > 1 && (
+            <div className="flex flex-col gap-2 rounded-lg border border-border/70 bg-background/60 p-3">
+              <div className="text-[11px] text-muted-foreground">{t("smime.cert.chain")}</div>
+              <div className="flex flex-col gap-2">
+                {chain.map((node, i) => (
+                  <div
+                    key={`${node.sha256 || node.subject}-${i}`}
+                    style={{ paddingLeft: `${i * 12}px` }}
+                    className="flex flex-col gap-0.5"
+                  >
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="text-xs font-medium select-text">
+                        {i > 0 ? "└─ " : ""}
+                        {node.subject || node.issuer}
+                      </span>
+                      <Badge variant="outline" className="h-4 px-1.5 text-[10px] text-muted-foreground">
+                        {roleLabel(node.role)}
+                      </Badge>
+                      {i === 0 && node.role === "root" && cert.trusted && (
+                        <Badge
+                          variant="secondary"
+                          className="h-4 border border-emerald-500/30 bg-emerald-500/10 px-1.5 text-[10px] text-emerald-700 dark:text-emerald-300"
+                        >
+                          {t("smime.cert.root_trusted")}
+                        </Badge>
+                      )}
+                    </div>
+                    {node.publicKeyAlgo && (
+                      <div
+                        className={`text-[11px] text-muted-foreground ${i > 0 ? "pl-4" : ""}`}
+                      >
+                        {node.publicKeyAlgo}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {hasTech && (
             <div className="flex flex-col gap-2.5 rounded-lg border border-border/70 bg-background/60 p-3">

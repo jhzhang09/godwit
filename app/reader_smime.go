@@ -28,6 +28,7 @@ type secureBody struct {
 type secureMessage struct {
 	signer      string
 	signerCert  *smime.CertDetails
+	signerChain []smime.CertChainNode
 	encrypted   bool
 	verifyErr   string
 	attachments []mail.Attachment
@@ -217,10 +218,11 @@ func (r *reader) smimeNotice(c *ui.Context, id int64, b *msgBody) {
 						kit.Text(c, i18n.T("smime.unverified.hint"), t.Text.Xs).TextColor(t.Muted)
 						if result.signerCert != nil {
 							cert := *result.signerCert
+							chain := result.signerChain
 							verifyErr := result.verifyErr
 							ui.Row(c).Children(func() {
 								if kit.Button(c, i18n.T("smime.cert.view"), kit.ButtonOpts{Variant: kit.Outline, Size: kit.SizeSm}).Clicked() {
-									r.p.a.openSMIMECertDialog(certViewFromDetails(cert, false, false, "", verifyErr))
+									r.p.a.openSMIMECertDialog(certViewFromDetails(cert, false, false, "", verifyErr, chain))
 								}
 							})
 						}
@@ -244,8 +246,9 @@ func (r *reader) smimeNotice(c *ui.Context, id int64, b *msgBody) {
 				sigLabel := i18n.Tf("smime.verified", result.signer)
 				if result.signerCert != nil {
 					cert := *result.signerCert
+					chain := result.signerChain
 					openCert := func() {
-						r.p.a.openSMIMECertDialog(certViewFromDetails(cert, true, true, "", ""))
+						r.p.a.openSMIMECertDialog(certViewFromDetails(cert, true, true, "", "", chain))
 					}
 					btn := ui.ButtonBase(c).AlignItems(ui.Center).Gap(th.Space(1.5)).Padding(th.Space(0.5), th.Space(1.5)).Radius(t.Radius.Sm).Label(sigLabel)
 					if btn.Hovered() {
@@ -435,6 +438,9 @@ func (r *reader) openSMIME(id int64, b *msgBody, retry bool) {
 			if details, cerr := smime.InspectCertificateDER(certDER); cerr == nil {
 				result.signerCert = &details
 			}
+		}
+		if len(opened.SignerChain) > 0 {
+			result.signerChain = smime.BuildCertChain(opened.SignerChain)
 		}
 		if opened.VerifyErr == "" && len(opened.SignerCert) > 0 && opened.Signer != "" {
 			_ = a.svc.RecordSMIMESignerCert(ctx, opened.Signer, opened.SignerCert)

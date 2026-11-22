@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto"
+	"crypto/ecdsa"
 	"crypto/rsa"
 	"errors"
 	"fmt"
@@ -35,6 +36,7 @@ const (
 	kSecTrustResultRecoverableTrustFailure int64 = 5
 	cssmErrCSPUnsupportedKeySize           int64 = -2147415784
 	minCompatRSAKeyBits                    int   = 1024
+	minCompatECDSAKeyBits                  int   = 192
 
 	kSecKeyOperationTypeSign    int = 0
 	kSecKeyOperationTypeDecrypt int = 3
@@ -941,8 +943,16 @@ func (d *darwinAPI) inspectTrustResult(trustResult, chain uintptr) darwinTrustDe
 			if info.firstKeySizeFail == nil {
 				info.firstKeySizeFail = wk
 			}
-			pub, ok := cert.PublicKey.(*rsa.PublicKey)
-			if !ok || pub == nil || pub.N == nil || pub.N.BitLen() < minCompatRSAKeyBits {
+			switch pub := cert.PublicKey.(type) {
+			case *rsa.PublicKey:
+				if pub == nil || pub.N == nil || pub.N.BitLen() < minCompatRSAKeyBits {
+					info.allKeySizeCompat = false
+				}
+			case *ecdsa.PublicKey:
+				if pub == nil || pub.Curve == nil || pub.Curve.Params().BitSize < minCompatECDSAKeyBits {
+					info.allKeySizeCompat = false
+				}
+			default:
 				info.allKeySizeCompat = false
 			}
 		}
@@ -981,13 +991,49 @@ func (d *darwinAPI) evaluateTrust(trust uintptr, allowWeakRSA bool) error {
 	return origErr
 }
 
+func (d *darwinAPI) copyChainDER(trust uintptr) [][]byte {
+	if trust == 0 {
+		return nil
+	}
+	chain := d.secTrustCopyCertificateChain(trust)
+	if chain == 0 {
+		return nil
+	}
+	defer d.release(chain)
+	if d.cfGetTypeID(chain) != d.cfArrayGetTypeID() {
+		return nil
+	}
+	n := d.cfArrayGetCount(chain)
+	if n <= 0 {
+		return nil
+	}
+	out := make([][]byte, 0, n)
+	for i := range n {
+		certRef := d.cfArrayGetValueAtIndex(chain, i)
+		if certRef == 0 {
+			continue
+		}
+		derData := d.secCertificateCopyData(certRef)
+		if der := d.goBytes(derData); len(der) > 0 {
+			out = append(out, der)
+		}
+		d.release(derData)
+	}
+	return out
+}
+
 func (p *darwinProvider) VerifyTrust(ctx context.Context, usage, email string, certsDER [][]byte) error {
+	_, err := p.VerifyTrustWithChain(ctx, usage, email, certsDER)
+	return err
+}
+
+func (p *darwinProvider) VerifyTrustWithChain(ctx context.Context, usage, email string, certsDER [][]byte) ([][]byte, error) {
 	d, err := loadDarwinAPI()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if email == "" || len(certsDER) == 0 {
-		return errors.New("missing S/MIME certificate or email address")
+		return nil, errors.New("missing S/MIME certificate or email address")
 	}
 	var usageKey uintptr
 	switch usage {
@@ -996,11 +1042,11 @@ func (p *darwinProvider) VerifyTrust(ctx context.Context, usage, email string, c
 	case "encrypt":
 		usageKey = d.kSecPolicyKUKeyEncipherment
 	default:
-		return errors.New("unknown certificate usage")
+		return nil, errors.New("unknown certificate usage")
 	}
 	cfEmail := d.cfString(email)
 	if cfEmail == 0 {
-		return errors.New("unable to create email string")
+		return nil, errors.New("unable to create email string")
 	}
 	defer d.release(cfEmail)
 
@@ -1015,25 +1061,25 @@ func (p *darwinProvider) VerifyTrust(ctx context.Context, usage, email string, c
 		cert := d.secCertificateCreateWithData(0, data)
 		d.release(data)
 		if cert == 0 {
-			return errors.New("invalid X.509 certificate")
+			return nil, errors.New("invalid X.509 certificate")
 		}
 		certs = append(certs, cert)
 	}
 	cfCerts := d.cfArrayCreate(0, unsafe.Pointer(&certs[0]), len(certs), d.kCFTypeArrayCB)
 	if cfCerts == 0 {
-		return errors.New("unable to build certificate list")
+		return nil, errors.New("unable to build certificate list")
 	}
 	defer d.release(cfCerts)
 
 	props := d.cfDict([]uintptr{d.kSecPolicyName, usageKey}, []uintptr{cfEmail, d.kCFBooleanTrue})
 	if props == 0 {
-		return errors.New("unable to create S/MIME trust policy")
+		return nil, errors.New("unable to create S/MIME trust policy")
 	}
 	defer d.release(props)
 
 	policy := d.secPolicyCreateWithProperties(d.kSecPolicyAppleSMIME, props)
 	if policy == 0 {
-		return errors.New("unable to create S/MIME trust policy")
+		return nil, errors.New("unable to create S/MIME trust policy")
 	}
 	defer d.release(policy)
 
@@ -1041,16 +1087,17 @@ func (p *darwinProvider) VerifyTrust(ctx context.Context, usage, email string, c
 	if st := d.secTrustCreateWithCertificates(cfCerts, policy, &trust); st != errSecSuccess || trust == 0 {
 		d.release(trust)
 		if st != errSecSuccess {
-			return d.secErr(st)
+			return nil, d.secErr(st)
 		}
-		return errors.New("unable to evaluate certificate trust")
+		return nil, errors.New("unable to evaluate certificate trust")
 	}
 	defer d.release(trust)
 
 	if st := d.secTrustSetNetworkFetchAllowed(trust, false); st != errSecSuccess {
-		return d.secErr(st)
+		return nil, d.secErr(st)
 	}
-	return d.evaluateTrust(trust, AllowWeakKeySize(ctx))
+	evalErr := d.evaluateTrust(trust, AllowWeakKeySize(ctx))
+	return d.copyChainDER(trust), evalErr
 }
 
 func (p *darwinProvider) VerifyCMS(ctx context.Context, email string, cmsDER, detached []byte) (cmsVerifyResult, error) {
@@ -1129,6 +1176,7 @@ func (p *darwinProvider) VerifyCMS(ctx context.Context, email string, cmsDER, de
 		}
 	}
 
+	var chainDER [][]byte
 	verifyErr := signerErr
 	if verifyErr == nil && email == "" {
 		verifyErr = errors.New("signed message lacks a unique sender address")
@@ -1163,53 +1211,57 @@ func (p *darwinProvider) VerifyCMS(ctx context.Context, email string, cmsDER, de
 				verifyErr = errors.New("invalid S/MIME signature")
 			} else if st := d.secTrustSetNetworkFetchAllowed(trust, false); st != errSecSuccess {
 				verifyErr = d.secErr(st)
-			} else if err := d.evaluateTrust(trust, AllowWeakKeySize(ctx)); err != nil {
-				verifyErr = err
 			} else {
-				var signer uintptr
-				if st := d.cmsDecoderCopySignerCert(decoder, 0, &signer); st != errSecSuccess {
-					d.release(signer)
-					verifyErr = d.secErr(st)
-				} else if signer == 0 {
-					verifyErr = errors.New("missing signer certificate")
+				evalErr := d.evaluateTrust(trust, AllowWeakKeySize(ctx))
+				chainDER = d.copyChainDER(trust)
+				if evalErr != nil {
+					verifyErr = evalErr
 				} else {
-					defer d.release(signer)
-					if len(signerDER) == 0 {
-						certData := d.secCertificateCopyData(signer)
-						signerDER = d.goBytes(certData)
-						d.release(certData)
-					}
-
-					var addrs uintptr
-					if st := d.secCertificateCopyEmailAddresses(signer, &addrs); st != errSecSuccess {
-						d.release(addrs)
+					var signer uintptr
+					if st := d.cmsDecoderCopySignerCert(decoder, 0, &signer); st != errSecSuccess {
+						d.release(signer)
 						verifyErr = d.secErr(st)
+					} else if signer == 0 {
+						verifyErr = errors.New("missing signer certificate")
 					} else {
-						matched := false
-						if addrs != 0 {
-							n := d.cfArrayGetCount(addrs)
-							for i := range n {
-								if strings.EqualFold(d.goString(d.cfArrayGetValueAtIndex(addrs, i)), email) {
+						defer d.release(signer)
+						if len(signerDER) == 0 {
+							certData := d.secCertificateCopyData(signer)
+							signerDER = d.goBytes(certData)
+							d.release(certData)
+						}
+
+						var addrs uintptr
+						if st := d.secCertificateCopyEmailAddresses(signer, &addrs); st != errSecSuccess {
+							d.release(addrs)
+							verifyErr = d.secErr(st)
+						} else {
+							matched := false
+							if addrs != 0 {
+								n := d.cfArrayGetCount(addrs)
+								for i := range n {
+									if strings.EqualFold(d.goString(d.cfArrayGetValueAtIndex(addrs, i)), email) {
+										matched = true
+										break
+									}
+								}
+								d.release(addrs)
+							}
+							if !matched && len(signerDER) > 0 {
+								if cert, err := ParseCertificate(signerDER); err == nil && MatchesMailbox(cert, email) {
 									matched = true
-									break
 								}
 							}
-							d.release(addrs)
-						}
-						if !matched && len(signerDER) > 0 {
-							if cert, err := ParseCertificate(signerDER); err == nil && MatchesMailbox(cert, email) {
-								matched = true
+							if !matched {
+								verifyErr = errors.New("signer certificate email does not match sender")
 							}
-						}
-						if !matched {
-							verifyErr = errors.New("signer certificate email does not match sender")
 						}
 					}
 				}
 			}
 		}
 	}
-	return cmsVerifyResult{content: contentBytes, signerDER: signerDER, verifyErr: verifyErr}, nil
+	return cmsVerifyResult{content: contentBytes, signerDER: signerDER, chainDER: chainDER, verifyErr: verifyErr}, nil
 }
 
 func (p *darwinProvider) Retry(context.Context) error {

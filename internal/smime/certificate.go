@@ -167,6 +167,63 @@ type CertDetails struct {
 	SHA1          string
 }
 
+// CertChainNode summarizes one certificate in a resolved X.509 trust chain,
+// ordered top-down from root/highest CA to leaf.
+type CertChainNode struct {
+	Subject       string
+	Issuer        string
+	PublicKeyAlgo string
+	NotBefore     time.Time
+	NotAfter      time.Time
+	SHA256        string
+	Role          string // "root", "intermediate", or "leaf"
+	SelfSigned    bool
+}
+
+// BuildCertChain converts an OS-ordered certificate chain (leaf first, root last)
+// into a top-down display slice (root/highest CA first, leaf last).
+func BuildCertChain(ders [][]byte) []CertChainNode {
+	if len(ders) == 0 {
+		return nil
+	}
+	parsed := make([]*smx509.Certificate, 0, len(ders))
+	for _, der := range ders {
+		if len(der) == 0 {
+			continue
+		}
+		if c, err := ParseCertificate(der); err == nil {
+			parsed = append(parsed, c)
+		}
+	}
+	if len(parsed) == 0 {
+		return nil
+	}
+	out := make([]CertChainNode, len(parsed))
+	for i, c := range parsed {
+		d := InspectCertificate(c)
+		selfSigned := len(c.RawIssuer) > 0 && bytes.Equal(c.RawIssuer, c.RawSubject)
+		role := "intermediate"
+		switch {
+		case i == 0:
+			role = "leaf"
+		case i == len(parsed)-1 && selfSigned:
+			role = "root"
+		}
+		// Reverse order so index 0 is root / highest CA and last is leaf.
+		out[len(parsed)-1-i] = CertChainNode{
+			Subject:       d.Subject,
+			Issuer:        d.Issuer,
+			PublicKeyAlgo: d.PublicKeyAlgo,
+			NotBefore:     d.NotBefore,
+			NotAfter:      d.NotAfter,
+			SHA256:        d.SHA256,
+			Role:          role,
+			SelfSigned:    selfSigned,
+		}
+	}
+	return out
+}
+
 // InspectCertificate extracts display-friendly X.509 metadata from cert.
 func InspectCertificate(cert *smx509.Certificate) CertDetails {
 	if cert == nil {
