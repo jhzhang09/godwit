@@ -1177,6 +1177,7 @@ func (p *darwinProvider) VerifyCMS(ctx context.Context, email string, cmsDER, de
 	}
 
 	var chainDER [][]byte
+	var cryptOK, trustOK bool
 	verifyErr := signerErr
 	if verifyErr == nil && email == "" {
 		verifyErr = errors.New("signed message lacks a unique sender address")
@@ -1212,11 +1213,13 @@ func (p *darwinProvider) VerifyCMS(ctx context.Context, email string, cmsDER, de
 			} else if st := d.secTrustSetNetworkFetchAllowed(trust, false); st != errSecSuccess {
 				verifyErr = d.secErr(st)
 			} else {
+				cryptOK = true
 				evalErr := d.evaluateTrust(trust, AllowWeakKeySize(ctx))
 				chainDER = d.copyChainDER(trust)
 				if evalErr != nil {
 					verifyErr = evalErr
 				} else {
+					trustOK = true
 					var signer uintptr
 					if st := d.cmsDecoderCopySignerCert(decoder, 0, &signer); st != errSecSuccess {
 						d.release(signer)
@@ -1261,7 +1264,7 @@ func (p *darwinProvider) VerifyCMS(ctx context.Context, email string, cmsDER, de
 			}
 		}
 	}
-	return cmsVerifyResult{content: contentBytes, signerDER: signerDER, chainDER: chainDER, verifyErr: verifyErr}, nil
+	return cmsVerifyResult{content: contentBytes, signerDER: signerDER, chainDER: chainDER, cryptOK: cryptOK, trustOK: trustOK, verifyErr: verifyErr}, nil
 }
 
 func (p *darwinProvider) Retry(context.Context) error {

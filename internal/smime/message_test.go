@@ -284,17 +284,17 @@ func (p *softwareProvider) VerifyCMS(_ context.Context, _ string, der, detached 
 	if len(detached) > 0 {
 		pkt.Content = detached
 	}
-	if err := pkt.Verify(); err != nil {
-		return cmsVerifyResult{content: pkt.Content, verifyErr: err}, nil
-	}
-	if p.trustErr != nil {
-		return cmsVerifyResult{content: pkt.Content, verifyErr: p.trustErr}, nil
-	}
 	var signerDER []byte
 	if signer := pkt.GetOnlySigner(); signer != nil {
 		signerDER = signer.Raw
 	}
-	return cmsVerifyResult{content: pkt.Content, signerDER: signerDER}, nil
+	if err := pkt.Verify(); err != nil {
+		return cmsVerifyResult{content: pkt.Content, signerDER: signerDER, verifyErr: err}, nil
+	}
+	if p.trustErr != nil {
+		return cmsVerifyResult{content: pkt.Content, signerDER: signerDER, cryptOK: true, verifyErr: p.trustErr}, nil
+	}
+	return cmsVerifyResult{content: pkt.Content, signerDER: signerDER, cryptOK: true, trustOK: true}, nil
 }
 func (p *softwareProvider) Retry(context.Context) error { return nil }
 func (p *softwareProvider) Close() error                { return nil }
@@ -685,4 +685,128 @@ func TestWeakKeySizeContextAndError(t *testing.T) {
 	require.ErrorAs(t, opened.VerifyErrCause, &gotWK)
 	require.Equal(t, 1024, gotWK.KeyBits)
 	require.True(t, errors.Is(opened.VerifyErrCause, ErrWeakKeySize))
+}
+
+func TestInspectCMSMetadata(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	makeCert := func(email, cn string, serial int64) (*rsa.PrivateKey, *smx509.Certificate) {
+		k, err := rsa.GenerateKey(rand.Reader, 2048)
+		require.NoError(t, err)
+		tmpl := &x509.Certificate{
+			SerialNumber:   big.NewInt(serial),
+			Subject:        pkix.Name{CommonName: cn},
+			EmailAddresses: []string{email},
+			NotBefore:      now.Add(-time.Hour),
+			NotAfter:       now.Add(24 * time.Hour),
+			KeyUsage:       x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &k.PublicKey, k)
+		require.NoError(t, err)
+		cert, err := ParseCertificate(der)
+		require.NoError(t, err)
+		return k, cert
+	}
+
+	aliceKey, aliceCert := makeCert("alice@example.org", "Alice", 201)
+	bobKey, bobCert := makeCert("bob@example.org", "Bob", 202)
+
+	aliceProv := &softwareProvider{
+		identities: []RawIdentity{{DER: aliceCert.Raw, Hardware: false}},
+		keys:       map[string]*rsa.PrivateKey{CertSHA256(aliceCert.Raw): aliceKey},
+	}
+	bobProv := &softwareProvider{
+		identities: []RawIdentity{{DER: bobCert.Raw, Hardware: true}},
+		keys:       map[string]*rsa.PrivateKey{CertSHA256(bobCert.Raw): bobKey},
+	}
+
+	raw := []byte("From: alice@example.org\r\nTo: bob@example.org\r\nSubject: Metadata\r\nContent-Type: text/plain\r\n\r\nsecret payload")
+	protected, err := ProtectWith(context.WithValue(t.Context(), providerKey{}, aliceProv), raw, "alice@example.org", []string{"bob@example.org"}, ProtectOptions{
+		Sign:    true,
+		Encrypt: true,
+	}, func(_ context.Context, _ []string) (map[string][]*smx509.Certificate, error) {
+		return map[string][]*smx509.Certificate{"bob@example.org": {bobCert}}, nil
+	})
+	require.NoError(t, err)
+
+	opened, err := Open(context.WithValue(t.Context(), providerKey{}, bobProv), protected)
+	require.NoError(t, err)
+	require.True(t, opened.Encrypted)
+	require.NotNil(t, opened.Encryption)
+	require.Equal(t, 2, opened.Encryption.RecipientCount) // sender + recipient
+	require.NotEmpty(t, opened.Encryption.ContentCipher)
+	require.Equal(t, "RSA (PKCS#1 v1.5)", opened.Encryption.KeyEncryptionAlgo)
+	require.True(t, opened.Encryption.DecryptHardware)
+	require.Equal(t, CertSHA256(bobCert.Raw), CertSHA256(opened.Encryption.DecryptCert))
+
+	require.NotNil(t, opened.Signature)
+	require.Equal(t, "enveloped", opened.Signature.Format)
+	require.Equal(t, "SHA-256", opened.Signature.DigestAlgo)
+	require.NotEmpty(t, opened.Signature.SignatureAlgo)
+	require.False(t, opened.Signature.SigningTime.IsZero())
+	require.Equal(t, "alice@example.org", opened.Signature.ClaimedFrom)
+	require.True(t, opened.Signature.CryptOK)
+	require.True(t, opened.Signature.TrustOK)
+	require.True(t, opened.Signature.SenderMatched)
+	require.False(t, opened.Signature.WeakKeyCompat)
+
+	// Untrusted verification must preserve CryptOK=true, TrustOK=false, SenderMatched=true.
+	untrustedProv := &softwareProvider{
+		identities: bobProv.identities,
+		keys:       bobProv.keys,
+		trustErr:   errors.New("untrusted root"),
+	}
+	unverified, err := OpenForRead(WithAllowWeakKeySize(context.WithValue(t.Context(), providerKey{}, untrustedProv), true), protected)
+	require.NoError(t, err)
+	require.NotEmpty(t, unverified.VerifyErr)
+	require.NotNil(t, unverified.Signature)
+	require.True(t, unverified.Signature.CryptOK)
+	require.False(t, unverified.Signature.TrustOK)
+	require.True(t, unverified.Signature.SenderMatched)
+	require.True(t, unverified.Signature.WeakKeyCompat)
+
+	// Signed-only (opaque) message + indefinite-length BER normalization.
+	signedOnly, err := ProtectWith(context.WithValue(t.Context(), providerKey{}, aliceProv), raw, "alice@example.org", nil, ProtectOptions{
+		Sign: true,
+	}, nil)
+	require.NoError(t, err)
+	openedOpaque, err := Open(context.WithValue(t.Context(), providerKey{}, aliceProv), signedOnly)
+	require.NoError(t, err)
+	require.NotNil(t, openedOpaque.Signature)
+	require.Equal(t, "opaque", openedOpaque.Signature.Format)
+
+	msgOpaque, err := mail.ReadMessage(bytes.NewReader(signedOnly))
+	require.NoError(t, err)
+	cmsDER, err := readCMS(msgOpaque)
+	require.NoError(t, err)
+	var ci cmsContentInfo
+	_, err = asn1.Unmarshal(cmsDER, &ci)
+	require.NoError(t, err)
+	berCI := []byte{0x30, 0x80, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x07, 0x02, 0xa0, 0x80}
+	berCI = append(berCI, ci.Content.Bytes...)
+	berCI = append(berCI, 0x00, 0x00, 0x00, 0x00)
+	dAlg, sAlg, sigTime := inspectSignedDER(berCI)
+	require.Equal(t, "SHA-256", dAlg)
+	require.NotEmpty(t, sAlg)
+	require.False(t, sigTime.IsZero())
+
+	// Detached multipart/signed message must report Format == "detached".
+	detEntity := []byte("Content-Type: text/plain\r\n\r\ndetached body")
+	detSD, err := pkcs7.NewSignedData(detEntity)
+	require.NoError(t, err)
+	detSD.SetDigestAlgorithm(pkcs7.OIDDigestAlgorithmSHA256)
+	require.NoError(t, detSD.AddSigner(aliceCert, aliceKey, pkcs7.SignerInfoConfig{}))
+	detSD.Detach()
+	detSig, err := detSD.Finish()
+	require.NoError(t, err)
+	detRaw := "From: alice@example.org\r\nContent-Type: multipart/signed; protocol=\"application/pkcs7-signature\"; boundary=part\r\n\r\n--part\r\n" +
+		string(detEntity) + "\r\n--part\r\nContent-Type: application/pkcs7-signature\r\nContent-Transfer-Encoding: base64\r\n\r\n" +
+		base64.StdEncoding.EncodeToString(detSig) + "\r\n--part--\r\n"
+	openedDet, err := Open(context.WithValue(t.Context(), providerKey{}, aliceProv), []byte(detRaw))
+	require.NoError(t, err)
+	require.NotNil(t, openedDet.Signature)
+	require.Equal(t, "detached", openedDet.Signature.Format)
+	require.Equal(t, "SHA-256", openedDet.Signature.DigestAlgo)
+	require.True(t, openedDet.Signature.CryptOK)
+	require.True(t, openedDet.Signature.TrustOK)
+	require.True(t, openedDet.Signature.SenderMatched)
 }

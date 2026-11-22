@@ -498,6 +498,21 @@ func TestReaderSMIMEUnverifiedSignatureShowsDecryptedAndDetails(t *testing.T) {
 
 	h.click("显示详细信息")
 	h.see("请谨慎核实发件人身份与内容完整性")
+	h.click("查看验签详情")
+	h.until("unverified sig dialog open", func() bool {
+		return h.app.smimeSigOpen && h.tt.HasText("签名与验签详情")
+	})
+	h.see("签名验证未通过或证书不受信任")
+	h.see("内容完整性")
+	h.see("发件人匹配")
+	h.see("证书信任校验")
+	h.see("未通过")
+	h.see("SHA-256")
+	h.click("关闭")
+	h.until("unverified sig dialog closed", func() bool {
+		return !h.app.smimeSigOpen && !h.tt.HasText("签名与验签详情")
+	})
+
 	h.click("查看证书")
 	h.until("unverified cert dialog open", func() bool {
 		return h.tt.HasText("证书详情") && h.tt.HasText("Bob Bad Sig")
@@ -544,6 +559,19 @@ func TestReaderSMIMEVerifiedSignatureViewCert(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	aliceTmpl := &x509.Certificate{
+		SerialNumber:   big.NewInt(0x34CD),
+		Subject:        pkix.Name{CommonName: "Alice Decrypt"},
+		EmailAddresses: []string{"alice@example.com"},
+		NotBefore:      time.Now().Add(-time.Hour),
+		NotAfter:       time.Now().Add(24 * time.Hour),
+		KeyUsage:       x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:    []x509.ExtKeyUsage{x509.ExtKeyUsageEmailProtection},
+	}
+	aliceDER, err := x509.CreateCertificate(rand.Reader, aliceTmpl, caTmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	h.app.mail.reader.openCMSFull = func(ctx context.Context, fromHeader string, der []byte) (smime.Opened, error) {
 		return smime.Opened{
@@ -551,6 +579,23 @@ func TestReaderSMIMEVerifiedSignatureViewCert(t *testing.T) {
 			Encrypted:  true,
 			Signer:     "bob@example.com",
 			SignerCert: bobDER,
+			Encryption: &smime.EncryptionInfo{
+				ContentCipher:     "AES-256-CBC",
+				KeyEncryptionAlgo: "RSA (PKCS#1 v1.5)",
+				RecipientCount:    2,
+				DecryptCert:       aliceDER,
+				DecryptHardware:   true,
+			},
+			Signature: &smime.SignatureInfo{
+				Format:        "enveloped",
+				DigestAlgo:    "SHA-256",
+				SignatureAlgo: "SHA256-RSA",
+				SigningTime:   time.Date(2026, 9, 3, 10, 15, 0, 0, time.UTC),
+				ClaimedFrom:   "bob@example.com",
+				CryptOK:       true,
+				TrustOK:       true,
+				SenderMatched: true,
+			},
 		}, nil
 	}
 	msg := h.deliverOne(accs[0], makeRawSMIME("Bob <bob@example.com>", accs[0].Email, "verified@x", "Signed and Encrypted", "opaque-cms"))
@@ -563,10 +608,42 @@ func TestReaderSMIMEVerifiedSignatureViewCert(t *testing.T) {
 	h.see("已解密")
 	h.see("查看证书")
 
-	// Clicking the verified signature label directly opens Certificate Details (Mac Mail style).
+	// 1. Clicking 已解密 opens Encryption & Decryption Details.
+	h.click("已解密")
+	h.until("encrypt dialog open", func() bool {
+		return h.app.smimeEncryptOpen && h.tt.HasText("加密与解密详情")
+	})
+	h.see("邮件已在本机解密")
+	h.see("安全 Key（硬件令牌）")
+	h.see("先签名后加密")
+	h.see("AES-256-CBC")
+	h.see("RSA (PKCS#1 v1.5)")
+	h.see("2 个收件人证书")
+	h.see("Alice Decrypt")
+	h.click("查看解密证书")
+	h.until("decrypt cert dialog open", func() bool {
+		return h.app.smimeCertOpen && !h.app.smimeEncryptOpen && h.tt.HasText("证书详情") && h.tt.HasText("Alice Decrypt")
+	})
+	h.click("关闭")
+	h.until("decrypt cert dialog closed", func() bool {
+		return !h.app.smimeCertOpen && !h.tt.HasText("证书详情")
+	})
+
+	// 2. Clicking 签名已验证 · bob@example.com opens Signature & Verification Details.
 	h.click("签名已验证 · bob@example.com")
-	h.until("verified cert dialog open", func() bool {
-		return h.tt.HasText("证书详情") && h.tt.HasText("Bob Verified")
+	h.until("sig dialog open", func() bool {
+		return h.app.smimeSigOpen && h.tt.HasText("签名与验签详情")
+	})
+	h.see("数字签名有效且发件人受信任")
+	h.see("内容完整性")
+	h.see("发件人匹配")
+	h.see("证书信任校验")
+	h.see("加密信封内层签名")
+	h.see("SHA-256")
+	h.see("SHA256-RSA")
+	h.click("查看证书")
+	h.until("verified cert dialog open from sig dialog", func() bool {
+		return h.app.smimeCertOpen && !h.app.smimeSigOpen && h.tt.HasText("证书详情") && h.tt.HasText("Bob Verified")
 	})
 	h.see("签名已验证且证书受信任")
 	h.see("Test Root CA")
@@ -579,6 +656,16 @@ func TestReaderSMIMEVerifiedSignatureViewCert(t *testing.T) {
 	})
 	h.click("关闭")
 	h.until("verified cert dialog closed", func() bool {
+		return !h.app.smimeCertOpen && !h.tt.HasText("证书详情")
+	})
+
+	// 3. Clicking 查看证书 directly on the status bar opens Certificate Details directly.
+	h.click("查看证书")
+	h.until("direct cert dialog open", func() bool {
+		return h.app.smimeCertOpen && h.tt.HasText("证书详情") && h.tt.HasText("Bob Verified")
+	})
+	h.click("关闭")
+	h.until("direct cert dialog closed", func() bool {
 		return !h.app.smimeCertOpen && !h.tt.HasText("证书详情")
 	})
 }

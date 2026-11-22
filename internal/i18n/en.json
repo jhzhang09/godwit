@@ -4385,5 +4385,82 @@
   "error_smime_cert_file_too_large": "Certificate file size is invalid (must be 2 MB or less)",
   "error_smime_cert_invalid": "The file does not contain a valid X.509 public certificate",
   "error_smime_cert_address_mismatch": "The certificate in the file does not match this email address",
-  "error_smime_cert_no_email": "The certificate in the file contains no email address"
+  "error_smime_cert_no_email": "The certificate in the file contains no email address",
+  "smime_encrypt_detail_title": "Decryption Details",
+  "smime_encrypt_detail_status_ok": "Message decrypted locally",
+  "smime_encrypt_detail_with_sig": "Decrypted protected envelope containing a sender digital signature",
+  "smime_encrypt_detail_no_sig": "Decrypted encrypted message (no digital signature attached)",
+  "smime_encrypt_detail_method": "Decryption credential",
+  "smime_encrypt_detail_method_hardware": "Security Key (Hardware Token)",
+  "smime_encrypt_detail_method_software": "System Certificate Store",
+  "smime_encrypt_detail_method_local": "Personal S/MIME Certificate",
+  "smime_encrypt_detail_cipher": "Content encryption cipher",
+  "smime_encrypt_detail_key_algo": "Key encryption algorithm",
+  "smime_encrypt_detail_recipients": "Encrypted recipient certificates",
+  "smime_encrypt_detail_recipients_count": "{arg1} recipient certificates",
+  "@smime_encrypt_detail_recipients_count": {
+    "placeholders": {
+      "arg1": {
+        "type": "String"
+      }
+    }
+  },
+  "smime_encrypt_detail_structure": "Protection structure",
+  "smime_encrypt_detail_structure_signed_enc": "Signed then encrypted",
+  "smime_encrypt_detail_structure_enc_only": "Encrypted only",
+  "smime_encrypt_detail_attachments": "Decrypted attachments",
+  "smime_encrypt_detail_attachments_count": "{arg1} attachments",
+  "@smime_encrypt_detail_attachments_count": {
+    "placeholders": {
+      "arg1": {
+        "type": "String"
+      }
+    }
+  },
+  "smime_encrypt_detail_cert_heading": "Decryption certificate",
+  "smime_encrypt_detail_view_cert": "View decryption certificate",
+  "smime_encrypt_detail_view": "Decryption details",
+  "smime_sig_detail_title": "Signature Verification Details",
+  "smime_sig_detail_status_ok": "Digital signature verified and sender trusted",
+  "smime_sig_detail_status_fail": "Signature verification failed or certificate untrusted",
+  "smime_sig_detail_checks": "Verification checks",
+  "smime_sig_detail_check_integrity": "Content integrity",
+  "smime_sig_detail_check_integrity_ok": "Message content matches signature",
+  "smime_sig_detail_check_integrity_fail": "Signature check failed or content altered",
+  "smime_sig_detail_check_sender": "Sender match",
+  "smime_sig_detail_check_sender_ok": "Matches sender address ({arg1})",
+  "@smime_sig_detail_check_sender_ok": {
+    "placeholders": {
+      "arg1": {
+        "type": "String"
+      }
+    }
+  },
+  "smime_sig_detail_check_sender_fail": "Does not match sender address ({arg1})",
+  "@smime_sig_detail_check_sender_fail": {
+    "placeholders": {
+      "arg1": {
+        "type": "String"
+      }
+    }
+  },
+  "smime_sig_detail_check_sender_unknown": "Unable to match against sender address",
+  "smime_sig_detail_check_trust": "Certificate trust",
+  "smime_sig_detail_check_trust_ok": "Passed OS certificate trust verification",
+  "smime_sig_detail_check_trust_fail": "Not trusted by OS certificate policy",
+  "smime_sig_detail_badge_pass": "Passed",
+  "smime_sig_detail_badge_fail": "Failed",
+  "smime_sig_detail_badge_unverified": "Unverified",
+  "smime_sig_detail_policy": "Verification policy",
+  "smime_sig_detail_policy_standard": "Standard OS security policy",
+  "smime_sig_detail_policy_weak_compat": "Legacy short-key compatibility enabled",
+  "smime_sig_detail_field_signer": "Verified signer",
+  "smime_sig_detail_field_format": "Signature format",
+  "smime_sig_detail_format_detached": "Detached signature (multipart/signed)",
+  "smime_sig_detail_format_opaque": "Embedded signature (smime.p7m)",
+  "smime_sig_detail_format_enveloped": "Signed inside encrypted envelope",
+  "smime_sig_detail_field_digest": "Digest algorithm",
+  "smime_sig_detail_field_sigalg": "Signature algorithm",
+  "smime_sig_detail_field_time": "Signing time",
+  "smime_sig_detail_view": "Verification details"
 }

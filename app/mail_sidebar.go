@@ -178,8 +178,8 @@ func (p *mailPage) Sidebar(c *ui.Context) {
 		p.navItem(c, "inbox", i18n.T("mail.unified.inbox"), core.View{Unified: "inbox"}, p.inboxUnread())
 		for _, acc := range a.accounts {
 			if !isArchive(acc) {
-				if f, ok := p.inboxFolder(acc.ID); ok {
-					p.inboxAccountRow(c, acc, f)
+				if inbox, subs, ok := p.inboxTree(acc.ID); ok {
+					p.inboxAccountRow(c, acc, inbox, subs)
 				}
 			}
 		}
@@ -288,12 +288,12 @@ func (p *mailPage) sectionShown(s string) bool {
 	return s != "labels" || slices.ContainsFunc(p.a.labels, func(l core.Label) bool { return l.Count > 0 })
 }
 
-// accountsNav is the sidebar's other-folders section; its header's menu adds an
+// accountsNav is the sidebar's accounts section; its header's menu adds an
 // account or local archive (accountsMenu). It returns the header.
 func (p *mailPage) accountsNav(c *ui.Context) ui.Element {
 	a := p.a
 	head := kit.SidebarItem(c, kit.SidebarItemOpts{Muted: true, Open: &p.accountsOpen,
-		Title: func() { ui.Text(c, i18n.T("mail.other_folders")).SingleLine().Shrink(1) },
+		Title: func() { ui.Text(c, i18n.T("mail.accounts")).SingleLine().Shrink(1) },
 		Group: func() {
 			for _, acc := range a.accounts {
 				p.account(c, acc)
@@ -302,22 +302,40 @@ func (p *mailPage) accountsNav(c *ui.Context) ui.Element {
 	return head
 }
 
-// inboxFolder returns accID's inbox folder, if loaded.
-func (p *mailPage) inboxFolder(accID int64) (core.Folder, bool) {
-	for _, f := range p.folders[accID] {
-		if f.Role == "inbox" {
-			return f, true
+// inboxTree returns accID's inbox row and any subfolders nested under it in
+// sidebarFolders order, if an inbox folder is loaded.
+func (p *mailPage) inboxTree(accID int64) (inbox sideFolder, subs []sideFolder, ok bool) {
+	rows := sidebarFolders(accID, p.folders[accID])
+	for i, f := range rows {
+		if f.Role != "inbox" {
+			continue
 		}
+		inbox = f
+		for j := i + 1; j < len(rows) && rows[j].depth > f.depth; j++ {
+			subs = append(subs, rows[j])
+		}
+		return inbox, subs, true
 	}
-	return core.Folder{}, false
+	return sideFolder{}, nil, false
 }
 
-// inboxAccountRow is an account's inbox listed directly under All Inboxes.
-func (p *mailPage) inboxAccountRow(c *ui.Context, acc core.Account, f core.Folder) {
+// inboxAccountRow is an account's inbox listed directly under All Inboxes, with
+// any inbox subfolders expandable beneath it without listing non-inbox folders.
+func (p *mailPage) inboxAccountRow(c *ui.Context, acc core.Account, f sideFolder, subs []sideFolder) {
 	t := theme.Of(c)
 	name := accountName(acc)
 	v := core.View{FolderID: f.ID}
 	on := p.viewShown(v)
+	hasSubs := len(subs) > 0
+	var open *bool
+	if hasSubs {
+		open = boolAt(p.folderOpen, folderKey{acc.ID, "\x00inbox-summary"}, false)
+	}
+	toggle := func() { *open = !*open }
+	unread := f.Unread
+	if hasSubs && !*open {
+		unread = f.sum
+	}
 	item := kit.SidebarItem(c, kit.SidebarItemOpts{
 		Selected: on, Covered: p.viewEdit != nil, Muted: !on, Indent: 4,
 		OnClick: func() { p.a.navigate(Route{Page: PageMail, View: v}) },
@@ -325,17 +343,38 @@ func (p *mailPage) inboxAccountRow(c *ui.Context, acc core.Account, f core.Folde
 	item.Children(func() {
 		p.a.accountMark(c, acc)
 		ui.Text(c, name).SingleLine().Grow(1).Shrink(1).Role(ui.RoleNone)
-		if f.Unread > 0 {
-			kit.Text(c, strconv.Itoa(f.Unread), t.Text.Xs).TextColor(t.Muted)
+		if unread > 0 {
+			kit.Text(c, strconv.Itoa(unread), t.Text.Xs).TextColor(t.Muted)
+		}
+		if hasSubs {
+			ch, label := kit.Chevron(c, *open, theme.IconXs), "mail.folder.expand"
+			if *open {
+				label = "mail.folder.collapse"
+			}
+			ch.OnClick(toggle).Label(i18n.Tf(label, name))
 		}
 	})
 	item.ContextMenu(func(m *ui.Menu) {
-		if m.Item(i18n.T("mail.mark_all_read")).Disabled(f.Unread == 0).Chosen() {
+		if m.Item(i18n.T("mail.mark_all_read")).Disabled(unread == 0).Chosen() {
 			p.markViewAsRead(v)
 		}
 		m.Separator()
 		p.accountItems(m, acc, f.ID)
 	})
+	if hasSubs && *open {
+		hide := ""
+		for _, sub := range subs {
+			if hide != "" && strings.HasPrefix(sub.key, hide) {
+				continue
+			}
+			hide = ""
+			subOpen := boolAt(p.folderOpen, folderKey{acc.ID, "\x00inbox-summary\x00" + sub.key}, true)
+			if sub.kids && !*subOpen {
+				hide = sub.key + "\x00"
+			}
+			p.folderRow(c, sub, subOpen)
+		}
+	}
 }
 
 // accountsMenu is the accounts header's own menu items: add an account, or a local archive.
@@ -382,14 +421,11 @@ func (p *mailPage) viewShown(v core.View) bool {
 	return p.a.route.Page == PageMail && p.a.route.View == v && !p.searched
 }
 
-// account is an account's foldable row under Other folders, its provider's mark
-// (badged while its sync is in trouble) and name over its folders (excluding
-// inbox for mail accounts, whose inboxes sit directly under All Inboxes).
+// account is an account's foldable row under Accounts, its provider's mark
+// (badged while its sync is in trouble) and name over all its folders.
 func (p *mailPage) account(c *ui.Context, acc core.Account) {
 	t := theme.Of(c)
 	name := accountName(acc)
-	_, hasInbox := p.inboxFolder(acc.ID)
-	hideInbox := !isArchive(acc) && hasInbox
 	row := kit.SidebarItem(c, kit.SidebarItemOpts{Open: p.accountOpen(acc.ID),
 		Title: func() {
 			p.a.accountMark(c, acc) // as in the settings sidebar
@@ -398,9 +434,6 @@ func (p *mailPage) account(c *ui.Context, acc core.Account) {
 		Group: func() {
 			hide := "" // the subtree of a folded folder
 			for _, f := range sidebarFolders(acc.ID, p.folders[acc.ID]) {
-				if hideInbox && f.Role == "inbox" {
-					continue
-				}
 				if f.Role == "drafts" {
 					p.accountLabelsNav(c, acc.ID)
 				}
@@ -414,7 +447,7 @@ func (p *mailPage) account(c *ui.Context, acc core.Account) {
 				}
 				p.folderRow(c, f, open)
 			}
-		}}).Label(name + " · " + i18n.T("mail.other_folders"))
+		}}).Label(name + " · " + i18n.T("mail.accounts"))
 	row.ContextMenu(func(m *ui.Menu) { p.accountItems(m, acc, 0) })
 	p.saveAccountOpen(acc.ID)
 }

@@ -789,9 +789,9 @@ func (p *windowsProvider) VerifyCMS(ctx context.Context, email string, cmsDER, d
 
 	chainDER, err := p.VerifyTrustWithChain(ctx, "sign", email, certsDER)
 	if err != nil {
-		return cmsVerifyResult{content: contentBytes, signerDER: signerDER, chainDER: chainDER, verifyErr: fmt.Errorf("signature intact, but sender certificate failed verification: %w", err)}, nil
+		return cmsVerifyResult{content: contentBytes, signerDER: signerDER, chainDER: chainDER, cryptOK: true, verifyErr: fmt.Errorf("signature intact, but sender certificate failed verification: %w", err)}, nil
 	}
-	return cmsVerifyResult{content: contentBytes, signerDER: signerDER, chainDER: chainDER}, nil
+	return cmsVerifyResult{content: contentBytes, signerDER: signerDER, chainDER: chainDER, cryptOK: true, trustOK: true}, nil
 }
 
 func (p *windowsProvider) Retry(context.Context) error {

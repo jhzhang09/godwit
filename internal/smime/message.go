@@ -24,9 +24,11 @@ import (
 type Opened struct {
 	Entity         []byte
 	Encrypted      bool
+	Encryption     *EncryptionInfo
 	Signer         string
 	SignerCert     []byte
 	SignerChain    [][]byte
+	Signature      *SignatureInfo
 	UnverifiedCert []byte
 	VerifyErr      string
 	VerifyErrCause error
@@ -125,42 +127,46 @@ func readCMS(m *mail.Message) ([]byte, error) {
 	return io.ReadAll(r)
 }
 
-func openEnvelope(ctx context.Context, p *pkcs7.PKCS7) ([]byte, error) {
+func openEnvelope(ctx context.Context, p *pkcs7.PKCS7) (plain, certDER []byte, hardware bool, recipientCount int, err error) {
 	recipients, err := p.GetRecipients()
 	if err != nil {
-		return nil, err
+		return nil, nil, false, 0, err
 	}
-	certs, err := identities(ctx)
+	items, err := parsedIdentities(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, false, len(recipients), err
 	}
-	for _, c := range certs {
+	for _, it := range items {
+		c := it.cert
 		for _, r := range recipients {
 			if (r.SerialNumber != nil && c.SerialNumber.Cmp(r.SerialNumber) == 0 && bytes.Equal(c.RawIssuer, r.RawIssuer)) || (len(r.SubjectKeyIdentifier) > 0 && bytes.Equal(c.SubjectKeyId, r.SubjectKeyIdentifier)) {
-				return p.Decrypt(c, key{ctx, c})
+				plain, err = p.Decrypt(c, key{ctx, c})
+				if err != nil {
+					return nil, nil, false, len(recipients), err
+				}
+				return plain, bytes.Clone(c.Raw), it.hardware, len(recipients), nil
 			}
 		}
 	}
-	return nil, errors.New("no matching personal S/MIME certificate or private key found for encrypted message")
+	return nil, nil, false, len(recipients), errors.New("no matching personal S/MIME certificate or private key found for encrypted message")
 }
 
-func verify(ctx context.Context, p *pkcs7.PKCS7, from string) ([]byte, [][]byte, error) {
+func verify(ctx context.Context, p *pkcs7.PKCS7, from string) (signerDER []byte, chainDER [][]byte, cryptOK, trustOK bool, err error) {
 	signer := p.GetOnlySigner()
-	var signerDER []byte
 	if signer != nil {
 		signerDER = bytes.Clone(signer.Raw)
 	}
 	if err := p.Verify(); err != nil {
-		return signerDER, nil, fmt.Errorf("invalid S/MIME signature: %w", err)
+		return signerDER, nil, false, false, fmt.Errorf("invalid S/MIME signature: %w", err)
 	}
 	if signer == nil {
-		return nil, nil, errors.New("unable to identify unique S/MIME signer")
+		return nil, nil, false, false, errors.New("unable to identify unique S/MIME signer")
 	}
-	chainDER, err := trustWithChain(ctx, "sign", from, signer, p.Certificates)
+	chainDER, err = trustWithChain(ctx, "sign", from, signer, p.Certificates)
 	if err != nil {
-		return signerDER, chainDER, fmt.Errorf("signature intact, but sender certificate failed verification: %w", err)
+		return signerDER, chainDER, true, false, fmt.Errorf("signature intact, but sender certificate failed verification: %w", err)
 	}
-	return signerDER, chainDER, nil
+	return signerDER, chainDER, true, true, nil
 }
 
 var oidCMSSignedData = []byte{0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x07, 0x02}
@@ -312,6 +318,38 @@ func recordVerifyFailure(result *Opened, err error, certDER []byte, chainDER [][
 	}
 }
 
+func recordSignatureInfo(ctx context.Context, result *Opened, from string, der, detached, certDER []byte, cryptOK, trustOK bool, verifyErr error) {
+	digestAlgo, sigAlgo, signingTime := inspectSignedDER(der)
+	format := "opaque"
+	if detached != nil {
+		format = "detached"
+	} else if result.Encrypted {
+		format = "enveloped"
+	}
+	senderMatched := false
+	if from != "" && len(certDER) > 0 {
+		if cert, err := ParseCertificate(certDER); err == nil && MatchesMailbox(cert, from) {
+			senderMatched = true
+		}
+	}
+	if verifyErr == nil && trustOK && from != "" {
+		senderMatched = true
+	}
+	if result.Signature == nil || verifyErr != nil {
+		result.Signature = &SignatureInfo{
+			Format:        format,
+			DigestAlgo:    digestAlgo,
+			SignatureAlgo: sigAlgo,
+			SigningTime:   signingTime,
+			ClaimedFrom:   from,
+			CryptOK:       cryptOK,
+			TrustOK:       trustOK,
+			SenderMatched: senderMatched,
+			WeakKeyCompat: AllowWeakKeySize(ctx),
+		}
+	}
+}
+
 func unwrapCMS(ctx context.Context, from string, der, detached []byte, result *Opened, allowUnverified bool) ([]byte, error) {
 	readerSession := ctx.Value(sessionKey{}) != nil
 	runVerifyCMS := func() ([]byte, error) {
@@ -327,6 +365,7 @@ func unwrapCMS(ctx context.Context, from string, der, detached []byte, result *O
 				return nil, res.verifyErr
 			}
 			recordVerifyFailure(result, res.verifyErr, res.signerDER, res.chainDER)
+			recordSignatureInfo(ctx, result, from, der, detached, res.signerDER, res.cryptOK, res.trustOK, res.verifyErr)
 			return res.content, nil
 		}
 		if result.VerifyErr == "" {
@@ -338,6 +377,7 @@ func unwrapCMS(ctx context.Context, from string, der, detached []byte, result *O
 				result.SignerChain = res.chainDER
 			}
 		}
+		recordSignatureInfo(ctx, result, from, der, detached, res.signerDER, true, true, nil)
 		return res.content, nil
 	}
 	// 系统解码器会拼齐 BER 分段的签名正文；部分 Apple 邮件含多个 OCTET STRING。
@@ -362,19 +402,28 @@ func unwrapCMS(ctx context.Context, from string, der, detached []byte, result *O
 		if detached != nil {
 			return nil, errors.New("signed part unexpectedly contains an encrypted envelope")
 		}
-		raw, err := openEnvelope(ctx, p)
+		raw, decryptCert, decryptHW, parsedRcpts, err := openEnvelope(ctx, p)
 		if err != nil {
 			return nil, err
 		}
 		result.Encrypted = true
+		cipher, keyAlgo, rcptCount := inspectEnvelopedDER(der)
+		result.Encryption = &EncryptionInfo{
+			ContentCipher:     cipher,
+			KeyEncryptionAlgo: keyAlgo,
+			RecipientCount:    max(rcptCount, parsedRcpts),
+			DecryptCert:       decryptCert,
+			DecryptHardware:   decryptHW,
+		}
 		if len(p.Signers) > 0 {
 			p.Content = raw
-			signerDER, chainDER, err := verify(ctx, p, from)
+			signerDER, chainDER, cryptOK, trustOK, err := verify(ctx, p, from)
 			if err != nil {
 				if !allowUnverified {
 					return nil, err
 				}
 				recordVerifyFailure(result, err, signerDER, chainDER)
+				recordSignatureInfo(ctx, result, from, der, nil, signerDER, cryptOK, trustOK, err)
 				return raw, nil
 			}
 			if result.VerifyErr == "" {
@@ -382,6 +431,7 @@ func unwrapCMS(ctx context.Context, from string, der, detached []byte, result *O
 				result.SignerCert = signerDER
 				result.SignerChain = chainDER
 			}
+			recordSignatureInfo(ctx, result, from, der, nil, signerDER, cryptOK, trustOK, nil)
 		}
 		return raw, nil
 	}
@@ -391,12 +441,13 @@ func unwrapCMS(ctx context.Context, from string, der, detached []byte, result *O
 		}
 		p.Content = detached
 	}
-	signerDER, chainDER, err := verify(ctx, p, from)
+	signerDER, chainDER, cryptOK, trustOK, err := verify(ctx, p, from)
 	if err != nil {
 		if !allowUnverified {
 			return nil, err
 		}
 		recordVerifyFailure(result, err, signerDER, chainDER)
+		recordSignatureInfo(ctx, result, from, der, detached, signerDER, cryptOK, trustOK, err)
 		return p.Content, nil
 	}
 	if result.VerifyErr == "" {
@@ -404,6 +455,7 @@ func unwrapCMS(ctx context.Context, from string, der, detached []byte, result *O
 		result.SignerCert = signerDER
 		result.SignerChain = chainDER
 	}
+	recordSignatureInfo(ctx, result, from, der, detached, signerDER, cryptOK, trustOK, nil)
 	return p.Content, nil
 }
 

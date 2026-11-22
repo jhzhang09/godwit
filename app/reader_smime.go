@@ -1,6 +1,7 @@
 package app
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"log"
@@ -26,12 +27,17 @@ type secureBody struct {
 }
 
 type secureMessage struct {
-	signer      string
-	signerCert  *smime.CertDetails
-	signerChain []smime.CertChainNode
-	encrypted   bool
-	verifyErr   string
-	attachments []mail.Attachment
+	signer          string
+	signerCert      *smime.CertDetails
+	signerChain     []smime.CertChainNode
+	signature       *smime.SignatureInfo
+	encrypted       bool
+	encryption      *smime.EncryptionInfo
+	decryptCert     *smime.CertDetails
+	allowWeakKey    bool
+	attachmentCount int
+	verifyErr       string
+	attachments     []mail.Attachment
 }
 
 type cachedSecure struct {
@@ -197,6 +203,52 @@ func (r *reader) smimeNotice(c *ui.Context, id int64, b *msgBody) {
 	}
 	t, th := theme.Of(c), c.Theme()
 	if result := b.smimeResult; result != nil {
+		openEncrypt := func() {
+			enc := result.encryption
+			if enc == nil {
+				enc = &smime.EncryptionInfo{}
+			}
+			r.p.a.openSMIMEEncryptDialog(smimeEncryptView{
+				Subject:           b.msg.Subject,
+				HasSignature:      result.signer != "" || result.verifyErr != "" || result.signature != nil,
+				ContentCipher:     enc.ContentCipher,
+				KeyEncryptionAlgo: enc.KeyEncryptionAlgo,
+				RecipientCount:    enc.RecipientCount,
+				AttachmentCount:   result.attachmentCount,
+				Hardware:          enc.DecryptHardware,
+				DecryptCert:       result.decryptCert,
+			})
+		}
+		openSig := func() {
+			sig := result.signature
+			if sig == nil {
+				_, claimed := sender(b.msg.From)
+				sig = &smime.SignatureInfo{
+					ClaimedFrom:   cmp.Or(result.signer, claimed),
+					CryptOK:       result.verifyErr == "",
+					TrustOK:       result.verifyErr == "",
+					SenderMatched: result.verifyErr == "",
+					WeakKeyCompat: result.allowWeakKey,
+				}
+			}
+			r.p.a.openSMIMESigDialog(smimeSigView{
+				Subject:       b.msg.Subject,
+				Verified:      result.verifyErr == "" && result.signer != "",
+				Signer:        result.signer,
+				StatusError:   result.verifyErr,
+				Format:        sig.Format,
+				DigestAlgo:    sig.DigestAlgo,
+				SignatureAlgo: sig.SignatureAlgo,
+				SigningTime:   sig.SigningTime,
+				ClaimedFrom:   sig.ClaimedFrom,
+				CryptOK:       sig.CryptOK,
+				TrustOK:       sig.TrustOK,
+				SenderMatched: sig.SenderMatched,
+				WeakKeyCompat: sig.WeakKeyCompat || result.allowWeakKey,
+				SignerCert:    result.signerCert,
+				Chain:         result.signerChain,
+			})
+		}
 		if result.verifyErr != "" {
 			title := i18n.T("smime.unverified")
 			if result.encrypted {
@@ -216,16 +268,24 @@ func (r *reader) smimeNotice(c *ui.Context, id int64, b *msgBody) {
 					kit.Block(c, ui.Column(c), kit.ToneCard).FillWidth().Padding(th.Space(2), th.Space(3)).Gap(th.Space(1.5)).Children(func() {
 						kit.Text(c, result.verifyErr, t.Text.Xs).FontWeight(500).Selectable()
 						kit.Text(c, i18n.T("smime.unverified.hint"), t.Text.Xs).TextColor(t.Muted)
-						if result.signerCert != nil {
-							cert := *result.signerCert
-							chain := result.signerChain
-							verifyErr := result.verifyErr
-							ui.Row(c).Children(func() {
+						ui.Row(c).Wrap().Gap(th.Space(2)).Children(func() {
+							if kit.Button(c, i18n.T("smime.sig_detail.view"), kit.ButtonOpts{Variant: kit.Outline, Size: kit.SizeSm}).Clicked() {
+								openSig()
+							}
+							if result.encrypted {
+								if kit.Button(c, i18n.T("smime.encrypt_detail.view"), kit.ButtonOpts{Variant: kit.Outline, Size: kit.SizeSm}).Clicked() {
+									openEncrypt()
+								}
+							}
+							if result.signerCert != nil {
+								cert := *result.signerCert
+								chain := result.signerChain
+								verifyErr := result.verifyErr
 								if kit.Button(c, i18n.T("smime.cert.view"), kit.ButtonOpts{Variant: kit.Outline, Size: kit.SizeSm}).Clicked() {
 									r.p.a.openSMIMECertDialog(certViewFromDetails(cert, false, false, "", verifyErr, chain))
 								}
-							})
-						}
+							}
+						})
 					})
 				}
 			})
@@ -236,25 +296,21 @@ func (r *reader) smimeNotice(c *ui.Context, id int64, b *msgBody) {
 		}
 		kit.Block(c, ui.Row(c), kit.ToneCard).Padding(th.Space(1.5), th.Space(2.5)).Gap(th.Space(2)).AlignItems(ui.Center).Children(func() {
 			if result.encrypted {
-				ui.Icon(c, icons.Get("lock")).Size(theme.IconXs, theme.IconXs).TextColor(t.Muted)
-				kit.Text(c, i18n.T("smime.decrypted"), t.Text.Xs).FontWeight(500).TextColor(t.Muted).Selectable()
+				kit.Button(c, i18n.T("smime.decrypted"), kit.ButtonOpts{Variant: kit.Ghost, Size: kit.SizeXs, Icon: "lock"}).TextColor(t.Muted).OnClick(openEncrypt)
 			}
 			if result.signer != "" {
 				if result.encrypted {
 					kit.Text(c, "·", t.Text.Xs).TextColor(t.Muted)
 				}
 				sigLabel := i18n.Tf("smime.verified", result.signer)
+				kit.Button(c, sigLabel, kit.ButtonOpts{Variant: kit.Ghost, Size: kit.SizeXs, Icon: "shield-check"}).TextColor(t.Muted).OnClick(openSig)
 				if result.signerCert != nil {
 					cert := *result.signerCert
 					chain := result.signerChain
 					openCert := func() {
 						r.p.a.openSMIMECertDialog(certViewFromDetails(cert, true, true, "", "", chain))
 					}
-					kit.Button(c, sigLabel, kit.ButtonOpts{Variant: kit.Ghost, Size: kit.SizeXs, Icon: "shield-check"}).TextColor(t.Muted).OnClick(openCert)
-					kit.Button(c, i18n.T("smime.cert.view"), kit.ButtonOpts{Variant: kit.Link, Size: kit.SizeSm}).OnClick(openCert)
-				} else {
-					ui.Icon(c, icons.Get("shield-check")).Size(theme.IconXs, theme.IconXs).TextColor(t.Muted)
-					kit.Text(c, sigLabel, t.Text.Xs).FontWeight(500).TextColor(t.Muted).Selectable()
+					kit.Button(c, i18n.T("smime.cert.view"), kit.ButtonOpts{Variant: kit.Link, Size: kit.SizeXs}).OnClick(openCert)
 				}
 			}
 		})
@@ -416,9 +472,38 @@ func (r *reader) openSMIME(id int64, b *msgBody, retry bool) {
 			return fmt.Errorf("parse decrypted body: %w", err)
 		}
 		result.signer, result.encrypted = opened.Signer, opened.Encrypted
+		result.allowWeakKey = allowWeak
 		result.verifyErr = opened.VerifyErr
 		if opened.VerifyErrCause != nil {
 			result.verifyErr = core.FormatSMIMEError(opened.VerifyErrCause)
+		}
+		if opened.Encryption != nil {
+			enc := *opened.Encryption
+			result.encryption = &enc
+			if len(enc.DecryptCert) > 0 {
+				if dc, cerr := smime.InspectCertificateDER(enc.DecryptCert); cerr == nil {
+					result.decryptCert = &dc
+				}
+			}
+		} else if opened.Encrypted {
+			result.encryption = &smime.EncryptionInfo{}
+		}
+		if opened.Signature != nil {
+			sig := *opened.Signature
+			if sig.ClaimedFrom == "" {
+				_, claimed := sender(msg.From)
+				sig.ClaimedFrom = cmp.Or(opened.Signer, claimed)
+			}
+			result.signature = &sig
+		} else if opened.Signer != "" || result.verifyErr != "" {
+			_, claimed := sender(msg.From)
+			result.signature = &smime.SignatureInfo{
+				ClaimedFrom:   cmp.Or(opened.Signer, claimed),
+				CryptOK:       result.verifyErr == "",
+				TrustOK:       result.verifyErr == "",
+				SenderMatched: result.verifyErr == "",
+				WeakKeyCompat: allowWeak,
+			}
 		}
 		certDER := opened.SignerCert
 		if len(certDER) == 0 {
@@ -445,12 +530,13 @@ func (r *reader) openSMIME(id int64, b *msgBody, retry bool) {
 				cachedSize += len(att.Data)
 			}
 		}
+		modelAtts = buildModelAttachments(result.attachments)
+		result.attachmentCount = len(modelAtts)
 		safe, _, _ = mail.Sanitize(parsed.HTML, inline, false)
 		text, truncated = parsed.Text, parsed.Truncated
 		syncModel = result.encrypted || (msg.HTML == "" && msg.Text == "")
 		if syncModel {
 			modelHTML, _, _ = mail.Sanitize(parsed.HTML, nil, false)
-			modelAtts = buildModelAttachments(result.attachments)
 			if err := a.svc.SetDecryptedBody(ctx, id, core.DecryptedBody{
 				HTML:        modelHTML,
 				Text:        text,

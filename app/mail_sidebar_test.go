@@ -7,6 +7,7 @@ import (
 
 	"github.com/godwit-email/godwit/core"
 	"github.com/godwit-email/godwit/core/coretest"
+	"github.com/godwit-email/godwit/internal/i18n"
 )
 
 func TestSidebarFolders(t *testing.T) {
@@ -134,7 +135,7 @@ func (h *harness) folderNamed(acc core.Account, name string) core.Folder {
 }
 
 // TestSidebarSpacingAndLevel2Height checks that nested sidebar rows match
-// top-level height (32px) and that dragging Other folders before Labels keeps
+// top-level height (32px) and that dragging Accounts before Labels keeps
 // the full section gap between them.
 func TestSidebarSpacingAndLevel2Height(t *testing.T) {
 	h, acc, m := labeledMail(t)
@@ -148,7 +149,7 @@ func TestSidebarSpacingAndLevel2Height(t *testing.T) {
 	h.app.changeSettings(st)
 	h.until("reordered sections", func() bool {
 		h.tt.Frame()
-		return h.tt.HasText("其他文件夹") && h.tt.HasText("标签")
+		return h.tt.HasText(i18n.T("mail.accounts")) && h.tt.HasText("标签")
 	})
 
 	// Level-2 inbox account row matches level-1 row height (32px).
@@ -160,16 +161,81 @@ func TestSidebarSpacingAndLevel2Height(t *testing.T) {
 		t.Errorf("nested inbox row height = %v, want 32", accInbox.Bounds.H)
 	}
 
-	// Section gap between Other folders' last row and Labels header is >= 18px (2 + 14 + 2).
-	otherAcc, ok := h.tt.Access(acc.Email + " · 其他文件夹")
+	// Section gap between Accounts' last row and Labels header is >= 14px.
+	otherAcc, ok := h.tt.Access(acc.Email + " · " + i18n.T("mail.accounts"))
 	if !ok {
-		t.Fatal("missing account row under Other folders")
+		t.Fatal("missing account row under Accounts")
 	}
 	lblHead, ok := h.tt.Find("标签")
 	if !ok {
 		t.Fatal("missing Labels section header")
 	}
 	if gap := lblHead.Y - (otherAcc.Bounds.Y + otherAcc.Bounds.H); gap < 14 {
-		t.Errorf("gap between Other folders and Labels = %v, want >= 14", gap)
+		t.Errorf("gap between Accounts and Labels = %v, want >= 14", gap)
+	}
+}
+
+func TestSidebarInboxSummaryAndAccountTree(t *testing.T) {
+	h, accs := mailHarness(t, nil, "alice@example.com")
+	h.resize(1440, 1200)
+	srv := h.env.IMAP(accs[0].ID).User
+	for _, m := range []string{"INBOX/OA", "INBOX/Team/Sub", "Archive/Help", "Docs"} {
+		if err := srv.Create(m, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h.put(accs[0], "INBOX/OA", coretest.Msg("bob@example.com", accs[0].Email, "oa msg", "x"))
+	h.syncNow(accs[0])
+	h.waitMail("full inbox tree loaded", func() bool {
+		return h.tt.HasText("OA") && h.tt.HasText("Help") && h.tt.HasText("Docs")
+	})
+
+	// Under 账户 -> account, 收件箱 sits above 已标星/草稿/已发送/归档 with its nested subfolders.
+	accHeader, ok := h.tt.Find(accs[0].Email + " · " + i18n.T("mail.accounts"))
+	if !ok {
+		t.Fatal("missing account header under Accounts")
+	}
+	inboxRow, ok := h.tt.Find("收件箱")
+	if !ok || inboxRow.Y <= accHeader.Y {
+		t.Fatalf("expected 收件箱 under account header (%v), got %+v", accHeader, inboxRow)
+	}
+	oaRow, ok := h.tt.Find("OA")
+	if !ok || oaRow.Y <= inboxRow.Y {
+		t.Fatalf("expected OA under 收件箱 (%v), got %+v", inboxRow, oaRow)
+	}
+	sentRow, ok := h.tt.Find("已发送")
+	if !ok || sentRow.Y <= oaRow.Y {
+		t.Fatalf("expected 已发送 below OA (%v), got %+v", oaRow, sentRow)
+	}
+
+	// Folding 收件箱 under the account hides its subfolders while keeping 已发送/归档 visible.
+	h.click("收起收件箱")
+	h.until("account inbox folded", func() bool { return !h.tt.HasText("OA") && !h.tt.HasText("Team") })
+	h.see("已发送")
+	h.see("归档")
+	h.see("Help")
+	h.see("Docs")
+
+	// Under 全部收件箱, the account summary row starts collapsed and expands ONLY inbox subfolders.
+	summaryInbox, ok := h.tt.Find(accs[0].Email + " · 收件箱")
+	if !ok {
+		t.Fatal("missing inbox summary row under All Inboxes")
+	}
+	h.click(i18n.Tf("mail.folder.expand", accs[0].Email))
+	h.until("inbox summary expanded", func() bool { return h.tt.HasText("OA") && h.tt.HasText("Team") && h.tt.HasText("Sub") })
+	oaSummary, ok := h.tt.Find("OA")
+	if !ok || !(summaryInbox.Y < oaSummary.Y && oaSummary.Y < accHeader.Y) {
+		t.Fatalf("expected OA inside summary between %v and %v, got %+v", summaryInbox, accHeader, oaSummary)
+	}
+	// Only inbox subfolders appear under 全部收件箱 (Archive/Help and Docs stay strictly in Accounts).
+	if helpRow, _ := h.tt.Find("Help"); helpRow.Y < accHeader.Y {
+		t.Fatalf("Help should not appear under All Inboxes, got %+v", helpRow)
+	}
+	if docsRow, _ := h.tt.Find("Docs"); docsRow.Y < accHeader.Y {
+		t.Fatalf("Docs should not appear under All Inboxes, got %+v", docsRow)
+	}
+	h.click("OA")
+	if got := h.app.route.View.FolderID; got != h.folderNamed(accs[0], "INBOX/OA").ID {
+		t.Fatalf("navigated to folder %d, want INBOX/OA", got)
 	}
 }

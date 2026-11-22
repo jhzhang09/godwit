@@ -305,8 +305,12 @@ type App struct {
 	link     string // the link waiting for confirmation
 	linkOpen bool   // the link dialog shows
 
-	smimeCertOpen bool          // the S/MIME certificate details dialog shows
-	smimeCert     smimeCertView // currently inspected certificate
+	smimeCertOpen    bool             // the S/MIME certificate details dialog shows
+	smimeCert        smimeCertView    // currently inspected certificate
+	smimeEncryptOpen bool             // the S/MIME decryption details dialog shows
+	smimeEncrypt     smimeEncryptView // currently inspected decryption details
+	smimeSigOpen     bool             // the S/MIME signature verification details dialog shows
+	smimeSig         smimeSigView     // currently inspected signature verification details
 
 	mcpSend mcpSendState // godwit mcp's send request waiting for the user (mcpsend.go)
 

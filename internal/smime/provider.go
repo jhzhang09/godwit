@@ -41,6 +41,8 @@ type cmsVerifyResult struct {
 	content   []byte
 	signerDER []byte
 	chainDER  [][]byte
+	cryptOK   bool
+	trustOK   bool
 	verifyErr error
 }
 

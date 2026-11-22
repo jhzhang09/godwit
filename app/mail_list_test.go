@@ -132,8 +132,8 @@ func TestSidebarAccountsAndViews(t *testing.T) {
 	for _, s := range []string{"写邮件", "全部收件箱", "已标星", "2"} {
 		h.see(s)
 	}
-	// Per-account inboxes sit directly under All Inboxes; Other folders list
-	// the remaining roles in order (flagged, drafts, sent, archive, trash).
+	// Per-account inboxes sit directly under All Inboxes; Accounts list
+	// each account's full role tree in order (inbox, flagged, drafts, sent, archive, trash).
 	allIn, _ := h.tt.Find("全部收件箱")
 	workIn, ok1 := h.tt.Find("Work · 收件箱")
 	carolIn, ok2 := h.tt.Find("carol@example.com · 收件箱")
@@ -145,7 +145,7 @@ func TestSidebarAccountsAndViews(t *testing.T) {
 		t.Fatalf("clicking carol's inbox sub-row navigated to %+v", v)
 	}
 	var ys []float32
-	for _, name := range []string{"草稿", "已发送", "归档", "已删除"} {
+	for _, name := range []string{"收件箱", "草稿", "已发送", "归档", "已删除"} {
 		r, ok := h.tt.Find(name)
 		if !ok {
 			t.Fatalf("no folder %s: %q", name, h.tt.Texts())
@@ -170,19 +170,18 @@ func TestSidebarAccountsAndViews(t *testing.T) {
 	if n := count("已标星"); n != 2 {
 		t.Fatalf("%d 已标星, want the unified one and the first account's", n)
 	}
-	other := i18n.T("mail.other_folders")
-	h.click("carol@example.com · " + other) // unfolds the second account, animated: wait for its end
+	accsLabel := i18n.T("mail.accounts")
+	h.click("carol@example.com · " + accsLabel) // unfolds the second account, animated: wait for its end
 	h.until("both accounts' 已发送", func() bool { return count("已发送") == 2 })
-	h.click("Work · " + other)
+	h.click("Work · " + accsLabel)
 	h.until("one 已发送 folder after collapsing", func() bool { return count("已发送") == 1 })
 	h.click("已标星")
 	if v := h.app.route.View; v.Unified != "starred" {
 		t.Fatalf("view %+v", v)
 	}
-	// carol's 已标星 sits right between her account row and local drafts
-	carolRow, _ := h.tt.Find("carol@example.com · " + other)
+	// carol's 已标星 sits right between her 收件箱 and local drafts
 	drafts, _ := h.tt.Find("草稿")
-	h.tt.ClickAt(drafts.X+drafts.W/2, (carolRow.Y+carolRow.H+drafts.Y)/2)
+	h.tt.ClickAt(drafts.X+drafts.W/2, drafts.Y-drafts.H/2)
 	h.drain()
 	h.tt.Frame()
 	if v := h.app.route.View; v != accountStarred(accs[1].ID) {
@@ -192,7 +191,7 @@ func TestSidebarAccountsAndViews(t *testing.T) {
 	if v := h.app.route.View; v.FolderID != h.folderOf(accs[1], "archive").ID {
 		t.Fatalf("view %+v", v)
 	}
-	h.headerMenu(i18n.T("mail.other_folders"), "添加账户")
+	h.headerMenu(i18n.T("mail.accounts"), "添加账户")
 	if h.app.route.Page != PageSettings || h.app.addAccount == nil {
 		t.Fatalf("route %+v, sheet %v", h.app.route, h.app.addAccount != nil)
 	}
@@ -1315,7 +1314,7 @@ func TestAccountFoldPersists(t *testing.T) {
 	if *h.app.mail.accountOpen(accs[1].ID) {
 		t.Fatal("the second account starts unfolded")
 	}
-	aliceFolders := "alice@example.com · " + i18n.T("mail.other_folders")
+	aliceFolders := "alice@example.com · " + i18n.T("mail.accounts")
 	h.click(aliceFolders)
 	if n := count(); n != 0 || *h.app.mail.accountOpen(accs[0].ID) {
 		t.Fatalf("%d 已发送 folders after folding alice, want 0", n)
