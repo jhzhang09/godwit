@@ -353,8 +353,8 @@ func (cl *Client) ImportEML(ctx context.Context, accountID int64, folderID int64
 	return call[core.ImportSummary](cl, ctx, "ImportEML", accountID, folderID, paths)
 }
 
-func (cl *Client) InlineSignatureImages(ctx context.Context, html string) (string, error) {
-	return call[string](cl, ctx, "InlineSignatureImages", html)
+func (cl *Client) InlineDraftImages(ctx context.Context, draftID int64, html string) (string, error) {
+	return call[string](cl, ctx, "InlineDraftImages", draftID, html)
 }
 
 func (cl *Client) InstallPlugin(ctx context.Context, srcDir string) (core.PluginInfo, error) {
@@ -575,6 +575,10 @@ func (cl *Client) Purges(ctx context.Context, accountID int64) (map[string]core.
 
 func (cl *Client) QuickReplies(ctx context.Context, messageID int64) ([]core.QuickReply, error) {
 	return call[[]core.QuickReply](cl, ctx, "QuickReplies", messageID)
+}
+
+func (cl *Client) QuoteShown(ctx context.Context, draftID int64, block string) (string, error) {
+	return call[string](cl, ctx, "QuoteShown", draftID, block)
 }
 
 func (cl *Client) RawMessageFile(ctx context.Context, messageID int64) (string, error) {

@@ -108,16 +108,22 @@ func (s *Service) NewDraft(ctx context.Context, accountID int64, mode string, so
 	if err := s.auditMCPDraft(ctx, "NewDraft", sourceMessageID); err != nil {
 		return Draft{}, err
 	}
-	// From reading the signature to storing the draft, no signature change
-	// can clean up the images the draft is about to show.
 	sourceMessageID, err := s.resolveID(ctx, sourceMessageID)
 	if err != nil {
 		return Draft{}, err
 	}
+	// Resolve the source message and its inline images before locking sigMu so
+	// IMAP fetches never block signature operations.
+	src, err := s.prepareDraftSource(ctx, accountID, mode, sourceMessageID, true)
+	if err != nil {
+		return Draft{}, err
+	}
+	// From reading the signature to storing the draft, no signature change
+	// can clean up the images the draft is about to show.
 	s.sigMu.Lock()
-	d, err := s.buildDraft(ctx, accountID, mode, sourceMessageID)
+	d, err := s.buildDraftFromSource(ctx, src)
 	if err == nil {
-		d, err = s.saveDraft(ctx, d)
+		d, err = s.saveDraftWithImages(ctx, d, src.images)
 	}
 	s.sigMu.Unlock()
 	if err != nil {
@@ -131,60 +137,146 @@ func (s *Service) NewDraft(ctx context.Context, accountID int64, mode string, so
 	return s.GetDraft(ctx, d.ID)
 }
 
-// buildDraft is NewDraft's draft before it is saved: addresses, subject,
-// quote and signature, without attachments.
-func (s *Service) buildDraft(ctx context.Context, accountID int64, mode string, sourceMessageID int64) (Draft, error) {
+type draftSource struct {
+	accountID       int64
+	mode            string
+	sourceMessageID int64
+	to, cc          []string
+	subject         string
+	quoteBlock      string
+	images          []mail.Attachment
+}
+
+func (s *Service) sourceInlineMap(ctx context.Context, sourceMessageID int64, orig *mail.Parsed, decInline []DecryptedInlineImage) (map[string]mail.Attachment, error) {
+	out := make(map[string]mail.Attachment, len(decInline))
+	for _, img := range decInline {
+		if img.ContentID == "" || len(img.Data) == 0 {
+			continue
+		}
+		out[img.ContentID] = mail.Attachment{
+			ContentID:   img.ContentID,
+			ContentType: img.ContentType,
+			Data:        img.Data,
+			Size:        len(img.Data),
+			Inline:      true,
+		}
+	}
+	if len(out) == 0 && orig != nil && orig.HTML != "" && len(mail.CIDs(orig.HTML)) > 0 {
+		if err := s.InlineImages(ctx, sourceMessageID, func(cid string, a mail.Attachment) {
+			out[cid] = a
+		}); err != nil && ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+	}
+	return out, nil
+}
+
+func (s *Service) prepareDraftSource(ctx context.Context, accountID int64, mode string, sourceMessageID int64, withImages bool) (draftSource, error) {
 	if !draftModes[mode] {
-		return Draft{}, fmt.Errorf("unknown draft mode %q", mode)
+		return draftSource{}, fmt.Errorf("unknown draft mode %q", mode)
 	}
 	acc, err := s.account(ctx, accountID)
 	if err != nil {
-		return Draft{}, err
+		return draftSource{}, err
 	}
 	if acc.Kind == KindLocalArchive {
 		if mode == "new" {
-			return Draft{}, ErrLocalArchive
+			return draftSource{}, ErrLocalArchive
 		}
 		// Its mail is answered from the default account that sends (ADR 0036).
 		if acc, err = s.draftAccount(ctx, 0); err != nil {
-			return Draft{}, ErrLocalArchive
+			return draftSource{}, ErrLocalArchive
 		}
 	}
 	self := acc.Email    // whose mail is answered: its own sent mail and address are the user's
 	if acc.ReceiveOnly { // so is a receive-only account's, and its new mail
 		if acc, err = s.draftAccount(ctx, 0); err != nil {
-			return Draft{}, ErrReceiveOnly
+			return draftSource{}, ErrReceiveOnly
 		}
 	}
-	d := Draft{AccountID: acc.ID, Mode: mode}
+	src := draftSource{accountID: acc.ID, mode: mode}
+	if mode == "new" {
+		return src, nil
+	}
 	st, err := s.loadSettings(ctx)
+	if err != nil {
+		return draftSource{}, err
+	}
+	orig, decInline, err := s.sourceMessage(ctx, accountID, sourceMessageID)
+	if err != nil {
+		return draftSource{}, err
+	}
+	src.sourceMessageID = sourceMessageID
+	if mode == "forward" {
+		src.subject = mail.ForwardSubject(orig.Subject)
+	} else {
+		src.to, src.cc = mail.ReplyRecipients(orig, self, mode == "reply_all")
+		src.subject = mail.ReplySubject(orig.Subject)
+	}
+	src.subject = defuseRefs(src.subject) // a reference planted in the mail would block sending the reply
+	// The marker blockquote only marks the quote (attribution line included)
+	// as read-only for Wit; it is styled away so the quote is not indented twice.
+	lang := cmp.Or(st.ReadingLanguage, st.UILanguage, s.opts.SystemLanguage)
+	var q string
+	if withImages {
+		inlineMap, err := s.sourceInlineMap(ctx, sourceMessageID, orig, decInline)
+		if err != nil {
+			return draftSource{}, err
+		}
+		q, src.images = mail.QuoteHTMLWith(orig, lang, inlineMap)
+	} else {
+		q = mail.QuoteHTMLIn(orig, lang)
+	}
+	src.quoteBlock = `<p></p><blockquote data-godwit="quote" style="margin:0;padding:0;border:0">` + defuseRefs(q) + "</blockquote>"
+	return src, nil
+}
+
+func (s *Service) buildDraftFromSource(ctx context.Context, src draftSource) (Draft, error) {
+	acc, err := s.account(ctx, src.accountID)
 	if err != nil {
 		return Draft{}, err
 	}
-	if mode != "new" {
-		orig, err := s.sourceMessage(ctx, accountID, sourceMessageID)
-		if err != nil {
-			return Draft{}, err
-		}
-		d.SourceMessageID = sourceMessageID
-		if mode == "forward" {
-			d.Subject = mail.ForwardSubject(orig.Subject)
-		} else {
-			d.To, d.Cc = mail.ReplyRecipients(orig, self, mode == "reply_all")
-			d.Subject = mail.ReplySubject(orig.Subject)
-		}
-		d.Subject = defuseRefs(d.Subject) // a reference planted in the mail would block sending the reply
-		// The marker blockquote only marks the quote (attribution line included)
-		// as read-only for Wit; it is styled away so the quote is not indented twice.
-		lang := cmp.Or(st.ReadingLanguage, st.UILanguage, s.opts.SystemLanguage)
-		d.HTML = `<p></p><blockquote data-godwit="quote" style="margin:0;padding:0;border:0">` + defuseRefs(mail.QuoteHTMLIn(orig, lang)) + "</blockquote>"
+	st, err := s.loadSettings(ctx)
+	if err != nil {
+		return Draft{}, err
 	}
 	cids, err := s.signatureCIDs(ctx)
 	if err != nil {
 		return Draft{}, err
 	}
-	d.HTML += signatureHTML(acc.Signature, cids, st.SignatureDelimiter)
-	return d, nil
+	return Draft{
+		AccountID:       src.accountID,
+		Mode:            src.mode,
+		SourceMessageID: src.sourceMessageID,
+		To:              src.to,
+		Cc:              src.cc,
+		Subject:         src.subject,
+		HTML:            src.quoteBlock + signatureHTML(acc.Signature, cids, st.SignatureDelimiter),
+	}, nil
+}
+
+// buildDraft is NewDraft's draft before it is saved: addresses, subject,
+// quote and signature, without attachments or extracted quote images.
+func (s *Service) buildDraft(ctx context.Context, accountID int64, mode string, sourceMessageID int64) (Draft, error) {
+	src, err := s.prepareDraftSource(ctx, accountID, mode, sourceMessageID, false)
+	if err != nil {
+		return Draft{}, err
+	}
+	return s.buildDraftFromSource(ctx, src)
+}
+
+func (s *Service) buildDraftWithImages(ctx context.Context, accountID int64, mode string, sourceMessageID int64) (Draft, []mail.Attachment, error) {
+	src, err := s.prepareDraftSource(ctx, accountID, mode, sourceMessageID, true)
+	if err != nil {
+		return Draft{}, nil, err
+	}
+	s.sigMu.Lock()
+	defer s.sigMu.Unlock()
+	d, err := s.buildDraftFromSource(ctx, src)
+	if err != nil {
+		return Draft{}, nil, err
+	}
+	return d, src.images, nil
 }
 
 // SignatureHTMLPrefix marks a stored signature as the settings editor's HTML;
@@ -230,23 +322,29 @@ func signatureHTML(sig string, cids map[string]bool, delim bool) string {
 }
 
 // sourceMessage rebuilds what replying and forwarding need from the stored message.
-func (s *Service) sourceMessage(ctx context.Context, accountID, id int64) (*mail.Parsed, error) {
+func (s *Service) sourceMessage(ctx context.Context, accountID, id int64) (*mail.Parsed, []DecryptedInlineImage, error) {
 	rows, err := s.db.Query(ctx, `SELECT message_id, subject, from_addr, reply_to, to_addrs, cc_addrs, date, body_text, body_html
 		FROM messages WHERE id = ? AND (account_id = ? OR account_id IN (SELECT id FROM accounts WHERE kind = ?))`, id, accountID, KindLocalArchive) // a local archive's mail is answered from another account (ADR 0036)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if len(rows.Values) == 0 {
-		return nil, fmt.Errorf("message %d not found in account %d", id, accountID)
+		return nil, nil, fmt.Errorf("message %d not found in account %d", id, accountID)
 	}
 	r := rows.Values[0]
-	return &mail.Parsed{MessageID: store.Str(r[0]), Subject: store.Str(r[1]), From: store.Str(r[2]), ReplyTo: store.Str(r[3]),
+	orig := &mail.Parsed{MessageID: store.Str(r[0]), Subject: store.Str(r[1]), From: store.Str(r[2]), ReplyTo: store.Str(r[3]),
 		To: jsonList(store.Str(r[4])), Cc: jsonList(store.Str(r[5])), Date: time.Unix(store.Int(r[6]), 0),
-		Text: store.Str(r[7]), HTML: store.Str(r[8])}, nil
+		Text: store.Str(r[7]), HTML: store.Str(r[8])}
+	if dec, ok := s.decryptedBody(ctx, id); ok {
+		orig.HTML = cmp.Or(dec.QuoteHTML, dec.HTML)
+		orig.Text = dec.Text
+		return orig, dec.InlineImages, nil
+	}
+	return orig, nil, nil
 }
 
 func (s *Service) copyAttachments(ctx context.Context, draftID, messageID int64) error {
-	rows, err := s.db.Query(ctx, "SELECT id FROM attachments WHERE message_id = ? AND inline = 0 ORDER BY id", messageID)
+	rows, err := s.db.Query(ctx, "SELECT a.id FROM attachments a WHERE a.message_id = ? AND a.inline = 0 AND NOT "+smimePartPredicate+" ORDER BY a.id", messageID)
 	if err != nil {
 		return err
 	}
@@ -314,11 +412,24 @@ func (s *Service) programChanged(ctx context.Context, err error) {
 
 // saveDraft is SaveDraft, unaudited.
 func (s *Service) saveDraft(ctx context.Context, d Draft) (out Draft, err error) {
+	return s.saveDraftWithImages(ctx, d, nil)
+}
+
+func (s *Service) saveDraftWithImages(ctx context.Context, d Draft, imgs []mail.Attachment) (out Draft, err error) {
 	defer func() { s.programChanged(ctx, err) }()
 	// Draft changes and Send never interleave.
 	s.editMu.Lock()
 	defer s.editMu.Unlock()
-	html, err := s.sanitizeDraft(ctx, d.HTML) // stored safe, so every read of a draft is safe
+	var extraCIDs map[string]bool
+	if len(imgs) > 0 {
+		extraCIDs = make(map[string]bool, len(imgs))
+		for _, img := range imgs {
+			if img.ContentID != "" {
+				extraCIDs[img.ContentID] = true
+			}
+		}
+	}
+	html, err := s.sanitizeDraftFor(ctx, d.ID, d.HTML, extraCIDs) // stored safe, so every read of a draft is safe
 	if err != nil {
 		return Draft{}, err
 	}
@@ -337,6 +448,9 @@ func (s *Service) saveDraft(ctx context.Context, d Draft) (out Draft, err error)
 			d.ReplyTo, d.Subject, d.HTML, now, fromProgram(ctx))
 		if err != nil {
 			return Draft{}, err
+		}
+		if err := s.saveDraftImages(ctx, r.LastInsertID, imgs); err != nil {
+			return Draft{}, errors.Join(err, s.deleteDraft(context.WithoutCancel(ctx), r.LastInsertID))
 		}
 		return s.GetDraft(ctx, r.LastInsertID)
 	}
@@ -364,6 +478,9 @@ func (s *Service) saveDraft(ctx context.Context, d Draft) (out Draft, err error)
 	}
 	if r.Changes == 0 {
 		return Draft{}, fmt.Errorf("draft %d not found", d.ID)
+	}
+	if err := s.saveDraftImages(ctx, d.ID, imgs); err != nil {
+		return Draft{}, err
 	}
 	return s.GetDraft(ctx, d.ID)
 }
@@ -422,7 +539,7 @@ func (s *Service) GetDraft(ctx context.Context, id int64) (Draft, error) {
 		To: jsonList(store.Str(r[3])), Cc: jsonList(store.Str(r[4])), Bcc: jsonList(store.Str(r[5])),
 		ReplyTo: store.Str(r[6]), Subject: store.Str(r[7]), UpdatedAt: time.Unix(store.Int(r[9]), 0), Revision: store.Int(r[10]),
 		FromProgram: store.Int(r[11]) != 0}
-	if d.HTML, err = s.sanitizeDraft(ctx, store.Str(r[8])); err != nil {
+	if d.HTML, err = s.sanitizeDraftFor(ctx, id, store.Str(r[8])); err != nil {
 		return Draft{}, err
 	}
 	ar, err := s.db.Query(ctx, "SELECT id, filename, content_type, size FROM draft_attachments WHERE draft_id = ? ORDER BY id", id)
@@ -753,6 +870,15 @@ func (s *Service) enqueue(ctx context.Context, draftID, rev int64, checked []str
 	imgs, err := s.signatureImages(ctx, true) // an unknown cid was dropped by GetDraft
 	if err != nil {
 		return err
+	}
+	dimgs, err := s.draftImages(ctx, draftID, true)
+	if err != nil {
+		return err
+	}
+	for id, a := range dimgs {
+		if _, exists := imgs[id]; !exists {
+			imgs[id] = a
+		}
 	}
 	var related []mail.Attachment
 	total := int64(len(d.HTML))

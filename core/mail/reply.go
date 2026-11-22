@@ -2,12 +2,15 @@ package mail
 
 import (
 	"cmp"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"html"
 	"net/mail"
 	"strings"
 
 	"github.com/godwit-email/godwit/internal/i18n"
+	"github.com/godwit-email/godwit/internal/imagefetch"
 )
 
 // AddrKey is the lowercased bare address of an address string ("Bob <b@x>" → "b@x").
@@ -63,12 +66,129 @@ func QuoteHTML(orig *Parsed) string { return QuoteHTMLIn(orig, "") }
 
 // QuoteHTMLIn formats QuoteHTML with the attribution line in lang ("" or zh-Hans defaults to Simplified Chinese).
 func QuoteHTMLIn(orig *Parsed, lang string) string {
-	body := StripMarkers(SanitizeCompose(orig.HTML)) // the quoted mail's own markers are content
+	body := StripMarkers(SanitizeCompose(InlineQuoteCSS(orig.HTML))) // the quoted mail's own markers are content
 	if orig.HTML == "" {
 		body = strings.ReplaceAll(html.EscapeString(strings.ReplaceAll(orig.Text, "\r\n", "\n")), "\n", "<br>")
 	}
 	date, from := i18n.FullDateIn(orig.Date, cmp.Or(lang, "zh-Hans"))+orig.Date.Format(" 15:04"), html.EscapeString(orig.From)
 	return "<p>" + quoteLead(lang, date, from) + "</p><blockquote>" + body + "</blockquote>"
+}
+
+// QuoteHTMLWith formats the reply/forward quote with attribution in lang,
+// inlining safe <style> rules and extracting valid cid: (from inline) and
+// data:image/... images as content-addressed quote-<hash>@godwit attachments.
+func QuoteHTMLWith(orig *Parsed, lang string, inline map[string]Attachment) (string, []Attachment) {
+	var body string
+	var images []Attachment
+	if orig.HTML == "" {
+		body = strings.ReplaceAll(html.EscapeString(strings.ReplaceAll(orig.Text, "\r\n", "\n")), "\n", "<br>")
+	} else {
+		body, images = PrepareQuoteHTML(orig.HTML, inline)
+	}
+	date, from := i18n.FullDateIn(orig.Date, cmp.Or(lang, "zh-Hans"))+orig.Date.Format(" 15:04"), html.EscapeString(orig.From)
+	return "<p>" + quoteLead(lang, date, from) + "</p><blockquote>" + body + "</blockquote>", images
+}
+
+// PrepareQuoteHTML inlines safe <style> rules in htmlBody, converts valid cid:
+// (resolved against inline) and data:image/... images into deduplicated
+// content-addressed quote-<hash>@godwit inline attachments, and returns the
+// sanitized compose-safe HTML body (without draft markers) and those images.
+func PrepareQuoteHTML(htmlBody string, inline map[string]Attachment) (string, []Attachment) {
+	if htmlBody == "" {
+		return "", nil
+	}
+	lookup := make(map[string]Attachment, len(inline))
+	lowerLookup := make(map[string]Attachment, len(inline))
+	for k, a := range inline {
+		cid := cleanID(k)
+		if cid == "" {
+			continue
+		}
+		if _, ok := lookup[cid]; !ok {
+			lookup[cid] = a
+		}
+		lk := strings.ToLower(cid)
+		if _, ok := lowerLookup[lk]; !ok {
+			lowerLookup[lk] = a
+		}
+	}
+
+	inlined := InlineQuoteCSS(htmlBody)
+	budget := imagefetch.NewBudget()
+	keepCIDs := make(map[string]bool)
+	byCID := make(map[string]Attachment)
+	var order []string
+
+	addImage := func(data []byte) string {
+		if len(data) == 0 || len(data) > imagefetch.MaxImageBytes {
+			return ""
+		}
+		format, px, err := imagefetch.Config(data)
+		if err != nil {
+			return ""
+		}
+		sum := sha256.Sum256(data)
+		qcid := "quote-" + hex.EncodeToString(sum[:16]) + "@godwit"
+		if _, ok := byCID[qcid]; ok {
+			return "cid:" + qcid
+		}
+		if err := budget.TakeInline(int64(len(data)), px); err != nil {
+			return ""
+		}
+		byCID[qcid] = Attachment{
+			ContentID:   qcid,
+			ContentType: "image/" + format,
+			Data:        data,
+			Size:        len(data),
+			Inline:      true,
+		}
+		keepCIDs[qcid] = true
+		order = append(order, qcid)
+		return "cid:" + qcid
+	}
+
+	rewritten := ReplaceImages(inlined, func(src string) string {
+		s := strings.TrimSpace(src)
+		lower := strings.ToLower(s)
+		switch {
+		case strings.HasPrefix(lower, "cid:"):
+			key := cleanID(s[4:])
+			if key == "" {
+				return ""
+			}
+			if a, ok := lookup[key]; ok {
+				return addImage(a.Data)
+			}
+			if a, ok := lowerLookup[strings.ToLower(key)]; ok {
+				return addImage(a.Data)
+			}
+			return ""
+		case strings.HasPrefix(lower, "data:"):
+			data, err := imagefetch.DataURL(s)
+			if err != nil {
+				return ""
+			}
+			return addImage(data)
+		default:
+			return src
+		}
+	})
+
+	body := StripMarkers(SanitizeDraft(rewritten, keepCIDs))
+	if len(order) == 0 {
+		return body, nil
+	}
+	used := make(map[string]bool)
+	for _, cid := range CIDs(body) {
+		used[cid] = true
+	}
+	var images []Attachment
+	for _, cid := range order {
+		if used[cid] {
+			images = append(images, byCID[cid])
+		}
+	}
+	return body, images
 }
 
 func quoteLead(lang, date, from string) string {

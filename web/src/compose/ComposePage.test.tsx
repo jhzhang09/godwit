@@ -92,6 +92,7 @@ const state = {
   subject: "你好",
   body: "正文",
   quote: "> 原文",
+  quoteHtml: "",
   signatureHtml: "<p>-- me</p>",
   attachments: [],
   revision: 7,
@@ -883,4 +884,44 @@ test("at 640 by 480 the fields and body scroll while the toolbar and Send stay p
   expect(bar.parentElement).toHaveClass("flex", "flex-col", "overflow-hidden", "h-full");
   expect(container.querySelector("main")).toHaveClass("h-screen", "flex-col");
   vi.unstubAllGlobals();
+});
+
+test("renders formatted quoteHtml with images and inert links when expanded", async () => {
+  const quoteHtml =
+    '<p>于 2026/08/04 14:03，Alice 写道：</p><blockquote><table><tbody><tr><td><strong>Table Cell</strong></td></tr></tbody></table><img src="data:image/png;base64,AAAA" alt="logo"><a href="https://example.com">link</a></blockquote>';
+  vi.mocked(api.load).mockResolvedValue({ ...state, quote: "Table Cell", quoteHtml });
+  render(<ComposePage />);
+  await body();
+  await userEvent.click(screen.getByRole("button", { name: "显示引用的原邮件（助手只读）" }));
+  const preview = document.querySelector('[data-slot="quote-preview"]');
+  expect(preview).toBeInTheDocument();
+  expect(preview?.querySelector("table")).toBeInTheDocument();
+  expect(preview?.querySelector("strong")).toHaveTextContent("Table Cell");
+  expect(preview?.querySelector("img")).toHaveAttribute("src", "data:image/png;base64,AAAA");
+  const link = screen.getByRole("link", { name: "link" });
+  const clickEvent = new MouseEvent("click", { bubbles: true, cancelable: true });
+  link.dispatchEvent(clickEvent);
+  expect(clickEvent.defaultPrevented).toBe(true);
+});
+
+test("lifts dark inline quote text in dark mode unless inside a light container", async () => {
+  try {
+    const quoteHtml =
+      '<blockquote><p id="dark-text" style="color: #111111">暗色正文</p><div style="background-color: #ffffff"><p id="card-text" style="color: #111111">白底卡片</p></div></blockquote>';
+    vi.mocked(api.load).mockResolvedValue({
+      ...state,
+      theme: { ...theme, mode: "dark" },
+      quote: "暗色正文",
+      quoteHtml,
+    });
+    render(<ComposePage />);
+    await body();
+    await userEvent.click(screen.getByRole("button", { name: "显示引用的原邮件（助手只读）" }));
+    const darkText = document.getElementById("dark-text");
+    const cardText = document.getElementById("card-text");
+    expect(darkText?.style.color).not.toBe("rgb(17, 17, 17)");
+    expect(cardText?.style.color).toBe("rgb(17, 17, 17)");
+  } finally {
+    document.documentElement.classList.remove("dark");
+  }
 });

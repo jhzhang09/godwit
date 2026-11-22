@@ -452,7 +452,14 @@ func (s *Service) editedDraftArgs(ctx context.Context, recorded, edited json.Raw
 		var old string
 		_ = json.Unmarshal(rec["html"], &old)
 		_, quote, sig := mail.SplitDraft(old)
-		h, err := s.sanitizeDraft(ctx, mail.JoinDraft(textHTML(*ed.HTML), quote, sig))
+		var extraCIDs map[string]bool
+		if qcids := mail.CIDs(quote); len(qcids) > 0 {
+			extraCIDs = make(map[string]bool, len(qcids))
+			for _, cid := range qcids {
+				extraCIDs[cid] = true
+			}
+		}
+		h, err := s.sanitizeDraftFor(ctx, 0, mail.JoinDraft(textHTML(*ed.HTML), quote, sig), extraCIDs)
 		if err != nil {
 			return nil, err
 		}

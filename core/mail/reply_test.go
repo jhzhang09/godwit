@@ -1,11 +1,13 @@
 package mail_test
 
 import (
+	"encoding/base64"
 	"testing"
 	"time"
 
 	"github.com/godwit-email/godwit/core/mail"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestReplyRecipients(t *testing.T) {
@@ -80,4 +82,39 @@ func TestQuoteHTML(t *testing.T) {
 	assert.Contains(t, mail.QuoteHTMLIn(&mail.Parsed{From: "a@x.com", Date: d, Text: "hi"}, "zh-Hant"), "於 2026/01/02 03:04，a@x.com 寫道：")
 	assert.Contains(t, mail.QuoteHTMLIn(&mail.Parsed{From: "a@x.com", Date: d, Text: "hi"}, "de"), "Am 02.01.2026 03:04 schrieb a@x.com:")
 	assert.Contains(t, mail.QuoteHTMLIn(&mail.Parsed{From: "a@x.com", Date: d, Text: "hi"}, "ja"), "2026/01/02 03:04、a@x.com さんは書きました：")
+}
+
+func TestQuoteHTMLWithImagesAndStyles(t *testing.T) {
+	const png1B64 = "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAFklEQVR4nGPQKLpFEmIY1TCqYfhqAAASZ3QQWUKpQAAAAABJRU5ErkJggg=="
+	const png2B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+	png1, err := base64.StdEncoding.DecodeString(png1B64)
+	require.NoError(t, err)
+
+	d := time.Date(2026, 8, 4, 14, 3, 0, 0, time.UTC)
+	orig := &mail.Parsed{
+		From: "Alice <alice@example.com>",
+		Date: d,
+		HTML: `<style>.hdr { color: #223344; font-family: '微软雅黑', sans-serif; }</style>` +
+			`<p class="hdr" data-godwit="quote">Hello</p>` +
+			`<img src="cid:LOGO@EXAMPLE" alt="logo">` +
+			`<img src="cid:logo@example" alt="dup">` +
+			`<img src="data:image/png;base64,` + png2B64 + `" alt="data">` +
+			`<img src="https://evil.example/track.png" width="1" height="1">` +
+			`<img src="data:image/svg+xml;base64,PHN2Zy8+">`,
+	}
+	inline := map[string]mail.Attachment{
+		"logo@example": {ContentID: "logo@example", ContentType: "image/png", Data: png1, Inline: true},
+	}
+	q, imgs := mail.QuoteHTMLWith(orig, "zh-Hans", inline)
+	assert.Contains(t, q, "color: #223344")
+	assert.Contains(t, q, "微软雅黑")
+	assert.NotContains(t, q, `data-godwit="quote"`)
+	assert.NotContains(t, q, "evil.example")
+	assert.NotContains(t, q, "svg+xml")
+	assert.NotContains(t, q, "data:image/png")
+	require.Len(t, imgs, 2)
+	for _, img := range imgs {
+		assert.Contains(t, q, `src="cid:`+img.ContentID+`"`)
+		assert.True(t, len(img.Data) > 0)
+	}
 }

@@ -118,6 +118,7 @@ const state: ComposeState = {
   subject: "你好",
   body: "正文",
   quote: "",
+  quoteHtml: "",
   signatureHtml: "",
   attachments: [],
   revision: 7,

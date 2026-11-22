@@ -152,11 +152,7 @@ func (s *Service) signatureCIDs(ctx context.Context) (map[string]bool, error) {
 
 // sanitizeDraft is mail.SanitizeDraft keeping the signature images.
 func (s *Service) sanitizeDraft(ctx context.Context, html string) (string, error) {
-	cids, err := s.signatureCIDs(ctx)
-	if err != nil {
-		return "", err
-	}
-	return mail.SanitizeDraft(html, cids), nil
+	return s.sanitizeDraftFor(ctx, 0, html)
 }
 
 // InlineSignatureImages is html (sanitized compose HTML: a draft, a

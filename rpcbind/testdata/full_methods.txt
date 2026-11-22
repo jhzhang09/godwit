@@ -86,6 +86,7 @@ ImageCacheSize
 ImagesAllowed
 ImportAccounts
 ImportEML
+InlineDraftImages
 InlineSignatureImages
 InstallPlugin
 InstallPluginFromRegistry
@@ -144,6 +145,7 @@ PreviewView
 ProposedRuleSaved
 Purges
 QuickReplies
+QuoteShown
 ReadingLanguage
 Reauthorize
 RebuildSearchIndex

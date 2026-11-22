@@ -47,19 +47,23 @@ type cachedSecure struct {
 	result       secureMessage
 	html         string
 	modelHTML    string
+	quoteHTML    string
 	text         string
 	truncated    bool
 	modelAtts    []core.AttachmentInfo
+	inlineImages []core.DecryptedInlineImage
 	syncModel    bool
 	size         int
 }
 
 func (c cachedSecure) decryptedBody() core.DecryptedBody {
 	return core.DecryptedBody{
-		HTML:        c.modelHTML,
-		Text:        c.text,
-		Truncated:   c.truncated,
-		Attachments: slices.Clone(c.modelAtts),
+		HTML:         c.modelHTML,
+		QuoteHTML:    c.quoteHTML,
+		Text:         c.text,
+		Truncated:    c.truncated,
+		Attachments:  slices.Clone(c.modelAtts),
+		InlineImages: slices.Clone(c.inlineImages),
 	}
 }
 
@@ -408,8 +412,9 @@ func (r *reader) openSMIME(id int64, b *msgBody, retry bool) {
 	}
 
 	var result secureMessage
-	var safe, modelHTML, text string
+	var safe, modelHTML, quoteHTML, text string
 	var modelAtts []core.AttachmentInfo
+	var decInline []core.DecryptedInlineImage
 	var truncated, syncModel, synced bool
 	var cachedSize int
 	cmsAtt, useAttCache := singleP7MAttachment(msg)
@@ -537,11 +542,30 @@ func (r *reader) openSMIME(id int64, b *msgBody, retry bool) {
 		syncModel = result.encrypted || (msg.HTML == "" && msg.Text == "")
 		if syncModel {
 			modelHTML, _, _ = mail.Sanitize(parsed.HTML, nil, false)
+			const maxDecryptedRPCInlineBytes = 8 << 20
+			var quoteImgs []mail.Attachment
+			quoteHTML, quoteImgs = mail.PrepareQuoteHTML(parsed.HTML, inline)
+			inlineTotal := 0
+			for _, img := range quoteImgs {
+				if inlineTotal+len(img.Data) > maxDecryptedRPCInlineBytes {
+					continue
+				}
+				inlineTotal += len(img.Data)
+				decInline = append(decInline, core.DecryptedInlineImage{
+					ContentID:   img.ContentID,
+					ContentType: img.ContentType,
+					Data:        img.Data,
+				})
+				cachedSize += len(img.Data)
+			}
+			cachedSize += len(quoteHTML)
 			if err := a.svc.SetDecryptedBody(ctx, id, core.DecryptedBody{
-				HTML:        modelHTML,
-				Text:        text,
-				Truncated:   truncated,
-				Attachments: modelAtts,
+				HTML:         modelHTML,
+				QuoteHTML:    quoteHTML,
+				Text:         text,
+				Truncated:    truncated,
+				Attachments:  modelAtts,
+				InlineImages: decInline,
 			}); err != nil {
 				if ctx.Err() != nil {
 					return ctx.Err()
@@ -579,9 +603,11 @@ func (r *reader) openSMIME(id int64, b *msgBody, retry bool) {
 			result:       result,
 			html:         safe,
 			modelHTML:    modelHTML,
+			quoteHTML:    quoteHTML,
 			text:         text,
 			truncated:    truncated,
 			modelAtts:    modelAtts,
+			inlineImages: decInline,
 			syncModel:    syncModel,
 			size:         cachedSize,
 		})

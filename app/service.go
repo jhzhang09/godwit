@@ -76,7 +76,7 @@ type Service interface {
 	ImportAccountsFile(ctx context.Context, path, digest string) (core.AccountImportResult, error)
 	ImportContactCertificateFile(ctx context.Context, address, path string) ([]core.SMIMECertificate, error)
 	ImportEML(ctx context.Context, accountID, folderID int64, paths []string) (core.ImportSummary, error)
-	InlineSignatureImages(ctx context.Context, html string) (string, error)
+	InlineDraftImages(ctx context.Context, draftID int64, html string) (string, error)
 	InstallPlugin(ctx context.Context, srcDir string) (core.PluginInfo, error)
 	InstallPluginFromRegistryWithProgress(ctx context.Context, name string, progress func(core.PluginInstallProgress)) (core.PluginInfo, error)
 	KeychainStatus(ctx context.Context) error

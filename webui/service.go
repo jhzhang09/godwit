@@ -47,6 +47,7 @@ type Service interface {
 	ModelName(ctx context.Context, ref string) string
 	NewConversation(ctx context.Context, kind string, draftID int64) (core.Conversation, error)
 	NewMailtoDraft(ctx context.Context, accountID int64, link string) (core.Draft, error)
+	QuoteShown(ctx context.Context, draftID int64, block string) (string, error)
 	ReadingLanguage(ctx context.Context) string
 	RemoveAttachmentAt(ctx context.Context, draftID, attachmentID, revision int64) (int64, error)
 	ResolveAll(ctx context.Context, runID int64, accept bool) error

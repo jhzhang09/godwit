@@ -22,6 +22,7 @@ import {
   type WitEvent,
   type WitHistory,
 } from "@/mygo";
+import { brightness, type Color, parse } from "@/reader/dark";
 import { type T, timeZone, useT } from "@/shared/i18n";
 import { material } from "@/shared/material";
 import { applyTheme, type Theme } from "@/shared/theme";
@@ -229,6 +230,88 @@ const fmt = (d: Date) =>
 /** The read-only signature: Go's sanitized HTML (core.SignatureShown), "" for none. */
 const sigOf = (s: { signatureHtml: string }) => s.signatureHtml;
 
+function parseOpaqueColor(value: string): Color | null {
+  const c = parse(value.trim());
+  return c && c[3] >= 0.1 ? c : null;
+}
+
+/** The read-only quoted mail: Go's sanitized HTML (core.QuoteShown), links inert, dark-mode readable. */
+function QuotePreview({ html }: { html: string }) {
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const root = ref.current;
+    if (!root) return;
+    const onClick = (e: MouseEvent) => {
+      if ((e.target as HTMLElement | null)?.closest("a")) e.preventDefault();
+    };
+    root.addEventListener("click", onClick);
+    return () => root.removeEventListener("click", onClick);
+  }, []);
+
+  useLayoutEffect(() => {
+    const root = ref.current;
+    if (!root || !html) return;
+    const originals = new Map<HTMLElement, string | null>();
+    const restore = () => {
+      for (const [el, style] of originals) {
+        if (style === null) el.removeAttribute("style");
+        else el.setAttribute("style", style);
+      }
+      originals.clear();
+    };
+    const update = () => {
+      restore();
+      if (!document.documentElement.classList.contains("dark")) return;
+      const updates: Array<[HTMLElement, string]> = [];
+      for (const el of root.querySelectorAll<HTMLElement>("*")) {
+        if (el.style.color === "" && !el.hasAttribute("color")) continue;
+        const fg =
+          parse(getComputedStyle(el).color) ??
+          parse(el.style.color || el.getAttribute("color") || "");
+        if (!fg || fg[3] <= 0) continue;
+        const b = brightness(fg);
+        if (b >= 110) continue;
+        let onLight = false;
+        for (let cur: HTMLElement | null = el; cur; cur = cur === root ? null : cur.parentElement) {
+          const bg =
+            parseOpaqueColor(getComputedStyle(cur).backgroundColor) ??
+            parseOpaqueColor(cur.style.backgroundColor || cur.getAttribute("bgcolor") || "");
+          if (bg) {
+            onLight = brightness(bg) >= 128;
+            break;
+          }
+        }
+        if (onLight) continue;
+        const t = Math.max(0.55, (195 - b) / (255 - b));
+        const lifted = `rgb(${Math.round(fg[0] + (255 - fg[0]) * t)}, ${Math.round(fg[1] + (255 - fg[1]) * t)}, ${Math.round(fg[2] + (255 - fg[2]) * t)})`;
+        updates.push([el, lifted]);
+      }
+      for (const [el, color] of updates) {
+        if (!originals.has(el)) originals.set(el, el.getAttribute("style"));
+        el.style.setProperty("color", color, "important");
+      }
+    };
+    update();
+    const observer = new MutationObserver(update);
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
+    return () => {
+      observer.disconnect();
+      restore();
+    };
+  }, [html]);
+
+  return (
+    <div
+      ref={ref}
+      data-slot="quote-preview"
+      className="mt-2 overflow-x-auto text-xs leading-relaxed text-muted-foreground [&_a]:underline [&_blockquote]:border-l-2 [&_blockquote]:pl-3 [&_img]:h-auto [&_img]:max-w-full [&_ol]:list-decimal [&_ol]:pl-6 [&_table]:max-w-full [&_ul]:list-disc [&_ul]:pl-6"
+      // biome-ignore lint/security/noDangerouslySetInnerHtml: Go sanitized it (QuoteShown) before inlining its images
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
+  );
+}
+
 const editOf = (s: ComposeState): ComposeEdit => ({
   to: s.to,
   cc: s.cc,
@@ -307,6 +390,7 @@ function Compose({
   const [fromProgram, setFromProgram] = useState(state.fromProgram); // ADR 0043: check before sending
   const [signature, setSignature] = useState(sigOf(state));
   const [quote, setQuote] = useState(state.quote);
+  const [quoteHtml, setQuoteHtml] = useState(state.quoteHtml ?? "");
   const [showQuote, setShowQuote] = useState(false);
   const [attachments, setAttachments] = useState<Attachment[]>(state.attachments);
   const [smime, setSmime] = useState<ComposeSMIME | undefined>(state.smime);
@@ -848,6 +932,7 @@ function Compose({
       setFromProgram(l.fromProgram);
       setSignature(sigOf(l));
       setQuote(l.quote);
+      setQuoteHtml(l.quoteHtml ?? "");
       setAttachments(l.attachments);
       if (l.smime) {
         ++smimeSeq.current;
@@ -905,7 +990,7 @@ function Compose({
           dangerouslySetInnerHTML={{ __html: signature }}
         />
       )}
-      {quote && (
+      {(quote || quoteHtml) && (
         <div className="mt-2 text-xs text-muted-foreground">
           <Button
             variant="ghost"
@@ -919,7 +1004,12 @@ function Compose({
             />
             {t("compose.quote.show")}
           </Button>
-          {showQuote && <div className="mt-2 whitespace-pre-wrap border-l-2 pl-3">{quote}</div>}
+          {showQuote &&
+            (quoteHtml ? (
+              <QuotePreview html={quoteHtml} />
+            ) : (
+              <div className="mt-2 whitespace-pre-wrap border-l-2 pl-3">{quote}</div>
+            ))}
         </div>
       )}
     </>

@@ -1378,12 +1378,19 @@ func (s *Service) prepareReplyMail(ctx context.Context, _ Conversation, raw json
 	if in.ReplyAll {
 		mode = "reply_all"
 	}
-	d, err := s.buildDraft(ctx, accID, mode, msgID)
+	d, quoteImgs, err := s.buildDraftWithImages(ctx, accID, mode, msgID)
 	if err != nil {
 		return prepared{}, err
 	}
+	var extraCIDs map[string]bool
+	if len(quoteImgs) > 0 {
+		extraCIDs = make(map[string]bool, len(quoteImgs))
+		for _, img := range quoteImgs {
+			extraCIDs[img.ContentID] = true
+		}
+	}
 	bodyHTML := mail.StripMarkers(ensureHTML(in.HTML)) + d.HTML
-	sanitized, err := s.sanitizeDraft(ctx, bodyHTML)
+	sanitized, err := s.sanitizeDraftFor(ctx, 0, bodyHTML, extraCIDs)
 	if err != nil {
 		return prepared{}, err
 	}
@@ -1440,12 +1447,19 @@ func (s *Service) prepareForwardMail(ctx context.Context, _ Conversation, raw js
 		return prepared{}, fmt.Errorf("mail %d %w", in.ID, errMailNotFound)
 	}
 	accID := store.Int(rows.Values[0][0])
-	d, err := s.buildDraft(ctx, accID, "forward", msgID)
+	d, quoteImgs, err := s.buildDraftWithImages(ctx, accID, "forward", msgID)
 	if err != nil {
 		return prepared{}, err
 	}
+	var extraCIDs map[string]bool
+	if len(quoteImgs) > 0 {
+		extraCIDs = make(map[string]bool, len(quoteImgs))
+		for _, img := range quoteImgs {
+			extraCIDs[img.ContentID] = true
+		}
+	}
 	bodyHTML := mail.StripMarkers(ensureHTML(in.HTML)) + d.HTML
-	sanitized, err := s.sanitizeDraft(ctx, bodyHTML)
+	sanitized, err := s.sanitizeDraftFor(ctx, 0, bodyHTML, extraCIDs)
 	if err != nil {
 		return prepared{}, err
 	}
@@ -1482,6 +1496,34 @@ func (s *Service) applyReplyOrForwardDraft(ctx context.Context, a Approval) ([]s
 		return nil, nil, nil, err
 	}
 	draftID := res.LastInsertID
+	if in.SourceMessageID > 0 {
+		want := make(map[string]bool)
+		for _, cid := range mail.CIDs(in.HTML) {
+			if strings.HasPrefix(cid, "quote-") {
+				want[cid] = true
+			}
+		}
+		if len(want) > 0 {
+			msgAccID := in.AccountID
+			if mr, qerr := s.db.Query(ctx, "SELECT account_id FROM messages WHERE id = ?", in.SourceMessageID); qerr == nil && len(mr.Values) > 0 {
+				msgAccID = store.Int(mr.Values[0][0])
+			}
+			if orig, decInline, serr := s.sourceMessage(ctx, msgAccID, in.SourceMessageID); serr == nil {
+				if inlineMap, ierr := s.sourceInlineMap(ctx, in.SourceMessageID, orig, decInline); ierr == nil {
+					_, srcImgs := mail.PrepareQuoteHTML(orig.HTML, inlineMap)
+					var matched []mail.Attachment
+					for _, img := range srcImgs {
+						if want[img.ContentID] {
+							matched = append(matched, img)
+						}
+					}
+					if serr := s.saveDraftImages(ctx, draftID, matched); serr != nil {
+						return nil, nil, nil, errors.Join(serr, s.deleteDraft(context.WithoutCancel(ctx), draftID))
+					}
+				}
+			}
+		}
+	}
 	if in.Mode == "forward" && in.SourceMessageID > 0 {
 		if err := s.copyAttachments(ctx, draftID, in.SourceMessageID); err != nil {
 			// No half-made forward: the user could send it without its files.

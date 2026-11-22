@@ -27,8 +27,8 @@ const (
 	dataScheme = "godwit-data:"
 )
 
-// Safe CSS values: no parentheses except rgb()/rgba(), so url(), expression() and @import cannot occur.
-var cssValue = regexp.MustCompile(`(?i)^([a-z0-9#%.,/\s'"\-+_]|rgba?\([0-9.,\s%]*\))+$`)
+// Safe CSS values: no parentheses except rgb()/rgba()/hsl()/hsla(), so url(), expression() and @import cannot occur.
+var cssValue = regexp.MustCompile(`(?i)^([\p{L}\p{N}#%.,/\s'"\-+_!]|(?:rgba?|hsla?)\([0-9.,\s%]*\))+$`)
 
 var cssProps = []string{
 	"color", "background-color", "font-family", "font-size", "font-weight", "font-style", "text-align",
@@ -46,7 +46,7 @@ var cssProps = []string{
 	"border-top-style", "border-right-style", "border-bottom-style", "border-left-style",
 	"border-top-color", "border-right-color", "border-bottom-color", "border-left-color",
 	"overflow", "overflow-x", "overflow-y", "opacity", "letter-spacing", "text-transform", "text-indent",
-	"white-space", "word-break", "list-style-type", "background", "font", "box-shadow", "text-shadow",
+	"white-space", "word-break", "word-wrap", "overflow-wrap", "list-style", "list-style-type", "background", "font", "box-shadow", "text-shadow",
 	"table-layout", "clear", "outline", "empty-cells", "direction",
 }
 
@@ -247,9 +247,8 @@ func prepare(src string, received bool) (string, int, int, []styleSheet, []strin
 					st = rest
 				}
 			}
-			if received { // bluemonday drops a whole style it cannot parse, as "a: b;\n  " can be
-				st = cleanStyle(st)
-			}
+			// bluemonday drops a whole style it cannot parse, as "a: b;\n  " can be
+			st = cleanStyle(st)
 			if st != s {
 				setAttr(n, "style", st)
 			}
@@ -455,7 +454,15 @@ func cleanStyle(s string) string {
 	var out []string
 	for _, d := range splitAt(ts, ";") {
 		if d = trimS(d); len(d) > 0 {
-			out = append(out, join(d))
+			var b strings.Builder
+			for _, t := range d {
+				if t.Type == scanner.TokenS {
+					b.WriteByte(' ')
+				} else {
+					b.WriteString(t.Value)
+				}
+			}
+			out = append(out, b.String())
 		}
 	}
 	return strings.Join(out, "; ")

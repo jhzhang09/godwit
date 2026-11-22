@@ -250,12 +250,16 @@ func (p *ComposePage) Load(ctx context.Context) (ComposeState, error) {
 		return ComposeState{}, err
 	}
 	editable := s.adopt(d)
+	quoteHTML, err := svc.QuoteShown(ctx, d.ID, s.quote)
+	if err != nil {
+		return ComposeState{}, err
+	}
 	sig, err := svc.SignatureShown(ctx, s.signature)
 	if err != nil {
 		return ComposeState{}, err
 	}
 	out := ComposeState{SignatureHTML: sig, Wit: wit, DraftID: d.ID, From: d.AccountID, To: nz(d.To), Cc: nz(d.Cc), Bcc: nz(d.Bcc),
-		ReplyTo: d.ReplyTo, Subject: d.Subject, Body: editable, Quote: mail.HTMLToText(s.quote),
+		ReplyTo: d.ReplyTo, Subject: d.Subject, Body: editable, Quote: mail.HTMLToText(s.quote), QuoteHTML: quoteHTML,
 		Attachments: attachments(d), Revision: d.Revision,
 		UpdatedAt: d.UpdatedAt.UnixMilli(), Theme: ThemeOf(st), Locale: i18n.Language(), FromProgram: d.FromProgram,
 		SMIME: smimeOf(ctx, svc, d.ID)}

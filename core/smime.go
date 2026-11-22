@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"strings"
 
 	"github.com/egoist/mygo/plugins/sqlite"
 	"github.com/emmansun/gmsm/smx509"
 	gomail "github.com/godwit-email/godwit/core/mail"
 	"github.com/godwit-email/godwit/core/store"
 	"github.com/godwit-email/godwit/internal/i18n"
+	"github.com/godwit-email/godwit/internal/imagefetch"
 	"github.com/godwit-email/godwit/internal/smime"
 )
 
@@ -98,13 +100,23 @@ func FormatSMIMEError(err error) string {
 	return err.Error()
 }
 
+// DecryptedInlineImage holds a validated inline image from a decrypted S/MIME
+// message in memory for quoting when replying or forwarding.
+type DecryptedInlineImage struct {
+	ContentID   string
+	ContentType string
+	Data        []byte
+}
+
 // DecryptedBody holds reader-decrypted S/MIME content transiently in memory
 // for the calling RoleUI session only.
 type DecryptedBody struct {
-	HTML        string
-	Text        string
-	Truncated   bool
-	Attachments []AttachmentInfo
+	HTML         string
+	QuoteHTML    string
+	Text         string
+	Truncated    bool
+	Attachments  []AttachmentInfo
+	InlineImages []DecryptedInlineImage
 }
 
 type decryptedEntry struct {
@@ -227,21 +239,81 @@ func (s *Service) SetDecryptedBody(ctx context.Context, messageID int64, body De
 	if body.HTML != "" {
 		body.HTML, _, _ = gomail.Sanitize(body.HTML, nil, false)
 	}
+	rawQuoteHTML := body.QuoteHTML
+	var cleanImgs []DecryptedInlineImage
+	if body.QuoteHTML != "" {
+		rawInline := make(map[string]gomail.Attachment, len(body.InlineImages))
+		for _, img := range body.InlineImages {
+			cid := strings.TrimSpace(strings.Trim(strings.TrimSpace(img.ContentID), "<>"))
+			if cid == "" || len(img.Data) == 0 || len(img.Data) > imagefetch.MaxImageBytes {
+				continue
+			}
+			if _, ok := rawInline[cid]; !ok {
+				rawInline[cid] = gomail.Attachment{ContentID: cid, ContentType: img.ContentType, Data: img.Data}
+			}
+		}
+		var imgs []gomail.Attachment
+		body.QuoteHTML, imgs = gomail.PrepareQuoteHTML(body.QuoteHTML, rawInline)
+		for _, a := range imgs {
+			cleanImgs = append(cleanImgs, DecryptedInlineImage{
+				ContentID:   a.ContentID,
+				ContentType: a.ContentType,
+				Data:        a.Data,
+			})
+		}
+	} else if len(body.InlineImages) > 0 {
+		imgBudget := imagefetch.NewBudget()
+		seen := make(map[string]bool)
+		for _, img := range body.InlineImages {
+			cid := strings.TrimSpace(strings.Trim(strings.TrimSpace(img.ContentID), "<>"))
+			if cid == "" || seen[cid] || len(img.Data) == 0 || len(img.Data) > imagefetch.MaxImageBytes {
+				continue
+			}
+			format, px, err := imagefetch.Config(img.Data)
+			if err != nil || imgBudget.TakeInline(int64(len(img.Data)), px) != nil {
+				continue
+			}
+			seen[cid] = true
+			cleanImgs = append(cleanImgs, DecryptedInlineImage{
+				ContentID:   cid,
+				ContentType: "image/" + format,
+				Data:        slices.Clone(img.Data),
+			})
+		}
+	}
+
 	var atts []AttachmentInfo
-	size := len(body.HTML) + len(body.Text)
+	baseSize := len(body.HTML) + len(body.QuoteHTML) + len(body.Text)
 	for _, a := range body.Attachments {
 		if smime.IsPart(a.ContentType, a.Filename) {
 			continue
 		}
 		atts = append(atts, a)
-		size += len(a.Filename) + len(a.ContentType) + 32
+		baseSize += len(a.Filename) + len(a.ContentType) + 32
 	}
 	body.Attachments = atts
 
+	imgSize := 0
+	for _, img := range cleanImgs {
+		imgSize += len(img.ContentID) + len(img.ContentType) + len(img.Data) + 32
+	}
 	const (
 		budget     = 24 << 20
 		maxEntries = 64
 	)
+	if baseSize+imgSize > budget {
+		cleanImgs = nil
+		imgSize = 0
+		if rawQuoteHTML != "" {
+			body.QuoteHTML = gomail.StripMarkers(gomail.SanitizeCompose(gomail.InlineQuoteCSS(rawQuoteHTML)))
+			baseSize = len(body.HTML) + len(body.QuoteHTML) + len(body.Text)
+			for _, a := range body.Attachments {
+				baseSize += len(a.Filename) + len(a.ContentType) + 32
+			}
+		}
+	}
+	body.InlineImages = cleanImgs
+	size := baseSize + imgSize
 	if size > budget {
 		return nil
 	}
@@ -281,6 +353,7 @@ func (s *Service) decryptedBody(ctx context.Context, messageID int64) (Decrypted
 			}
 			out := e.body
 			out.Attachments = slices.Clone(e.body.Attachments)
+			out.InlineImages = slices.Clone(e.body.InlineImages)
 			return out, true
 		}
 	}

@@ -322,9 +322,9 @@ func (p *mailPage) reload() {
 			items, viewGroups, err = fetchView(ctx, a.svc, savedViewID, viewWant)
 		case isDrafts:
 			drafts, err = a.svc.ListDrafts(ctx, draftsAcc)
-			for i := range drafts { // shown, never saved: signature images as data: (richtext's only kind)
+			for i := range drafts { // shown, never saved: signature and draft images as data: (richtext's only kind)
 				if err == nil {
-					drafts[i].HTML, err = a.svc.InlineSignatureImages(ctx, drafts[i].HTML)
+					drafts[i].HTML, err = a.svc.InlineDraftImages(ctx, drafts[i].ID, drafts[i].HTML)
 				}
 			}
 		default:

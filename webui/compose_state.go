@@ -115,10 +115,13 @@ type ComposeState struct {
 	Subject string   `json:"subject"`
 	// Body is the editable part as sanitized HTML.
 	Body string `json:"body"`
-	// Quote is read-only plain text. SignatureHTML is the signature as
-	// sanitized HTML, its images as data: URLs (core.SignatureShown), ""
-	// for none: the page shows it as is, read-only.
+	// Quote is read-only plain text. QuoteHTML is the quoted message as
+	// sanitized HTML with its inline images as data: URLs (core.QuoteShown),
+	// "" for none. SignatureHTML is the signature as sanitized HTML, its
+	// images as data: URLs (core.SignatureShown), "" for none: the page
+	// shows both as is, read-only.
 	Quote         string `json:"quote"`
+	QuoteHTML     string `json:"quoteHtml"`
 	SignatureHTML string `json:"signatureHtml"`
 	// Attachments are the draft's files.
 	Attachments []Attachment `json:"attachments"`

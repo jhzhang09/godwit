@@ -3,6 +3,7 @@ package core
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"net"
 	netmail "net/mail"
 	"os"
@@ -876,4 +877,96 @@ func TestOutboxItemTo(t *testing.T) {
 	out, err = e.s.ListOutbox(bg, e.acc.ID)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"lei@example.com", "bob@example.com", "dave@example.com"}, out[0].To)
+}
+
+func TestReplyPreservesFormattingAndInlineImages(t *testing.T) {
+	const png1B64 = "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAFklEQVR4nGPQKLpFEmIY1TCqYfhqAAASZ3QQWUKpQAAAAABJRU5ErkJggg=="
+	const png2B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+	png1Bytes, err := base64.StdEncoding.DecodeString(png1B64)
+	require.NoError(t, err)
+	png2Bytes, err := base64.StdEncoding.DecodeString(png2B64)
+	require.NoError(t, err)
+
+	e := newSendEnv(t, false)
+	im2 := testmail.StartIMAP(t)
+	smtp2, _ := testmail.StartSMTP(t)
+	acc2, err := e.s.AddAccount(bg, internalInput(t, im2.Addr, smtp2, "alice2@example.com", false))
+	require.NoError(t, err)
+
+	raw := "Message-ID: <fmt-img@x>\r\nFrom: Bob <bob@example.com>\r\nTo: alice@example.com\r\nSubject: Formatted\r\n" +
+		"Date: Mon, 05 Oct 2026 10:00:00 +0000\r\nMIME-Version: 1.0\r\nContent-Type: multipart/related; boundary=\"REL\"\r\n\r\n" +
+		"--REL\r\nContent-Type: text/html; charset=utf-8\r\n\r\n" +
+		`<html><head><style>.card { color: #123456; font-family: '微软雅黑', sans-serif; }</style></head><body>` +
+		`<p class="card" style="margin-top: 8px;` + "\n" + `  color: #654321;">Hello</p>` +
+		`<img src="cid:img1@x" alt="one">` +
+		`<img src="data:image/png;base64,` + png2B64 + `" alt="two">` +
+		`</body></html>` + "\r\n" +
+		"--REL\r\nContent-Type: image/png\r\nContent-ID: <img1@x>\r\nContent-Disposition: inline; filename=\"one.png\"\r\nContent-Transfer-Encoding: base64\r\n\r\n" +
+		png1B64 + "\r\n--REL--\r\n"
+	e.put(t, "INBOX", raw)
+	e.sync(t)
+
+	srcID := e.idOf(t, "fmt-img@x")
+	d, err := e.s.NewDraft(bg, e.acc.ID, "reply", srcID)
+	require.NoError(t, err)
+	assert.Contains(t, d.HTML, "font-family:")
+	assert.Contains(t, d.HTML, "微软雅黑")
+	assert.Contains(t, d.HTML, "color: #654321")
+	cids := mail.CIDs(d.HTML)
+	require.Len(t, cids, 2)
+	for _, cid := range cids {
+		assert.True(t, strings.HasPrefix(cid, "quote-"), cid)
+	}
+
+	// SaveDraft, SetDraftAccount, and GetDraft keep formatting and quote images.
+	ed, q, sig := mail.SplitDraft(d.HTML)
+	d.HTML = mail.JoinDraft("<p>Got it</p>"+ed, q, sig)
+	d, err = e.s.SaveDraft(bg, d)
+	require.NoError(t, err)
+	d, err = e.s.SetDraftAccount(bg, d.ID, acc2.ID, d.Revision)
+	require.NoError(t, err)
+	d, err = e.s.GetDraft(bg, d.ID)
+	require.NoError(t, err)
+	assert.Equal(t, cids, mail.CIDs(d.HTML))
+
+	_, qAfter, _ := mail.SplitDraft(d.HTML)
+	shownQuote, err := e.s.QuoteShown(bg, d.ID, qAfter)
+	require.NoError(t, err)
+	assert.Contains(t, shownQuote, "data:image/png;base64,")
+	assert.NotContains(t, shownQuote, "data-godwit")
+	assert.Contains(t, shownQuote, "微软雅黑")
+
+	shownDraft, err := e.s.InlineDraftImages(bg, d.ID, d.HTML)
+	require.NoError(t, err)
+	assert.Contains(t, shownDraft, "data:image/png;base64,")
+
+	// DeleteDraft cascades and clears draft_images.
+	d2, err := e.s.NewDraft(bg, e.acc.ID, "reply", srcID)
+	require.NoError(t, err)
+	require.NotEmpty(t, e.rows(t, "SELECT cid FROM draft_images WHERE draft_id = ?", d2.ID))
+	require.NoError(t, e.s.DeleteDraft(bg, d2.ID))
+	assert.Empty(t, e.rows(t, "SELECT cid FROM draft_images WHERE draft_id = ?", d2.ID))
+
+	// Switch back to e.acc so Send delivers through e.smtp, then inspect the sent email.
+	d, err = e.s.SetDraftAccount(bg, d.ID, e.acc.ID, d.Revision)
+	require.NoError(t, err)
+	require.NoError(t, e.s.Send(bg, d.ID))
+	e.clock.Advance(UndoSendWindow)
+	e.sync(t)
+
+	got := e.smtp.Messages()
+	require.Len(t, got, 1)
+	assert.Contains(t, string(got[0].Data), "multipart/related")
+	parsed, err := mail.Parse(got[0].Data)
+	require.NoError(t, err)
+	assert.Contains(t, parsed.HTML, "微软雅黑")
+	assert.Contains(t, parsed.HTML, "color: #654321")
+	byCID := make(map[string][]byte)
+	for _, a := range parsed.Attachments {
+		if a.ContentID != "" {
+			byCID[a.ContentID] = a.Data
+		}
+	}
+	assert.Equal(t, png1Bytes, byCID[cids[0]])
+	assert.Equal(t, png2Bytes, byCID[cids[1]])
 }

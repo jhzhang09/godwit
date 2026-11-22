@@ -14,6 +14,7 @@ import (
 	"github.com/emmansun/gmsm/pkcs7"
 	"github.com/godwit-email/godwit/core/gateway"
 	"github.com/godwit-email/godwit/core/internal/testllm"
+	gomail "github.com/godwit-email/godwit/core/mail"
 	"github.com/godwit-email/godwit/core/store"
 	"github.com/godwit-email/godwit/internal/carddav"
 	"github.com/godwit-email/godwit/internal/i18n"
@@ -847,4 +848,76 @@ func TestSMIMEAllowWeakKeyAccountAndFormat(t *testing.T) {
 	require.NoError(t, e.s.RemoveAccount(ctx, e.acc.ID))
 	rows := e.rows(t, "SELECT value FROM settings WHERE key = ?", fmt.Sprintf("smime.allow_weak_key.%d", e.acc.ID))
 	require.Empty(t, rows)
+}
+
+func TestSMIMEReplyQuotesDecryptedBodyAndInlineImages(t *testing.T) {
+	const pngB64 = "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAFklEQVR4nGPQKLpFEmIY1TCqYfhqAAASZ3QQWUKpQAAAAABJRU5ErkJggg=="
+	pngBytes, err := base64.StdEncoding.DecodeString(pngB64)
+	require.NoError(t, err)
+
+	e := newSendEnv(t, false)
+	encRaw := "Message-ID: <enc-reply@x>\r\nFrom: Bob <bob@example.com>\r\nTo: alice@example.com\r\nSubject: Secret Plan\r\n" +
+		"Date: Mon, 05 Oct 2026 10:00:00 +0000\r\nMIME-Version: 1.0\r\n" +
+		"Content-Type: application/pkcs7-mime; smime-type=enveloped-data; name=\"smime.p7m\"\r\nContent-Transfer-Encoding: base64\r\n\r\nAAAA\r\n"
+	e.put(t, "INBOX", encRaw)
+	e.sync(t)
+	encID := e.idOf(t, "enc-reply@x")
+
+	// Non-UI context must not receive decrypted content.
+	nonUI, err := e.s.NewDraft(t.Context(), e.acc.ID, "reply", encID)
+	require.NoError(t, err)
+	assert.NotContains(t, nonUI.HTML, "Secret Q4")
+	assert.Empty(t, gomail.CIDs(nonUI.HTML))
+
+	uiCtx := WithUISession(t.Context(), e.s)
+	require.NoError(t, e.s.SetDecryptedBody(uiCtx, encID, DecryptedBody{
+		HTML:      `<p>Secret Q4 details</p>`,
+		QuoteHTML: `<style>.s { color: #2b579a; }</style><p class="s">Secret Q4 details</p><img src="cid:sec@x">`,
+		Text:      "Secret Q4 details",
+		InlineImages: []DecryptedInlineImage{
+			{ContentID: "sec@x", ContentType: "image/png", Data: pngBytes},
+		},
+	}))
+
+	d, err := e.s.NewDraft(uiCtx, e.acc.ID, "reply", encID)
+	require.NoError(t, err)
+	assert.Contains(t, d.HTML, "Secret Q4 details")
+	assert.Contains(t, d.HTML, "color: #2b579a")
+	cids := gomail.CIDs(d.HTML)
+	require.Len(t, cids, 1)
+	assert.True(t, strings.HasPrefix(cids[0], "quote-"))
+
+	d.HTML = "<p>Acknowledged</p>" + d.HTML
+	d, err = e.s.SaveDraft(uiCtx, d)
+	require.NoError(t, err)
+	require.NoError(t, e.s.Send(uiCtx, d.ID))
+	e.clock.Advance(UndoSendWindow)
+	e.sync(t)
+
+	got := e.smtp.Messages()
+	require.Len(t, got, 1)
+	parsed, err := gomail.Parse(got[0].Data)
+	require.NoError(t, err)
+	assert.Contains(t, parsed.HTML, "Secret Q4 details")
+	assert.Contains(t, parsed.HTML, "color: #2b579a")
+	require.Len(t, parsed.Attachments, 1)
+	assert.Equal(t, cids[0], parsed.Attachments[0].ContentID)
+	assert.Equal(t, pngBytes, parsed.Attachments[0].Data)
+}
+
+func TestSMIMEForwardSkipsSMIMEParts(t *testing.T) {
+	e := newSendEnv(t, false)
+	raw := "Message-ID: <signed-fwd@x>\r\nFrom: Bob <bob@example.com>\r\nTo: alice@example.com\r\nSubject: Signed\r\n" +
+		"Date: Mon, 05 Oct 2026 10:00:00 +0000\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"MX\"\r\n\r\n" +
+		"--MX\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nBody text\r\n" +
+		"--MX\r\nContent-Type: application/pdf\r\nContent-Disposition: attachment; filename=\"report.pdf\"\r\nContent-Transfer-Encoding: base64\r\n\r\nJVBERi0xLjQK\r\n" +
+		"--MX\r\nContent-Type: application/pkcs7-signature; name=\"smime.p7s\"\r\nContent-Disposition: attachment; filename=\"smime.p7s\"\r\nContent-Transfer-Encoding: base64\r\n\r\nAAAA\r\n" +
+		"--MX--\r\n"
+	e.put(t, "INBOX", raw)
+	e.sync(t)
+
+	d, err := e.s.NewDraft(bg, e.acc.ID, "forward", e.idOf(t, "signed-fwd@x"))
+	require.NoError(t, err)
+	require.Len(t, d.Attachments, 1)
+	assert.Equal(t, "report.pdf", d.Attachments[0].Filename)
 }

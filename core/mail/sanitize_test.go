@@ -558,3 +558,55 @@ func TestSanitizeDarkCanvasBounds(t *testing.T) {
 		`<table width="100%" bgcolor="#222"><tr><td>Footer</td></tr></table></td></tr></table></td></tr></table>`),
 		"a dark footer deep in a light mail")
 }
+
+func TestSanitizeComposePreservesUnicodeAndMultilineStyles(t *testing.T) {
+	in := `<p style="
+      color: #333333 !important;
+      font-family: '微软雅黑', 等线, sans-serif;
+      font-size: 14px;
+      background-color: hsla(120, 50%, 50%, 0.5);
+      word-wrap: break-word;
+      overflow-wrap: anywhere;
+      list-style: disc inside;
+  ">中文样式</p>`
+	safe := mail.SanitizeCompose(in)
+	for _, want := range []string{"color: #333333", "微软雅黑", "等线", "font-size: 14px", "hsla(120, 50%, 50%, 0.5)", "word-wrap: break-word", "overflow-wrap: anywhere", "list-style: disc inside"} {
+		assert.Contains(t, safe, want)
+	}
+}
+
+func TestInlineQuoteCSS(t *testing.T) {
+	in := `<html><head><style>
+		p { color: #222; margin: 0; }
+		.hdr { font-family: '微软雅黑', sans-serif; color: #444; }
+		p.hdr { font-size: 14px; }
+		#box > span { font-weight: bold; }
+		div > p span { text-decoration: underline; }
+		.unsafe { position: fixed; background-image: url(https://evil.example/x.png); color: expression(alert(1)); }
+		@media (prefers-color-scheme: dark) { p { color: #eee; } }
+		@media print { p { color: #999; } }
+	</style></head><body>
+		<div id="box"><span id="direct">Direct</span><p class="hdr" style="color: #111"><span>Hello</span></p></div>
+		<section><p><span>NoDivParent</span></p></section>
+		<div><section><p><span>NestedUnderDivAndP</span></p></section></div>
+		<p class="unsafe">SafeText</p>
+	</body></html>`
+	out := mail.InlineQuoteCSS(in)
+	assert.NotContains(t, out, "<style")
+	assert.Contains(t, out, "微软雅黑")
+	assert.Contains(t, out, "font-size: 14px")
+	assert.Contains(t, out, "color: #444; font-size: 14px; color: #111")
+	assert.Contains(t, out, `<span id="direct" style="font-weight: bold">Direct</span>`)
+	assert.Contains(t, out, `<span style="text-decoration: underline">Hello</span>`)
+	assert.NotContains(t, out, "position")
+	assert.NotContains(t, out, "evil.example")
+	assert.NotContains(t, out, "expression")
+	assert.NotContains(t, out, "#eee")
+	assert.NotContains(t, out, "#999")
+
+	// Backtracking check: inner <div> is not a direct child of .a, outer <div> is.
+	nested := `<style>.a > div span { color: #abc; }</style><div class="a"><div><div><span id="t1">hit</span></div></div></div><div><div><span id="t2">miss</span></div></div>`
+	nestedOut := mail.InlineQuoteCSS(nested)
+	assert.Contains(t, nestedOut, `id="t1" style="color: #abc"`)
+	assert.NotContains(t, nestedOut, `id="t2" style=`)
+}

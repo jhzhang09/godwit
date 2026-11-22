@@ -719,3 +719,27 @@ func TestComposePopupMenu(t *testing.T) {
 	assert.ErrorIs(t, err, ErrNoDraft)
 	assert.Equal(t, "", id)
 }
+
+func TestComposeLoadRichQuoteWithInlineImage(t *testing.T) {
+	const pngB64 = "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAFklEQVR4nGPQKLpFEmIY1TCqYfhqAAASZ3QQWUKpQAAAAABJRU5ErkJggg=="
+	f := newFixture(t)
+	raw := "Message-ID: <rich-q@x>\r\nFrom: Bob <bob@example.com>\r\nTo: alice@example.com\r\nSubject: Rich Quote\r\n" +
+		"Date: Mon, 05 Oct 2026 10:00:00 +0000\r\nMIME-Version: 1.0\r\nContent-Type: multipart/related; boundary=\"RL\"\r\n\r\n" +
+		"--RL\r\nContent-Type: text/html; charset=utf-8\r\n\r\n" +
+		`<style>.q { color: #334455; }</style><p class="q">quoted text</p><img src="cid:pic@x" alt="pic">` + "\r\n" +
+		"--RL\r\nContent-Type: image/png\r\nContent-ID: <pic@x>\r\nContent-Disposition: inline; filename=\"pic.png\"\r\nContent-Transfer-Encoding: base64\r\n\r\n" +
+		pngB64 + "\r\n--RL--\r\n"
+	f.e.Deliver(t, f.acc.ID, "INBOX", []byte(raw))
+	page, err := f.e.Svc.ListMessages(t.Context(), core.View{Unified: "inbox"}, "", 10)
+	require.NoError(t, err)
+	require.NotEmpty(t, page.Items)
+	d := f.draft(t, "reply", page.Items[0].ID)
+
+	f.c.Attach(1, d.ID)
+	st, err := f.page.Load(f.ctx(1))
+	require.NoError(t, err)
+	assert.Contains(t, st.Quote, "quoted text")
+	assert.Contains(t, st.QuoteHTML, "color: #334455")
+	assert.Contains(t, st.QuoteHTML, "data:image/png;base64,")
+	assert.NotContains(t, st.QuoteHTML, "data-godwit")
+}

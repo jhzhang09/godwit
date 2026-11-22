@@ -862,6 +862,14 @@ var Migrations = [][]string{{
 	// A draft a program (the Local API, godwit mcp, a plugin or Wit) created or
 	// changed; local only, never an IMAP keyword (ADR 0043).
 	`ALTER TABLE drafts ADD COLUMN from_program INTEGER NOT NULL DEFAULT 0`,
+}, {
+	`CREATE TABLE IF NOT EXISTS draft_images (
+		draft_id INTEGER NOT NULL REFERENCES drafts(id) ON DELETE CASCADE,
+		cid TEXT NOT NULL,
+		content_type TEXT NOT NULL,
+		data BLOB NOT NULL,
+		PRIMARY KEY (draft_id, cid)
+	)`,
 }}
 
 // HistoryRowsVersion is the schema version that keeps a conversation's
