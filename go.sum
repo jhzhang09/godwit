@@ -42,8 +42,6 @@ github.com/goccy/go-yaml v1.19.2 h1:PmFC1S6h8ljIz6gMRBopkjP1TVT7xuwrButHID66PoM=
 github.com/goccy/go-yaml v1.19.2/go.mod h1:XBurs7gK8ATbW4ZPGKgcbrY1Br56PdM69F7LkFRi1kA=
 github.com/godbus/dbus/v5 v5.2.2 h1:TUR3TgtSVDmjiXOgAAyaZbYmIeP3DPkld3jgKGV8mXQ=
 github.com/godbus/dbus/v5 v5.2.2/go.mod h1:3AAv2+hPq5rdnr5txxxRwiGjPXamgoIHgz9FPBfOp3c=
-github.com/godwit-email/go-imap/v2 v2.0.0-beta.8.godwit.8 h1:+Y7WPwdOjrhJJJS1cozDROfSNvQ/m3Zo0BGHXrs0CN8=
-github.com/godwit-email/go-imap/v2 v2.0.0-beta.8.godwit.8/go.mod h1:dhoFe2Q0PwLrMD7oZw8ODuaD0vLYPe5uj2wcOMnvh48=
 github.com/godwit-email/go-jmap v0.5.4-godwit.3 h1:gnhzng7oXOkBUpHR/5bUHbmYI0l5kS9R5uiYsjNCT2I=
 github.com/godwit-email/go-jmap v0.5.4-godwit.3/go.mod h1:aOTCtwpZSINpDDSOkLGpHU0Kbbm5lcSDMcobX3ZtOjY=
 github.com/godwit-email/mailservers v0.20261106.1793937071 h1:Yp8Jhtuos4hlmn0hRg80tx8r74cG8gbq3tN3kXgfLco=
@@ -58,6 +56,8 @@ github.com/google/jsonschema-go v0.4.3 h1:/DBOLZTfDow7pe2GmaJNhltueGTtDKICi8V8p+
 github.com/google/jsonschema-go v0.4.3/go.mod h1:r5quNTdLOYEz95Ru18zA0ydNbBuYoo9tgaYcxEYhJVE=
 github.com/gorilla/css v1.0.1 h1:ntNaBIghp6JmvWnxbZKANoLyuXTPZ4cAMlo6RyhlbO8=
 github.com/gorilla/css v1.0.1/go.mod h1:BvnYkspnSzMmwRK+b8/xgNPLiIuNZr6vbZBTPQ2A3b0=
+github.com/jhzhang09/go-imap/v2 v2.0.0-beta.9.godwit.1 h1:Ut3F7u1vPU042dA6DzDCeoc9lftkI2+cZVvC/vB0zbQ=
+github.com/jhzhang09/go-imap/v2 v2.0.0-beta.9.godwit.1/go.mod h1:dhoFe2Q0PwLrMD7oZw8ODuaD0vLYPe5uj2wcOMnvh48=
 github.com/jsummers/gobmp v0.0.0-20230614200233-a9de23ed2e25 h1:YLvr1eE6cdCqjOe972w/cYF+FjW34v27+9Vo5106B4M=
 github.com/jsummers/gobmp v0.0.0-20230614200233-a9de23ed2e25/go.mod h1:kLgvv7o6UM+0QSf0QjAse3wReFDsb9qbZJdfexWlrQw=
 github.com/klauspost/compress v1.18.6 h1:2jupLlAwFm95+YDR+NwD2MEfFO9d4z4Prjl1XXDjuao=
