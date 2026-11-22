@@ -1,84 +1,31 @@
 name: Homebrew
 
-# Writes the cask for a release's macOS disk images, which are on
-# dl.godwit.email, to the tap. release.yml calls it once every platform is
-# uploaded; run it by hand to write the cask again.
+# 从本仓库已发布的 GitHub Release 拉取 SHA256SUMS.txt，
+# 使用 scripts/update-homebrew-tap.sh 同步 Casks/godwit.rb 与 README.md 到 jhzhang09/homebrew-tap。
 on:
-  workflow_call:
-    inputs:
-      tag:
-        type: string
-        required: true
   workflow_dispatch:
     inputs:
       tag:
-        description: The release to write the cask for, e.g. v0.0.0
+        description: "已发布的 Release 标签（如 v1.39.4-smime.1）"
         required: true
+        type: string
 
 permissions:
   contents: read
 
 jobs:
-  cask:
+  tap:
     runs-on: ubuntu-latest
     steps:
-      - name: Write the cask
+      - uses: actions/checkout@v7
+      - name: Download SHA256SUMS and update Homebrew tap
         env:
+          GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag }}
+          HOMEBREW_TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+          TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
         run: |
-          entry() { # entry ARCH: the url and sha256 of the disk image for ARCH, as `mygo build` names it
-            url="https://dl.godwit.email/godwit-${TAG#v}-$1.dmg"
-            curl -fsSL "$url" -o "$1.dmg" || { echo "no $1 disk image at $url" >&2; exit 1; }
-            printf '    url "%s"\n    sha256 "%s"\n' "$url" "$(sha256sum "$1.dmg" | cut -d' ' -f1)"
-          }
-          arm=$(entry arm64); intel=$(entry amd64)
-          mkdir -p tap/Casks
-          cat > tap/Casks/godwit.rb <<CASK
-          cask "godwit" do
-            version "${TAG#v}"
-
-            on_arm do
-          $arm
-            end
-            on_intel do
-          $intel
-            end
-
-            name "Godwit"
-            desc "AI-native email client"
-            homepage "https://godwit.email"
-
-            auto_updates true
-            depends_on macos: ">= :monterey"
-
-            app "Godwit.app"
-
-            zap trash: [
-              "~/Library/Application Support/Godwit",
-              "~/Library/Preferences/email.godwit.app.plist",
-            ]
-          end
-          CASK
-          cat tap/Casks/godwit.rb
-      - uses: actions/upload-artifact@v7
-        with:
-          name: cask
-          path: tap/Casks/godwit.rb
-      - name: Push it to godwit-email/homebrew-tap
-        env:
-          DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }} # write access to the tap only
-          TAG: ${{ inputs.tag }}
-        run: |
-          key="$RUNNER_TEMP/tap_key"
-          printf '%s\n' "$DEPLOY_KEY" > "$key" && chmod 600 "$key"
-          echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" > "$RUNNER_TEMP/known_hosts" # api.github.com/meta
-          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts"
-          git clone -q git@github.com:godwit-email/homebrew-tap.git clone
-          cp tap/Casks/godwit.rb clone/Casks/godwit.rb
-          cd clone
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Casks/godwit.rb
-          git diff --cached --quiet && exit 0
-          git commit -q -m "godwit ${TAG#v}"
-          git push -q
+          set -euo pipefail
+          mkdir -p release-assets
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "SHA256SUMS.txt" --dir release-assets
+          scripts/update-homebrew-tap.sh "$TAG" release-assets/SHA256SUMS.txt
