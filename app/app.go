@@ -33,6 +33,7 @@ type BodyGlassRect struct {
 type Platform interface {
 	OpenURL(url string) error
 	OpenPath(path string) error
+	PreviewPath(path string) error
 	OpenFiles(multiple bool) ([]string, error)
 	OpenImage() (string, error)
 	OpenDirectory() (string, error)

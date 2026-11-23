@@ -592,7 +592,8 @@ func (p *fakePlatform) OpenURL(url string) error {
 	defer p.mu.Unlock()
 	return p.openErr
 }
-func (p *fakePlatform) OpenPath(path string) error { p.record("OpenPath", path); return nil }
+func (p *fakePlatform) OpenPath(path string) error    { p.record("OpenPath", path); return nil }
+func (p *fakePlatform) PreviewPath(path string) error { p.record("PreviewPath", path); return nil }
 func (p *fakePlatform) TypeIcon(string, int) ([]byte, error) {
 	return nil, errors.New("no type icons")
 }

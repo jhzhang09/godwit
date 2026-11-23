@@ -18,6 +18,11 @@ describe("html", () => {
       "<ol><li><p>1</p></li><li><p>2</p></li></ol>",
       "<blockquote><p>q</p></blockquote>",
       '<p><u>u</u> <s>s</s> <span style="font-size: 20px">fs</span> <span style="font-family: Georgia">ff</span></p>',
+      '<p><span style="color: rgb(220, 38, 38); background-color: rgb(254, 240, 138)">hi</span></p>',
+      '<p style="text-align: center">centered</p>',
+      '<p style="margin-left: 48px">indented</p>',
+      "<hr>",
+      "<table><tbody><tr><td><p>a</p></td><td><p>b</p></td></tr></tbody></table>",
       "<p>a<br>b</p>",
       // A trailing soft break is written as richtext.ToHTML writes it: a last <br> alone does not render.
       "<p>a<br><br></p>",
@@ -54,10 +59,10 @@ describe("html", () => {
 
   it("paste keeps only allowed formats", () => {
     const out = round(
-      '<h1 style="color:red">T</h1><table><tr><td>c</td></tr></table><img src="https://t/x.png"><p><u>u</u><s>s</s><span style="font-size:30px">sz</span><span style="color:blue">drop</span><span style="font-size:0px">h</span><span style="font-size:200px">L</span></p>',
+      '<h1 style="color:red">T</h1><table><tr><td>c</td></tr></table><img src="https://t/x.png"><p><u>u</u><s>s</s><span style="font-size:30px">sz</span><span style="color:blue">keep</span><span style="font-size:0px">h</span><span style="font-size:200px">L</span></p>',
     );
     expect(out).toBe(
-      '<p>T</p><p>c</p><p><u>u</u><s>s</s><span style="font-size: 30px">sz</span>drophL</p>',
+      '<p>T</p><table><tbody><tr><td><p>c</p></td></tr></tbody></table><p><u>u</u><s>s</s><span style="font-size: 30px">sz</span><span style="color: blue">keep</span>hL</p>',
     );
   });
 
@@ -82,7 +87,7 @@ describe("html", () => {
     const e = editor();
     fromHTML(e, "<p>x</p>");
     e.tf.select(e.api.end([]));
-    const html = '<h1>T</h1><table><tr><td>c</td></tr></table><img src="https://t/x.png">';
+    const html = '<h1>T</h1><section><p>c</p></section><img src="https://t/x.png">';
     e.tf.insertData({
       getData: (type: string) => (type === "text/html" ? html : ""),
       files: [],

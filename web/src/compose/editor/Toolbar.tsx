@@ -35,6 +35,7 @@ import { Separator } from "@/components/ui/separator";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { T } from "@/shared/i18n";
+import { ColorMenu, InsertMenu, LayoutMenu } from "./FormatMenus";
 import { safeHref } from "./html";
 import { LinkPopover } from "./LinkPopover";
 
@@ -137,8 +138,9 @@ export function Toolbar(props: {
   linkOpen: boolean;
   onLinkOpenChange(open: boolean): void;
   attach?: ReactNode;
+  onPickImages?: () => void;
 }) {
-  const { t, linkOpen, onLinkOpenChange, attach } = props;
+  const { t, linkOpen, onLinkOpenChange, attach, onPickImages } = props;
   const editor = useEditorRef();
   const readOnly = useEditorReadOnly();
   const value = useEditorSelector(active, []).split(" ").filter(Boolean);
@@ -335,6 +337,9 @@ export function Toolbar(props: {
         defaultLabel: t("compose.size_default", "14 pt"),
         className: "min-w-44",
       })}
+      <ColorMenu t={t} saved={saved} />
+      <LayoutMenu t={t} saved={saved} />
+      <InsertMenu t={t} saved={saved} onPickImages={onPickImages} />
       {attach && (
         <>
           <Separator orientation="vertical" className="mx-1.5 h-5 data-vertical:self-center" />
@@ -346,11 +351,25 @@ export function Toolbar(props: {
 }
 
 /** The toolbar while no editor shows (a review or Wit writing in its place): every toggle off. */
-export function IdleToolbar({ t, attach }: { t: T; attach?: ReactNode }) {
+export function IdleToolbar({
+  t,
+  attach,
+  onPickImages,
+}: {
+  t: T;
+  attach?: ReactNode;
+  onPickImages?: () => void;
+}) {
   const editor = usePlateEditor({ plugins: [] });
   return (
     <Plate editor={editor} readOnly>
-      <Toolbar t={t} linkOpen={false} onLinkOpenChange={() => {}} attach={attach} />
+      <Toolbar
+        t={t}
+        linkOpen={false}
+        onLinkOpenChange={() => {}}
+        attach={attach}
+        onPickImages={onPickImages}
+      />
     </Plate>
   );
 }

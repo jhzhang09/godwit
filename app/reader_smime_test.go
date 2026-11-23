@@ -757,3 +757,89 @@ func TestReaderSMIMEWeakKeyWarningAndAccountCompat(t *testing.T) {
 		t.Fatalf("expected openCMSFull to re-run after toggling compat, got %d calls", calls.Load())
 	}
 }
+
+func TestReaderSMIMEAttachmentsPreviewOpenAndInlineFilter(t *testing.T) {
+	if !smime.Supported() {
+		t.Skip("S/MIME not supported on this platform")
+	}
+	h, accs := mailHarness(t, nil, "alice@example.com")
+	h.app.cards = smime.NewSession(h.app.ctx)
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:   big.NewInt(902),
+		Subject:        pkix.Name{CommonName: "Bob Sender"},
+		EmailAddresses: []string{"bob@example.com"},
+		NotBefore:      time.Now().Add(-time.Hour),
+		NotAfter:       time.Now().Add(24 * time.Hour),
+		KeyUsage:       x509.KeyUsageDigitalSignature,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := smime.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tmp := t.TempDir()
+	h.plat.mu.Lock()
+	h.plat.tempDir = tmp
+	h.plat.mu.Unlock()
+
+	const pngB64 = "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAFklEQVR4nGPQKLpFEmIY1TCqYfhqAAASZ3QQWUKpQAAAAABJRU5ErkJggg=="
+	docBytes := []byte("PK-docx-payload")
+	inner := "Content-Type: multipart/mixed; boundary=\"MIX\"\r\n\r\n" +
+		"--MIX\r\nContent-Type: multipart/related; boundary=\"REL\"\r\n\r\n" +
+		"--REL\r\nContent-Type: text/html; charset=utf-8\r\n\r\n" +
+		`<p>请看附件</p><img src="cid:img1@x">` + "\r\n" +
+		"--REL\r\nContent-Type: image/png\r\nContent-ID: <img1@x>\r\nContent-Disposition: inline; filename=\"image001.png\"\r\nContent-Transfer-Encoding: base64\r\n\r\n" +
+		pngB64 + "\r\n--REL--\r\n" +
+		"--MIX\r\nContent-Type: application/vnd.openxmlformats-officedocument.wordprocessingml.document\r\n" +
+		"Content-Disposition: attachment; filename=\"plan.docx\"\r\nContent-Transfer-Encoding: base64\r\n\r\n" +
+		"UEstZG9jeC1wYXlsb2Fk\r\n--MIX--\r\n"
+
+	sd, err := pkcs7.NewSignedData([]byte(inner))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sd.SetDigestAlgorithm(pkcs7.OIDDigestAlgorithmSHA256)
+	if err := sd.AddSigner(cert, key, pkcs7.SignerInfoConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	cms, err := sd.Finish()
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := h.deliverOne(accs[0], makeRawSMIME("Bob <bob@example.com>", accs[0].Email, "att-smime@x", "SMIME Att", string(cms)))
+
+	h.openThread(msg.ThreadID)
+	h.until("smime attachment shown", func() bool {
+		return h.tt.HasText("plan.docx")
+	})
+	if h.tt.HasText("image001.png") {
+		t.Fatal("inline cid body image image001.png must not appear in attachment bar")
+	}
+
+	h.click("plan.docx")
+	opened := h.callArg("OpenPath")
+	if got, err := os.ReadFile(opened); err != nil || !bytes.Equal(got, docBytes) {
+		t.Fatalf("opened %q: %q, %v", opened, got, err)
+	}
+	if filepath.Base(opened) != "plan.docx" || !strings.HasPrefix(opened, tmp+string(filepath.Separator)) {
+		t.Fatalf("opened %q, not plan.docx under %q", opened, tmp)
+	}
+
+	h.click(i18n.T("reader.attachments.preview"))
+	previewed := h.callArg("PreviewPath")
+	if got, err := os.ReadFile(previewed); err != nil || !bytes.Equal(got, docBytes) {
+		t.Fatalf("previewed %q: %q, %v", previewed, got, err)
+	}
+	if filepath.Base(previewed) != "plan.docx" || !strings.HasPrefix(previewed, tmp+string(filepath.Separator)) {
+		t.Fatalf("previewed %q, not plan.docx under %q", previewed, tmp)
+	}
+}

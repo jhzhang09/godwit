@@ -3,7 +3,10 @@ package webui
 import (
 	"context"
 	"errors"
+	"io"
 	"log"
+	"net/http"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -250,6 +253,10 @@ func (p *ComposePage) Load(ctx context.Context) (ComposeState, error) {
 		return ComposeState{}, err
 	}
 	editable := s.adopt(d)
+	bodyHTML, err := svc.InlineDraftImages(ctx, d.ID, editable)
+	if err != nil {
+		return ComposeState{}, err
+	}
 	quoteHTML, err := svc.QuoteShown(ctx, d.ID, s.quote)
 	if err != nil {
 		return ComposeState{}, err
@@ -259,7 +266,7 @@ func (p *ComposePage) Load(ctx context.Context) (ComposeState, error) {
 		return ComposeState{}, err
 	}
 	out := ComposeState{SignatureHTML: sig, Wit: wit, DraftID: d.ID, Accounts: accs, From: d.AccountID, To: nz(d.To), Cc: nz(d.Cc), Bcc: nz(d.Bcc),
-		ReplyTo: d.ReplyTo, Subject: d.Subject, Body: editable, Quote: mail.HTMLToText(s.quote), QuoteHTML: quoteHTML,
+		ReplyTo: d.ReplyTo, Subject: d.Subject, Body: bodyHTML, Quote: mail.HTMLToText(s.quote), QuoteHTML: quoteHTML,
 		Attachments: attachments(d), Revision: d.Revision,
 		UpdatedAt: d.UpdatedAt.UnixMilli(), Theme: ThemeOf(st), Locale: i18n.Language(), FromProgram: d.FromProgram,
 		SMIME: smimeOf(ctx, svc, d.ID)}
@@ -410,6 +417,49 @@ func (p *ComposePage) AddAttachments(ctx context.Context, revision int64) (Attac
 		return AttachResult{}, err
 	}
 	res.Conflict = stale || d.Revision != rev // a write from elsewhere, even with no file picked
+	return res, nil
+}
+
+// PickBodyImages opens the native file picker and returns sanitized data:
+// URLs for PNG/JPEG/GIF/WebP images up to core.DraftInlineImageMax.
+func (p *ComposePage) PickBodyImages(ctx context.Context) (PickBodyImagesResult, error) {
+	win, _, s, err := p.open(ctx)
+	if err != nil {
+		return PickBodyImagesResult{}, err
+	}
+	s.mu.Unlock()
+	if p.d.PickFiles == nil {
+		return PickBodyImagesResult{}, ErrNoPicker
+	}
+	paths, err := p.d.PickFiles(ctx, win)
+	if err != nil {
+		return PickBodyImagesResult{}, err
+	}
+	res := PickBodyImagesResult{URLs: []string{}, Failed: []string{}}
+	for _, path := range paths {
+		if len(res.URLs) >= core.DraftInlineImagesMax {
+			res.Failed = append(res.Failed, filepath.Base(path))
+			continue
+		}
+		f, err := os.Open(path)
+		if err != nil {
+			res.Failed = append(res.Failed, filepath.Base(path))
+			continue
+		}
+		raw, err := io.ReadAll(io.LimitReader(f, core.DraftInlineImageMax+1))
+		f.Close()
+		if err != nil || len(raw) == 0 || len(raw) > core.DraftInlineImageMax {
+			res.Failed = append(res.Failed, filepath.Base(path))
+			continue
+		}
+		ct := http.DetectContentType(raw)
+		url, err := core.DraftInlineImageURL(ct, raw)
+		if err != nil {
+			res.Failed = append(res.Failed, filepath.Base(path))
+			continue
+		}
+		res.URLs = append(res.URLs, url)
+	}
 	return res, nil
 }
 

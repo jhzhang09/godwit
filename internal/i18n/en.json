@@ -128,6 +128,49 @@
   "compose_link_url": "Link address",
   "compose_list": "Bulleted list",
   "compose_list_ordered": "Numbered list",
+  "compose_color": "Text color & highlight",
+  "compose_text_color": "Text color",
+  "compose_highlight_color": "Highlight",
+  "compose_color_default": "Default",
+  "compose_color_none": "None",
+  "compose_layout": "Paragraph & alignment",
+  "compose_align_left": "Align left",
+  "compose_align_center": "Align center",
+  "compose_align_right": "Align right",
+  "compose_indent_increase": "Increase indent",
+  "compose_indent_decrease": "Decrease indent",
+  "compose_clear_format": "Clear formatting",
+  "compose_insert": "Insert",
+  "compose_insert_image": "Insert image…",
+  "compose_insert_divider": "Horizontal divider",
+  "compose_insert_table": "Insert table",
+  "compose_table_size": "{arg1} × {arg2} table",
+  "@compose_table_size": {
+    "placeholders": {
+      "arg1": {
+        "type": "int"
+      },
+      "arg2": {
+        "type": "int"
+      }
+    }
+  },
+  "compose_table_row_above": "Insert row above",
+  "compose_table_row_below": "Insert row below",
+  "compose_table_col_left": "Insert column left",
+  "compose_table_col_right": "Insert column right",
+  "compose_table_delete_row": "Delete row",
+  "compose_table_delete_col": "Delete column",
+  "compose_table_delete": "Delete table",
+  "compose_image_remove": "Remove image",
+  "compose_image_too_large": "Image exceeds 5 MB limit or is unsupported: {arg1}",
+  "@compose_image_too_large": {
+    "placeholders": {
+      "arg1": {
+        "type": "String"
+      }
+    }
+  },
   "compose_new": "New message",
   "compose_quote": "Quote",
   "compose_quote_show": "Show the quoted message (read-only for the assistant)",
@@ -1062,6 +1105,8 @@
   },
   "reader_save": "Save email",
   "reader_save_as": "Save as…",
+  "reader_attachments_preview": "Preview",
+  "reader_attachments_open": "Open",
   "reader_attachments_select_all": "Select all",
   "reader_attachments_select_item": "Select {arg1}",
   "@reader_attachments_select_item": {

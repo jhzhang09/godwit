@@ -2,12 +2,14 @@ package webui
 
 import (
 	"context"
+	"encoding/base64"
 	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -284,7 +286,7 @@ func TestComposeBoundSurface(t *testing.T) {
 	}
 	sort.Strings(names)
 	assert.Equal(t, []string{"AddAttachments", "Answer", "Ask", "CheckCited", "Closed", "Decide", "DecideAll", "DecideWithArgs", "Finish", "Follow", "ImportSMIMECertificate", "Latest", "Load",
-		"Models", "OpenCited", "OpenLink", "OpenModels", "PopupMenu", "RemoveAttachment", "Review", "Rewrite", "SMIMEStatus", "Save", "SearchContacts", "SearchMail", "Send", "SetAccount",
+		"Models", "OpenCited", "OpenLink", "OpenModels", "PickBodyImages", "PopupMenu", "RemoveAttachment", "Review", "Rewrite", "SMIMEStatus", "Save", "SearchContacts", "SearchMail", "Send", "SetAccount",
 		"SetModel", "SetSMIME", "Skill", "Stop", "TitleBar", "Toast", "ToastBar", "Undo", "WitInfo"}, names)
 }
 
@@ -769,4 +771,39 @@ func TestComposeLoadRichQuoteWithInlineImage(t *testing.T) {
 	assert.Contains(t, st.QuoteHTML, "color: #334455")
 	assert.Contains(t, st.QuoteHTML, "data:image/png;base64,")
 	assert.NotContains(t, st.QuoteHTML, "data-godwit")
+}
+
+func TestComposePickBodyImagesAndLoad(t *testing.T) {
+	const pngB64 = "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAFklEQVR4nGPQKLpFEmIY1TCqYfhqAAASZ3QQWUKpQAAAAABJRU5ErkJggg=="
+	pngBytes, err := base64.StdEncoding.DecodeString(pngB64)
+	require.NoError(t, err)
+
+	dir := t.TempDir()
+	goodPath := filepath.Join(dir, "ok.png")
+	badPath := filepath.Join(dir, "bad.txt")
+	require.NoError(t, os.WriteFile(goodPath, pngBytes, 0o600))
+	require.NoError(t, os.WriteFile(badPath, []byte("not an image"), 0o600))
+
+	f := newFixture(t)
+	f.pick = func() ([]string, error) { return []string{goodPath, badPath}, nil }
+	d := f.draft(t, "new", 0)
+	f.c.Attach(1, d.ID)
+
+	res, err := f.page.PickBodyImages(f.ctx(1))
+	require.NoError(t, err)
+	require.Len(t, res.URLs, 1)
+	assert.True(t, strings.HasPrefix(res.URLs[0], "data:image/png;base64,"))
+	assert.Equal(t, []string{"bad.txt"}, res.Failed)
+
+	// Saving body with data: URL stores cid:, and Load returns data: URL back to the editor.
+	_, err = f.page.Save(f.ctx(1), ComposeEdit{
+		Revision: d.Revision,
+		Body:     `<p>hi</p><img src="` + res.URLs[0] + `">`,
+	})
+	require.NoError(t, err)
+
+	st, err := f.page.Load(f.ctx(1))
+	require.NoError(t, err)
+	assert.Contains(t, st.Body, "data:image/png;base64,")
+	assert.NotContains(t, st.Body, "cid:body-")
 }

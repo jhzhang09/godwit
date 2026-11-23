@@ -35,6 +35,7 @@ type Service interface {
 	GetSettings(ctx context.Context) (core.Settings, error)
 	ImagesAllowed(ctx context.Context, message int64) (bool, error)
 	ImportContactCertificateFile(ctx context.Context, address, path string) ([]core.SMIMECertificate, error)
+	InlineDraftImages(ctx context.Context, draftID int64, html string) (string, error)
 	InlineImages(ctx context.Context, id int64, each func(cid string, a mail.Attachment)) error
 	ListAccounts(ctx context.Context) ([]core.Account, error)
 	ListApprovals(ctx context.Context, conversationID int64) ([]core.Approval, error)

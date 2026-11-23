@@ -189,6 +189,14 @@ type AttachResult struct {
 	Failed   []string `json:"failed"`
 }
 
+// PickBodyImagesResult is the outcome of picking inline images for the compose
+// body: URLs are sanitized data:image/... URLs; Failed lists filenames that
+// were unsupported or over core.DraftInlineImageMax.
+type PickBodyImagesResult struct {
+	URLs   []string `json:"urls"`
+	Failed []string `json:"failed"`
+}
+
 // SendWarning is a plugin's word about the draft.
 type SendWarning struct {
 	// Plugin is its name; Message what it said.

@@ -6,11 +6,26 @@ const LOADERS =
 // Blocks outside the format set (richtext's blockish list): a leaf one becomes a paragraph, so
 // pasted headings and table cells stay separate lines; one holding blocks is unwrapped.
 const BLOCKISH = new Set(
-  "DIV CENTER SECTION ARTICLE HEADER FOOTER MAIN NAV ASIDE ADDRESS FIGURE FIGCAPTION DL DT DD FORM FIELDSET DETAILS SUMMARY CAPTION TABLE TBODY THEAD TFOOT TR TD TH H1 H2 H3 H4 H5 H6 PRE".split(
+  "DIV CENTER SECTION ARTICLE HEADER FOOTER MAIN NAV ASIDE ADDRESS FIGURE FIGCAPTION DL DT DD FORM FIELDSET DETAILS SUMMARY CAPTION H1 H2 H3 H4 H5 H6 PRE".split(
     " ",
   ),
 );
-const BLOCK = new Set([...BLOCKISH, "P", "UL", "OL", "LI", "BLOCKQUOTE"]);
+const BLOCK = new Set([
+  ...BLOCKISH,
+  "P",
+  "UL",
+  "OL",
+  "LI",
+  "BLOCKQUOTE",
+  "TABLE",
+  "TBODY",
+  "THEAD",
+  "TFOOT",
+  "TR",
+  "TD",
+  "TH",
+  "HR",
+]);
 
 /** A signature image's source: the data: URL Go's SignaturePage gives (sniffed png, jpeg, gif, webp). */
 export const IMAGE_SRC = /^data:image\/(png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+$/;
@@ -19,6 +34,16 @@ const keptImage = (el: Element) =>
   el.tagName === "IMG" && IMAGE_SRC.test(el.getAttribute("src") ?? "");
 
 const SAFE_CSS_VALUE = /^([a-z0-9#%.,/\s'"\-+_]|rgba?\([0-9.,\s%]*\))+$/i;
+const SAFE_CSS_COLOR =
+  /^(#[0-9a-f]{3,8}|rgb\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*\)|rgba\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*(0|1|0?\.\d+)\s*\)|[a-z]{3,20})$/i;
+const SAFE_ALIGN = new Set(["left", "center", "right"]);
+
+function indentPx(v: string): string {
+  const m = v.trim().match(/^(\d+(?:\.\d+)?)px$/i);
+  if (!m) return "";
+  const px = Math.round(Number(m[1]));
+  return px > 0 && px <= 240 ? `${px}px` : "";
+}
 
 // A size in the toolbar's range (9–36 pt); a pasted font-size:0 (hidden text) or 200px is dropped.
 function inSizeRange(v: string): boolean {
@@ -41,9 +66,17 @@ export function sanitize(html: string, images = false): HTMLElement {
       if (a.name === "style" && el instanceof HTMLElement) {
         const fs = el.style.fontSize;
         const ff = el.style.fontFamily;
+        const color = el.style.color.trim();
+        const bg = el.style.backgroundColor.trim();
+        const align = el.style.textAlign.trim().toLowerCase();
+        const ml = indentPx(el.style.marginLeft);
         el.removeAttribute("style");
         if (inSizeRange(fs)) el.style.fontSize = fs;
         if (ff && SAFE_CSS_VALUE.test(ff)) el.style.fontFamily = ff;
+        if (color && SAFE_CSS_COLOR.test(color)) el.style.color = color;
+        if (bg && bg !== "transparent" && SAFE_CSS_COLOR.test(bg)) el.style.backgroundColor = bg;
+        if (align && SAFE_ALIGN.has(align)) el.style.textAlign = align;
+        if (ml) el.style.marginLeft = ml;
         if (!el.getAttribute("style")) el.removeAttribute("style");
       } else if (
         !((el.tagName === "A" && a.name === "href") || (el.tagName === "IMG" && a.name === "src"))
@@ -136,6 +169,12 @@ function inline(n: Descendant): string {
     if (typeof n.fontFamily === "string" && SAFE_CSS_VALUE.test(n.fontFamily)) {
       style.push(`font-family: ${esc(n.fontFamily)}`);
     }
+    if (typeof n.color === "string" && SAFE_CSS_COLOR.test(n.color.trim())) {
+      style.push(`color: ${esc(n.color.trim())}`);
+    }
+    if (typeof n.backgroundColor === "string" && SAFE_CSS_COLOR.test(n.backgroundColor.trim())) {
+      style.push(`background-color: ${esc(n.backgroundColor.trim())}`);
+    }
     if (style.length > 0) {
       s = `<span style="${style.join("; ")}">${s}</span>`;
     }
@@ -146,12 +185,25 @@ function inline(n: Descendant): string {
   return href ? `<a href="${esc(href)}">${kids}</a>` : kids;
 }
 
+function blockStyleAttr(n?: Record<string, unknown>): string {
+  if (!n) return "";
+  const style: string[] = [];
+  if (typeof n.align === "string" && SAFE_ALIGN.has(n.align)) {
+    style.push(`text-align: ${n.align}`);
+  }
+  if (typeof n.indent === "number" && Number.isFinite(n.indent) && n.indent > 0) {
+    const steps = Math.min(8, Math.max(0, Math.round(n.indent)));
+    if (steps > 0) style.push(`margin-left: ${steps * 24}px`);
+  }
+  return style.length > 0 ? ` style="${style.join("; ")}"` : "";
+}
+
 // A paragraph of inline nodes. As richtext.ToHTML: an empty one holds a <br>, and a trailing
 // break needs a second one.
-function para(children: Descendant[]): string {
+function para(children: Descendant[], node?: Record<string, unknown>): string {
   let body = children.map(inline).join("");
   if (body === "" || lastText({ type: "p", children })?.text.endsWith("\n")) body += "<br>";
-  return `<p>${body}</p>`;
+  return `<p${blockStyleAttr(node)}>${body}</p>`;
 }
 
 const blocks = (children: Descendant[]) => children.map(block).join("");
@@ -159,6 +211,18 @@ const blocks = (children: Descendant[]) => children.map(block).join("");
 function item(n: Descendant): string {
   if (isText(n) || n.type !== "li") return `<li>${block(n)}</li>`;
   return `<li>${n.children.every(isInline) ? para(n.children) : blocks(n.children)}</li>`;
+}
+
+function tableCell(n: Descendant): string {
+  if (isText(n)) return `<td>${para([n])}</td>`;
+  const tag = n.type === "th" ? "th" : "td";
+  const inner = n.children.every(isInline) ? para(n.children) : blocks(n.children);
+  return `<${tag}>${inner || "<p><br></p>"}</${tag}>`;
+}
+
+function tableRow(n: Descendant): string {
+  if (isText(n)) return "";
+  return `<tr>${n.children.map(tableCell).join("")}</tr>`;
 }
 
 // Writes only the format set (and the signature's images); any other node (or one out of place)
@@ -171,15 +235,24 @@ function block(n: Descendant): string {
       const src = String(n.url ?? "");
       return IMAGE_SRC.test(src) ? `<img src="${src}">` : "";
     }
+    case "hr":
+      return "<hr>";
+    case "table":
+      return `<table><tbody>${n.children.map(tableRow).join("")}</tbody></table>`;
+    case "tr":
+      return tableRow(n);
+    case "th":
+    case "td":
+      return tableCell(n);
     case "p":
     case "lic":
-      if (inlineOnly) return para(n.children);
+      if (inlineOnly) return para(n.children, n as Record<string, unknown>);
       break;
     case "blockquote":
-      return `<blockquote>${inlineOnly ? para(n.children) : blocks(n.children)}</blockquote>`;
+      return `<blockquote${blockStyleAttr(n as Record<string, unknown>)}>${inlineOnly ? para(n.children) : blocks(n.children)}</blockquote>`;
     case "ul":
     case "ol":
-      return `<${n.type}>${n.children.map(item).join("")}</${n.type}>`;
+      return `<${n.type}${blockStyleAttr(n as Record<string, unknown>)}>${n.children.map(item).join("")}</${n.type}>`;
   }
   const text = textOf(n);
   return text ? para([{ text }]) : "";

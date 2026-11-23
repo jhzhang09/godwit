@@ -510,4 +510,68 @@ describe("Editor", () => {
       unmount();
     }
   });
+
+  it("applies text color and background highlight from ColorMenu", async () => {
+    const user = userEvent.setup();
+    const { box, onChange } = setup("<p>hello</p>");
+    await select(box, 0, 5);
+    await user.click(screen.getByRole("button", { name: "compose.color" }));
+    await user.click(await screen.findByRole("button", { name: "#dc2626" }));
+    await waitFor(() => expect(last(onChange)).toContain("color: #dc2626"));
+
+    await user.click(screen.getByRole("button", { name: "compose.color" }));
+    await user.click(await screen.findByRole("button", { name: "#fef08a" }));
+    await waitFor(() => expect(last(onChange)).toContain("background-color: #fef08a"));
+  });
+
+  it("applies alignment, indent, and clear formatting from LayoutMenu", async () => {
+    const user = userEvent.setup();
+    const { box, onChange } = setup("<p><strong>hello</strong></p>");
+    await select(box, 0, 5);
+    await user.click(screen.getByRole("button", { name: "compose.layout" }));
+    await user.click(await screen.findByRole("menuitem", { name: "compose.align_center" }));
+    await waitFor(() => expect(last(onChange)).toContain('style="text-align: center"'));
+
+    await user.click(screen.getByRole("button", { name: "compose.layout" }));
+    await user.click(await screen.findByRole("menuitem", { name: "compose.indent_increase" }));
+    await waitFor(() => expect(last(onChange)).toContain("margin-left: 24px"));
+
+    await user.click(screen.getByRole("button", { name: "compose.layout" }));
+    await user.click(await screen.findByRole("menuitem", { name: "compose.clear_format" }));
+    await waitFor(() => expect(last(onChange)).toBe("<p>hello</p>"));
+  });
+
+  it("inserts divider, table, and contextual table rows via InsertMenu", async () => {
+    const user = userEvent.setup();
+    const { box, onChange } = setup("<p>hello</p>");
+    await select(box, 5, 0);
+    await user.click(screen.getByRole("button", { name: "compose.insert" }));
+    await user.click(await screen.findByText("compose.insert_divider"));
+    await waitFor(() => expect(last(onChange)).toContain("<hr>"));
+
+    await user.click(screen.getByRole("button", { name: "compose.insert" }));
+    const gridBtns = await screen.findAllByRole("button", { name: "compose.table_size" });
+    expect(gridBtns).toHaveLength(36);
+  });
+
+  it("inserts 2x2 table and shows contextual table actions when inside table", async () => {
+    const user = userEvent.setup();
+    const first = setup("<p>hello</p>");
+    await select(first.box, 5, 0);
+    await user.click(screen.getByRole("button", { name: "compose.insert" }));
+    const cells = await screen.findAllByRole("button", { name: "compose.table_size" });
+    await user.click(cells[7]); // row 2, col 2 (index 1*6 + 1)
+    await waitFor(() => expect(last(first.onChange)).toContain("<table><tbody><tr>"));
+    first.unmount();
+
+    // Select inside first cell of a populated table and verify contextual row/delete actions appear.
+    const second = setup(
+      "<table><tbody><tr><td><p>cell</p></td><td><p>b</p></td></tr></tbody></table>",
+    );
+    await select(second.box, 0, 4);
+    await user.click(screen.getByRole("button", { name: "compose.insert" }));
+    expect(await screen.findByText("compose.table_row_below")).toBeTruthy();
+    await user.click(screen.getByText("compose.table_delete"));
+    await waitFor(() => expect(last(second.onChange)).not.toContain("<table>"));
+  });
 });

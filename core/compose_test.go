@@ -994,3 +994,57 @@ func TestReplyPreservesFormattingAndInlineImages(t *testing.T) {
 	assert.Equal(t, png1Bytes, byCID[cids[0]])
 	assert.Equal(t, png2Bytes, byCID[cids[1]])
 }
+
+func TestDraftBodyInlineImages(t *testing.T) {
+	const pngB64 = "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAFklEQVR4nGPQKLpFEmIY1TCqYfhqAAASZ3QQWUKpQAAAAABJRU5ErkJggg=="
+	e := newSendEnv(t, false)
+	bg := context.Background()
+
+	d, err := e.s.NewDraft(bg, e.acc.ID, "new", 0)
+	require.NoError(t, err)
+	d.To = []string{"bob@example.com"}
+	d.Subject = "inline body image"
+	d.HTML = `<p>hello</p><img src="data:image/png;base64,` + pngB64 + `">`
+
+	saved, err := e.s.SaveDraft(bg, d)
+	require.NoError(t, err)
+	assert.Contains(t, saved.HTML, `src="cid:body-`)
+	assert.NotContains(t, saved.HTML, "data:image/png")
+
+	cids := e.rows(t, "SELECT cid FROM draft_images WHERE draft_id = ?", d.ID)
+	require.Len(t, cids, 1)
+	assert.True(t, strings.HasPrefix(cids[0][0].(string), "body-"))
+
+	// Re-saving with the same data: image deduplicates instead of duplicating rows.
+	saved.HTML = `<p>updated</p><img src="data:image/png;base64,` + pngB64 + `">`
+	saved, err = e.s.SaveDraft(bg, saved)
+	require.NoError(t, err)
+	cids = e.rows(t, "SELECT cid FROM draft_images WHERE draft_id = ?", d.ID)
+	require.Len(t, cids, 1)
+
+	// InlineDraftImages expands cid:body-... back to data: for the UI.
+	shown, err := e.s.InlineDraftImages(bg, saved.ID, saved.HTML)
+	require.NoError(t, err)
+	assert.Contains(t, shown, "data:image/png;base64,")
+
+	// Removing the image from the body prunes the unused body-* row.
+	saved.HTML = "<p>no image</p>"
+	saved, err = e.s.SaveDraft(bg, saved)
+	require.NoError(t, err)
+	assert.Empty(t, e.rows(t, "SELECT cid FROM draft_images WHERE draft_id = ?", d.ID))
+
+	// Put the image back and send: outgoing MIME includes multipart/related inline attachment.
+	saved.HTML = `<p>send</p><img src="data:image/png;base64,` + pngB64 + `">`
+	saved, err = e.s.SaveDraft(bg, saved)
+	require.NoError(t, err)
+	require.NoError(t, e.s.Send(bg, saved.ID))
+	e.clock.Advance(UndoSendWindow)
+	e.sync(t)
+
+	got := e.smtp.Messages()
+	require.Len(t, got, 1)
+	assert.Contains(t, string(got[0].Data), "multipart/related")
+	parsed, err := mail.Parse(got[0].Data)
+	require.NoError(t, err)
+	assert.NotEmpty(t, parsed.Attachments)
+}

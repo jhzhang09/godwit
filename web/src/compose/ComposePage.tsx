@@ -1167,6 +1167,27 @@ function Compose({
                           ? openCmdK
                           : undefined
                       }
+                      onPickImages={
+                        locked || witLocked
+                          ? undefined
+                          : () => {
+                              api
+                                .pickBodyImages()
+                                .then((res) => {
+                                  if (res.urls.length > 0)
+                                    editorRef.current?.insertImages(res.urls);
+                                  if (res.failed.length > 0) {
+                                    toast.error(
+                                      t("compose.image_too_large", res.failed.join(", ")),
+                                    );
+                                  }
+                                })
+                                .catch(failure);
+                            }
+                      }
+                      onImageError={(names) =>
+                        toast.error(t("compose.image_too_large", names.join(", ")))
+                      }
                       toolbarSlot={showEditor ? toolbarSlot : null}
                       attach={attach}
                       popover={

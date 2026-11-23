@@ -14,8 +14,46 @@ import {
 import { createPortal } from "react-dom";
 import type { T } from "@/shared/i18n";
 import { deserialize, fromHTML, offsetOf, toHTML, toText } from "./html";
-import { plugins } from "./plugins";
+import { BodyImagePlugin, plugins } from "./plugins";
 import { Toolbar } from "./Toolbar";
+import { insertBodyImages, isInTable, moveTableCell, stepBlockIndent } from "./table";
+
+const MAX_BODY_IMAGE_BYTES = 5 * 1024 * 1024;
+const BODY_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+
+function readImageFiles(
+  files: File[],
+  onInsert: (urls: string[]) => void,
+  onError?: (names: string[]) => void,
+) {
+  const valid: File[] = [];
+  const failed: string[] = [];
+  for (const f of files) {
+    if (!BODY_IMAGE_TYPES.has(f.type) || f.size === 0 || f.size > MAX_BODY_IMAGE_BYTES) {
+      failed.push(f.name || "image");
+    } else {
+      valid.push(f);
+    }
+  }
+  if (failed.length > 0) onError?.(failed);
+  if (valid.length === 0) return;
+  Promise.all(
+    valid.map(
+      (file) =>
+        new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result ?? ""));
+          reader.onerror = () => reject(reader.error);
+          reader.readAsDataURL(file);
+        }),
+    ),
+  )
+    .then((urls) => {
+      const clean = urls.filter(Boolean);
+      if (clean.length > 0) onInsert(clean);
+    })
+    .catch(() => {});
+}
 
 /** A ⌘K on a selection: the body's plain text (toText) and the selection's [start, end) in it. */
 export type CmdKSelection = {
@@ -78,7 +116,10 @@ function resembles(word: string, text: string): boolean {
   return row[b.length] <= Math.max(2, Math.floor(Math.max(a.length, b.length) / 3));
 }
 
-export type EditorHandle = { setValue(html: string): void };
+export type EditorHandle = {
+  setValue(html: string): void;
+  insertImages(urls: string[]): void;
+};
 
 /**
  * The compose body: a Plate editor over the native page's formats, loaded from `initial` (read at
@@ -97,16 +138,18 @@ export function Editor(props: {
   t: T;
   attach?: ReactNode;
   onCmdK?(s: CmdKSelection): void;
+  onPickImages?: () => void;
+  onImageError?: (names: string[]) => void;
   toolbarSlot?: HTMLElement | null;
   popover?: ReactNode;
   ref?: Ref<EditorHandle>;
 }) {
   const { initial, readOnly, placeholder, onChange, onComposing, t, attach, onCmdK } = props;
-  const { toolbarSlot, popover, ref } = props;
+  const { onPickImages, onImageError, toolbarSlot, popover, ref } = props;
   const held = !!popover;
   const editor = usePlateEditor({
-    plugins: [...plugins, HeldBlockPlugin],
-    value: (e) => fromHTML(e, initial),
+    plugins: [...plugins, BodyImagePlugin, HeldBlockPlugin],
+    value: (e) => fromHTML(e, initial, true),
   });
   // The body setValue made, the page's own and no edit. Slate reports changes a microtask later, so the
   // next report is matched against it, never assumed to be it.
@@ -115,8 +158,12 @@ export function Editor(props: {
     ref,
     () => ({
       setValue(html) {
-        editor.tf.withNewBatch(() => editor.tf.setValue(deserialize(editor, html)));
+        editor.tf.withNewBatch(() => editor.tf.setValue(deserialize(editor, html, true)));
         set.current = toHTML(editor.children);
+      },
+      insertImages(urls) {
+        insertBodyImages(editor, urls);
+        editor.tf.focus();
       },
     }),
     [editor],
@@ -132,7 +179,13 @@ export function Editor(props: {
     [held],
   );
   const toolbar = (
-    <Toolbar t={t} linkOpen={linkOpen} onLinkOpenChange={setLinkOpen} attach={attach} />
+    <Toolbar
+      t={t}
+      linkOpen={linkOpen}
+      onLinkOpenChange={setLinkOpen}
+      attach={attach}
+      onPickImages={onPickImages}
+    />
   );
 
   const editableRef = useRef<HTMLDivElement | null>(null);
@@ -239,7 +292,40 @@ export function Editor(props: {
             decorate={decorate}
             onCompositionStart={() => onComposing(true)}
             onCompositionEnd={() => onComposing(false)}
+            onPaste={(e) => {
+              if (readOnly) return;
+              const files = Array.from(e.clipboardData?.files ?? []);
+              const hasText =
+                Boolean(e.clipboardData?.getData("text/html")) ||
+                Boolean(e.clipboardData?.getData("text/plain"));
+              if (!hasText && files.some((f) => f.type.startsWith("image/"))) {
+                e.preventDefault();
+                e.stopPropagation();
+                readImageFiles(files, (urls) => insertBodyImages(editor, urls), onImageError);
+              }
+            }}
+            onDrop={(e) => {
+              if (readOnly) return;
+              const files = Array.from(e.dataTransfer?.files ?? []);
+              if (files.length > 0 && files.every((f) => f.type.startsWith("image/"))) {
+                e.preventDefault();
+                e.stopPropagation();
+                readImageFiles(files, (urls) => insertBodyImages(editor, urls), onImageError);
+              }
+            }}
             onKeyDown={(e) => {
+              if (e.key === "Tab" && !e.nativeEvent.isComposing && e.target === e.currentTarget) {
+                if (isInTable(editor)) {
+                  e.preventDefault();
+                  moveTableCell(editor, e.shiftKey);
+                  return;
+                }
+                if (!readOnly) {
+                  e.preventDefault();
+                  stepBlockIndent(editor, e.shiftKey ? -1 : 1);
+                  return;
+                }
+              }
               if (
                 e.key === "Enter" &&
                 !e.shiftKey &&

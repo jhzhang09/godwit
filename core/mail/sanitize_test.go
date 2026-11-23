@@ -623,3 +623,20 @@ func TestInlineQuoteCSS(t *testing.T) {
 	assert.Contains(t, nestedOut, `id="t1" style="color: #abc"`)
 	assert.NotContains(t, nestedOut, `id="t2" style=`)
 }
+
+func TestSanitizeDraftFormatting(t *testing.T) {
+	in := `<p style="text-align: center; margin-left: 48px; position: fixed"><span style="color: #dc2626; background-color: #fef08a; background: url(https://evil.example/x)">hi</span></p><hr><table><thead><tr><th>H</th></tr></thead><tbody><tr><td>D</td></tr></tbody></table><img src="https://evil.example/track.png"><script>alert(1)</script>`
+	out := mail.SanitizeDraft(in, nil)
+	assert.Contains(t, out, "color: #dc2626")
+	assert.Contains(t, out, "background-color: #fef08a")
+	assert.Contains(t, out, "text-align: center")
+	assert.Contains(t, out, "margin-left: 48px")
+	assert.Contains(t, out, "<hr/>")
+	assert.Contains(t, out, "<table>")
+	assert.Contains(t, out, "<th>H</th>")
+	assert.Contains(t, out, "<td>D</td>")
+	assert.NotContains(t, out, "position")
+	assert.NotContains(t, out, "evil.example")
+	assert.NotContains(t, out, "<script")
+	assert.NotContains(t, out, "track.png")
+}

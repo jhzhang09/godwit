@@ -801,6 +801,14 @@ func fileURL(path string) string {
 // application: the cache's file has no extension to choose one by. Close
 // removes the copies.
 func (a *App) openAttachment(att core.AttachmentInfo) {
+	a.openOrPreviewAttachment(att, false)
+}
+
+func (a *App) previewAttachment(att core.AttachmentInfo) {
+	a.openOrPreviewAttachment(att, true)
+}
+
+func (a *App) openOrPreviewAttachment(att core.AttachmentInfo, preview bool) {
 	plat := a.plat
 	a.download(downloadOpen, nil, []core.AttachmentInfo{att}, func(ctx context.Context) error {
 		var dst string
@@ -814,6 +822,9 @@ func (a *App) openAttachment(att core.AttachmentInfo) {
 		})
 		if err != nil {
 			return err
+		}
+		if preview {
+			return plat.PreviewPath(dst)
 		}
 		return plat.OpenPath(dst)
 	}, a.toastErr)
@@ -2183,6 +2194,11 @@ func (r *reader) message(c *ui.Context, m core.MessageSummary) {
 					})
 				})
 			}
+			if b.smimeResult == nil {
+				r.attachments(c, b)
+			} else {
+				r.secureAttachments(c, b.smimeResult)
+			}
 			r.translationState(c, m)
 			if b.view != nil { // the body takes the paper's width
 				// a line until the page reports; rounded, so a mail filled edge to edge
@@ -2205,20 +2221,15 @@ func (r *reader) message(c *ui.Context, m core.MessageSummary) {
 		if !bodyReady {
 			return
 		}
-		ui.Column(c).FillWidth().Gap(th.Space(3.5)).Children(func() {
-			if b.cut {
+		if b.cut {
+			ui.Column(c).FillWidth().Gap(th.Space(3.5)).Children(func() {
 				ui.Row(c).Wrap().Gap(th.Space(3)).Children(func() {
 					kit.Text(c, i18n.T("reader.truncated"), t.Text.Xs).TextColor(t.Muted)
 					kit.Button(c, i18n.T("reader.open_in_browser"), kit.ButtonOpts{Variant: kit.Outline, Size: kit.SizeSm}).
 						OnClick(func() { r.viewInBrowser(m.ID) })
 				})
-			}
-			if b.smimeResult == nil {
-				r.attachments(c, b)
-			} else {
-				r.secureAttachments(c, b.smimeResult)
-			}
-		})
+			})
+		}
 	})
 }
 
@@ -2361,6 +2372,17 @@ func (r *reader) attachments(c *ui.Context, b *msgBody) {
 				if !dragged && r.p.a.downloadState(att.ID) == downloadNone {
 					kit.Tooltip(c, chip, i18n.T("reader.attachments.drag_hint"))
 				}
+				chip.Menu(func(menu *ui.Menu) {
+					if menu.Item(i18n.T("reader.attachments.preview")).Icon(menuIcon("eye")).Chosen() {
+						r.p.a.previewAttachment(att)
+					}
+					if menu.Item(i18n.T("reader.attachments.open")).Icon(menuIcon("external-link")).Chosen() {
+						r.p.a.openAttachment(att)
+					}
+					if menu.Item(i18n.T("reader.save_as")).Icon(menuIcon("download")).Chosen() {
+						r.p.a.saveAttachment(att)
+					}
+				})
 				kit.ChoiceCard(c, chip, kit.ChoiceCardOpts{Selected: checked}, func() {
 					if multi {
 						if kit.Checkbox(c.Key("sel"), &checked, "").Shrink(0).Label(i18n.Tf("reader.attachments.select_item", name)).Changed() {
@@ -2388,8 +2410,12 @@ func (r *reader) attachments(c *ui.Context, b *msgBody) {
 						})
 					})
 					if r.p.a.downloadState(att.ID) == downloadNone {
-						kit.IconButton(c, "download", i18n.T("reader.save_as"), kit.ButtonOpts{Variant: kit.Ghost, Size: kit.SizeSm}).
-							OnClick(func() { r.p.a.saveAttachment(att) })
+						ui.Row(c).Gap(th.Space(0.5)).Shrink(0).Children(func() {
+							kit.IconButton(c.Key("preview"), "eye", i18n.T("reader.attachments.preview"), kit.ButtonOpts{Variant: kit.Ghost, Size: kit.SizeSm}).
+								OnClick(func() { r.p.a.previewAttachment(att) })
+							kit.IconButton(c.Key("save"), "download", i18n.T("reader.save_as"), kit.ButtonOpts{Variant: kit.Ghost, Size: kit.SizeSm}).
+								OnClick(func() { r.p.a.saveAttachment(att) })
+						})
 						return
 					}
 					// Queued or downloading: a spinner that turns into the cancel under the pointer or keyboard focus.
@@ -2413,10 +2439,14 @@ func (r *reader) attachments(c *ui.Context, b *msgBody) {
 // fileKind is a short type for an attachment's icon: its extension, else
 // its media subtype.
 func fileKind(att core.AttachmentInfo) string {
-	if ext := strings.TrimPrefix(filepath.Ext(att.Filename), "."); ext != "" && len(ext) <= 4 {
+	return fileKindParts(att.Filename, att.ContentType)
+}
+
+func fileKindParts(filename, contentType string) string {
+	if ext := strings.TrimPrefix(filepath.Ext(filename), "."); ext != "" && len(ext) <= 4 {
 		return strings.ToUpper(ext)
 	}
-	_, sub, _ := strings.Cut(att.ContentType, "/")
+	_, sub, _ := strings.Cut(contentType, "/")
 	return strings.ToUpper(cmp.Or(sub, "FILE"))
 }
 

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/egoist/mygo/ui"
@@ -529,12 +530,18 @@ func (r *reader) openSMIME(id int64, b *msgBody, retry bool) {
 		if opened.VerifyErr == "" && len(opened.SignerCert) > 0 && opened.Signer != "" {
 			_ = a.svc.RecordSMIMESignerCert(ctx, opened.Signer, opened.SignerCert)
 		}
+		usedCIDs := map[string]bool{}
+		for _, cid := range mail.CIDs(parsed.HTML) {
+			usedCIDs[cid] = true
+		}
 		inline := map[string]mail.Attachment{}
 		for _, att := range parsed.Attachments {
 			if att.ContentID != "" {
 				inline[att.ContentID] = att
 			}
-			if !att.Inline || att.Filename != "" {
+			isInlineBodyImg := att.ContentID != "" && usedCIDs[att.ContentID] &&
+				strings.HasPrefix(strings.ToLower(att.ContentType), "image/")
+			if !smime.IsPart(att.ContentType, att.Filename) && !isInlineBodyImg && (!att.Inline || att.Filename != "") {
 				result.attachments = append(result.attachments, att)
 				cachedSize += len(att.Data)
 			}
@@ -629,27 +636,161 @@ func (r *reader) openSMIME(id int64, b *msgBody, retry bool) {
 	})
 }
 
-func (r *reader) secureAttachments(c *ui.Context, m *secureMessage) {
-	a := r.p.a
-	for _, att := range m.attachments {
-		name := core.FileName(att.Filename, "attachment")
-		if kit.Button(c, i18n.Tf("smime.save", name), kit.ButtonOpts{Variant: kit.Outline, Icon: "download"}).Clicked() {
-			a.do(func(ctx context.Context) error {
-				dst, err := a.plat.SaveFile(name)
-				if err != nil || dst == "" {
-					return err
-				}
-				if err = writeAttachmentAtomic(dst, att.Data); err != nil {
-					return err
-				}
-				_ = markFromInternet(dst)
-				return nil
-			}, a.toastErr)
-		}
+func (a *App) stageSecureAttachment(att mail.Attachment) (string, error) {
+	dir, err := a.tempDir(a.plat.TempDir())
+	if err != nil {
+		return "", err
 	}
+	dst := filepath.Join(dir, core.FileName(att.Filename, "attachment"))
+	if err := writeAttachmentAtomicMode(dst, att.Data, 0o600); err != nil {
+		return "", err
+	}
+	_ = markFromInternet(dst)
+	return dst, nil
+}
+
+func (a *App) openSecureAttachment(att mail.Attachment) {
+	a.do(func(context.Context) error {
+		dst, err := a.stageSecureAttachment(att)
+		if err != nil {
+			return err
+		}
+		return a.plat.OpenPath(dst)
+	}, a.toastErr)
+}
+
+func (a *App) previewSecureAttachment(att mail.Attachment) {
+	a.do(func(context.Context) error {
+		dst, err := a.stageSecureAttachment(att)
+		if err != nil {
+			return err
+		}
+		return a.plat.PreviewPath(dst)
+	}, a.toastErr)
+}
+
+func (a *App) saveSecureAttachment(att mail.Attachment) {
+	name := core.FileName(att.Filename, "attachment")
+	a.do(func(context.Context) error {
+		dst, err := a.plat.SaveFile(name)
+		if err != nil || dst == "" {
+			return err
+		}
+		if err = writeAttachmentAtomic(dst, att.Data); err != nil {
+			return err
+		}
+		_ = markFromInternet(dst)
+		return nil
+	}, a.toastErr)
+}
+
+func (a *App) saveAllSecureAttachments(atts []mail.Attachment) {
+	atts = slices.Clone(atts)
+	saved := 0
+	a.do(func(context.Context) error {
+		dir, err := a.plat.OpenDirectory()
+		if err != nil || dir == "" {
+			return err
+		}
+		for _, att := range atts {
+			name := core.FileName(att.Filename, "attachment")
+			dst := filepath.Join(dir, name)
+			if _, err := os.Lstat(dst); err == nil {
+				ext := filepath.Ext(name)
+				stem := strings.TrimSuffix(name, ext)
+				for n := 2; n < maxAttachmentNumbered; n++ {
+					cand := filepath.Join(dir, fmt.Sprintf("%s (%d)%s", stem, n, ext))
+					if _, err := os.Lstat(cand); err != nil {
+						dst = cand
+						break
+					}
+				}
+			}
+			if err := writeAttachmentAtomic(dst, att.Data); err != nil {
+				return err
+			}
+			_ = markFromInternet(dst)
+			saved++
+		}
+		return nil
+	}, func(err error) {
+		if err != nil {
+			a.toastErr(err)
+			return
+		}
+		if saved > 0 {
+			a.toastAs(kit.ToastSuccess, i18n.Plural("reader.attachments.saved", saved))
+		}
+	})
+}
+
+func (r *reader) secureAttachments(c *ui.Context, m *secureMessage) {
+	if len(m.attachments) == 0 {
+		return
+	}
+	a, t, th := r.p.a, theme.Of(c), c.Theme()
+	ui.Column(c).FillWidth().Gap(th.Space(2)).Children(func() {
+		if len(m.attachments) >= 2 {
+			totalSize := 0
+			for _, att := range m.attachments {
+				totalSize += len(att.Data)
+			}
+			ui.Row(c).FillWidth().Gap(th.Space(3)).AlignItems(ui.Center).Children(func() {
+				summary := i18n.Plural("reader.attachments.count", len(m.attachments)) + " · " + byteSize(totalSize)
+				kit.Text(c, summary, t.Text.Xs).TextColor(t.Muted)
+				ui.Spacer(c)
+				kit.Button(c, i18n.T("reader.attachments.save_all"), kit.ButtonOpts{Variant: kit.Outline, Size: kit.SizeSm, Icon: "download"}).
+					OnClick(func() { a.saveAllSecureAttachments(m.attachments) })
+			})
+		}
+		ui.Row(c).FillWidth().Wrap().Gap(th.Space(2)).Children(func() {
+			for idx, att := range m.attachments {
+				c := c.Key(idx)
+				name := core.FileName(att.Filename, "attachment")
+				chip := ui.Row(c).Width(theme.AttachmentWidth).Gap(th.Space(1.5)).Padding(th.Space(2), th.Space(2.5)).
+					Radius(t.Radius.Lg).AlignItems(ui.Center)
+				chip.Menu(func(menu *ui.Menu) {
+					if menu.Item(i18n.T("reader.attachments.preview")).Icon(menuIcon("eye")).Chosen() {
+						a.previewSecureAttachment(att)
+					}
+					if menu.Item(i18n.T("reader.attachments.open")).Icon(menuIcon("external-link")).Chosen() {
+						a.openSecureAttachment(att)
+					}
+					if menu.Item(i18n.T("reader.save_as")).Icon(menuIcon("download")).Chosen() {
+						a.saveSecureAttachment(att)
+					}
+				})
+				kit.ChoiceCard(c, chip, kit.ChoiceCardOpts{}, func() {
+					kit.Pressable(c, kit.PressableOpts{OnClick: func() { a.openSecureAttachment(att) }}).Grow(1).Shrink(1).Gap(th.Space(2.5)).Children(func() {
+						if img := a.typeIcon(iconExt(att.Filename)); img != nil {
+							ui.Image(c, img).Size(th.Space(8.5), th.Space(8.5)).Fit(ui.Contain).Shrink(0)
+						} else {
+							kit.Tile(c, th.Space(7), th.Space(8.5), kit.ToneTint).Children(func() {
+								kit.Text(c, fileKindParts(att.Filename, att.ContentType), t.Text.Xs).TextColor(t.Muted)
+							})
+						}
+						ui.Column(c).Shrink(1).Children(func() {
+							ui.Text(c, name).SingleLine()
+							kit.Text(c, byteSize(len(att.Data)), t.Text.Xs).TextColor(t.Muted)
+						})
+					})
+					ui.Row(c).Gap(th.Space(0.5)).Shrink(0).Children(func() {
+						kit.IconButton(c.Key("preview"), "eye", i18n.T("reader.attachments.preview"), kit.ButtonOpts{Variant: kit.Ghost, Size: kit.SizeSm}).
+							OnClick(func() { a.previewSecureAttachment(att) })
+						kit.IconButton(c.Key("save"), "download", i18n.T("reader.save_as"), kit.ButtonOpts{Variant: kit.Ghost, Size: kit.SizeSm}).
+							OnClick(func() { a.saveSecureAttachment(att) })
+					})
+				})
+			}
+		})
+	})
 }
 
 func writeAttachmentAtomic(dst string, data []byte) error {
+	return writeAttachmentAtomicMode(dst, data, 0o644)
+}
+
+func writeAttachmentAtomicMode(dst string, data []byte, mode os.FileMode) error {
 	f, err := os.CreateTemp(filepath.Dir(dst), ".godwit-*")
 	if err != nil {
 		return err
@@ -665,7 +806,7 @@ func writeAttachmentAtomic(dst string, data []byte) error {
 		_ = f.Close()
 		return err
 	}
-	if err := f.Chmod(0o644); err != nil {
+	if err := f.Chmod(mode); err != nil {
 		_ = f.Close()
 		return err
 	}

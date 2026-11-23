@@ -877,6 +877,14 @@ func TestReaderAttachments(t *testing.T) {
 	if filepath.Base(path) != "report.pdf" || !strings.HasPrefix(path, tmp+string(filepath.Separator)) {
 		t.Fatalf("opened %q, not a report.pdf under %q", path, tmp)
 	}
+	h.click(i18n.T("reader.attachments.preview"))
+	previewed := h.callArg("PreviewPath")
+	if got, err := os.ReadFile(previewed); err != nil || !bytes.Equal(got, data) {
+		t.Fatalf("previewed %q: %q, %v", previewed, got, err)
+	}
+	if filepath.Base(previewed) != "report.pdf" || !strings.HasPrefix(previewed, tmp+string(filepath.Separator)) {
+		t.Fatalf("previewed %q, not a report.pdf under %q", previewed, tmp)
+	}
 	defer func() {
 		h.app.Close()
 		if _, err := os.Stat(filepath.Dir(path)); !os.IsNotExist(err) {

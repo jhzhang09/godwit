@@ -430,6 +430,11 @@ func (s *Service) saveDraftWithImages(ctx context.Context, d Draft, imgs []mail.
 	// Draft changes and Send never interleave.
 	s.editMu.Lock()
 	defer s.editMu.Unlock()
+	extractedHTML, bodyImgs := extractBodyDataImages(d.HTML)
+	d.HTML = extractedHTML
+	if len(bodyImgs) > 0 {
+		imgs = append(append([]mail.Attachment(nil), imgs...), bodyImgs...)
+	}
 	var extraCIDs map[string]bool
 	if len(imgs) > 0 {
 		extraCIDs = make(map[string]bool, len(imgs))
@@ -490,6 +495,9 @@ func (s *Service) saveDraftWithImages(ctx context.Context, d Draft, imgs []mail.
 		return Draft{}, fmt.Errorf("draft %d not found", d.ID)
 	}
 	if err := s.saveDraftImages(ctx, d.ID, imgs); err != nil {
+		return Draft{}, err
+	}
+	if err := s.pruneUnusedBodyDraftImages(ctx, d.ID, d.HTML); err != nil {
 		return Draft{}, err
 	}
 	return s.GetDraft(ctx, d.ID)

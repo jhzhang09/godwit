@@ -2,7 +2,11 @@ package core
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
+	"errors"
+	"net/http"
 	"strings"
 
 	"github.com/egoist/mygo/plugins/sqlite"
@@ -11,13 +15,22 @@ import (
 )
 
 const (
-	// draftImagesLimit bounds stored inline quote images per draft so user
-	// attachments still fit under attachLimit.
+	// DraftInlineImageMax caps a single inline body image (5 MiB) before
+	// metadata stripping and base64 encoding.
+	DraftInlineImageMax = 5 << 20
+	// DraftInlineImagesMax caps distinct inline body images extracted per save.
+	DraftInlineImagesMax = 20
+	// draftImagesLimit bounds stored inline quote and body images per draft so
+	// user attachments still fit under attachLimit.
 	draftImagesLimit = 15 << 20
 	// maxRPCInlineRawBytes bounds raw image bytes inlined as data: URLs over
 	// JSON-RPC so encoded payloads stay well under rpc.MaxMessage (16 MiB).
 	maxRPCInlineRawBytes = 8 << 20
 )
+
+// errDraftImage is returned when a picked inline body image is unsupported,
+// corrupt, or exceeds DraftInlineImageMax.
+var errDraftImage = errors.New("unsupported or oversized draft image")
 
 func (s *Service) draftImages(ctx context.Context, draftID int64, data bool) (map[string]mail.Attachment, error) {
 	if draftID <= 0 {
@@ -158,4 +171,109 @@ func (s *Service) QuoteShown(ctx context.Context, draftID int64, block string) (
 		return "", err
 	}
 	return s.inlineCIDMap(ctx, draftID, clean, maxRPCInlineRawBytes)
+}
+
+// DraftInlineImageURL validates raw image bytes, strips EXIF/metadata, and
+// returns a base64 data: URL suitable for inserting into the compose editor.
+func DraftInlineImageURL(ct string, raw []byte) (string, error) {
+	if len(raw) == 0 || len(raw) > DraftInlineImageMax {
+		return "", errDraftImage
+	}
+	sniffed := http.DetectContentType(raw)
+	if !signatureImageTypes[sniffed] {
+		return "", errDraftImage
+	}
+	clean, err := stripImageMetadata(sniffed, raw)
+	if err != nil {
+		return "", errDraftImage
+	}
+	return "data:" + sniffed + ";base64," + base64.StdEncoding.EncodeToString(clean), nil
+}
+
+// extractBodyDataImages extracts inline base64 data:image/... sources from html,
+// strips metadata, and rewrites them to cid:body-<hash>@godwit references backed by
+// inline mail.Attachments so drafts store compact CIDs and send as multipart/related.
+func extractBodyDataImages(html string) (string, []mail.Attachment) {
+	if !strings.Contains(html, "data:") {
+		return html, nil
+	}
+	var imgs []mail.Attachment
+	seen := map[string]bool{}
+	out := mail.ReplaceImages(html, func(src string) string {
+		if !strings.HasPrefix(src, "data:") {
+			return src
+		}
+		rest := strings.TrimPrefix(src, "data:")
+		meta, b64, ok := strings.Cut(rest, ",")
+		_, hasB64 := strings.CutSuffix(strings.ToLower(meta), ";base64")
+		if !ok || !hasB64 {
+			return src
+		}
+		raw, err := base64.StdEncoding.DecodeString(b64)
+		if err != nil || len(raw) == 0 || len(raw) > DraftInlineImageMax {
+			return src
+		}
+		sniffed := http.DetectContentType(raw)
+		if !signatureImageTypes[sniffed] {
+			return src
+		}
+		clean, err := stripImageMetadata(sniffed, raw)
+		if err != nil {
+			return src
+		}
+		sum := sha256.Sum256(clean)
+		cid := "body-" + hex.EncodeToString(sum[:12]) + "@godwit"
+		if !seen[cid] {
+			if len(imgs) >= DraftInlineImagesMax {
+				return src
+			}
+			seen[cid] = true
+			ext := strings.TrimPrefix(sniffed, "image/")
+			if ext == "jpeg" {
+				ext = "jpg"
+			}
+			imgs = append(imgs, mail.Attachment{
+				Filename:    cid + "." + ext,
+				ContentID:   cid,
+				ContentType: sniffed,
+				Data:        clean,
+				Size:        len(clean),
+				Inline:      true,
+			})
+		}
+		return "cid:" + cid
+	})
+	return out, imgs
+}
+
+func (s *Service) pruneUnusedBodyDraftImages(ctx context.Context, draftID int64, html string) error {
+	if draftID <= 0 {
+		return nil
+	}
+	rows, err := s.db.Query(ctx, "SELECT cid FROM draft_images WHERE draft_id = ? AND cid LIKE 'body-%'", draftID)
+	if err != nil {
+		return err
+	}
+	if len(rows.Values) == 0 {
+		return nil
+	}
+	used := map[string]bool{}
+	for _, cid := range mail.CIDs(html) {
+		used[cid] = true
+	}
+	var stmts []sqlite.Statement
+	for _, r := range rows.Values {
+		cid := store.Str(r[0])
+		if !used[cid] {
+			stmts = append(stmts, sqlite.Statement{
+				SQL:  "DELETE FROM draft_images WHERE draft_id = ? AND cid = ?",
+				Args: []any{draftID, cid},
+			})
+		}
+	}
+	if len(stmts) == 0 {
+		return nil
+	}
+	_, err = s.db.Transaction(ctx, stmts)
+	return err
 }
