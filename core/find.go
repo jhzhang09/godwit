@@ -102,8 +102,12 @@ func (s *Service) findMail(ctx context.Context, q FindQuery) (FindGroup[MessageS
 // a body; the filters apply to their messages.
 func (s *Service) findAttachments(ctx context.Context, q FindQuery) (FindGroup[FoundAttachment], error) {
 	fcond, fargs := searchFilter(q.SearchQuery)
-	cond := `a.inline = 0 AND NOT ` + smimePartPredicate + ` AND a.filename LIKE ? ESCAPE '\' AND ` + fcond
-	args := append([]any{likeArg(strings.TrimSpace(q.Text))}, fargs...)
+	cond := `a.inline = 0 AND NOT ` + smimePartPredicate + ` AND ` + fcond
+	args := slices.Clone(fargs)
+	for _, term := range searchTerms(q.Text) {
+		cond += ` AND a.filename LIKE ? ESCAPE '\'`
+		args = append(args, likeArg(term))
+	}
 	from := " FROM attachments a JOIN messages m ON m.id = a.message_id WHERE " + cond
 	n, err := s.db.Query(ctx, "SELECT count(*)"+from, args...)
 	if err != nil {
@@ -154,11 +158,16 @@ func (s *Service) findContacts(ctx context.Context, q FindQuery) (FindGroup[Cont
 	if err != nil {
 		return FindGroup[Contact]{}, err
 	}
-	text := strings.ToLower(strings.TrimSpace(q.Text))
-	if text != "" {
+	terms := searchTerms(strings.ToLower(q.Text))
+	if len(terms) > 0 {
 		all = slices.DeleteFunc(all, func(c Contact) bool {
-			return !contactMatchesPerson(c, text) &&
-				!slices.ContainsFunc(c.Addresses, func(ea ContactAddress) bool { return strings.Contains(ea.Address, text) })
+			for _, term := range terms {
+				if !contactMatchesPerson(c, term) &&
+					!slices.ContainsFunc(c.Addresses, func(ea ContactAddress) bool { return strings.Contains(ea.Address, term) }) {
+					return true
+				}
+			}
+			return false
 		})
 		// something typed: the latest mail first, zero-mail contacts after; else the people mailed most, as contacts come
 		slices.SortStableFunc(all, compareSearchedContacts)
@@ -168,8 +177,13 @@ func (s *Service) findContacts(ctx context.Context, q FindQuery) (FindGroup[Cont
 
 // findConversations matches titles only, not what was said.
 func (s *Service) findConversations(ctx context.Context, q FindQuery) (FindGroup[Conversation], error) {
-	rows, err := s.db.Query(ctx, "SELECT "+convCols+` WHERE kind = 'ask' AND title LIKE ? ESCAPE '\' ORDER BY updated_at DESC, id DESC`,
-		likeArg(strings.TrimSpace(q.Text)))
+	cond := `kind = 'ask'`
+	var args []any
+	for _, term := range searchTerms(q.Text) {
+		cond += ` AND title LIKE ? ESCAPE '\'`
+		args = append(args, likeArg(term))
+	}
+	rows, err := s.db.Query(ctx, "SELECT "+convCols+` WHERE `+cond+` ORDER BY updated_at DESC, id DESC`, args...)
 	if err != nil {
 		return FindGroup[Conversation]{}, err
 	}

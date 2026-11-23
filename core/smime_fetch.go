@@ -20,25 +20,34 @@ import (
 )
 
 var (
-	smimePrefetchBudget  int64 = 1536 << 20
-	smimePrefetchFastMax int64 = 1 << 20
-	smimePrefetchMaxItem int64 = 5 << 20
-	smimePriorityMaxItem int64 = 10 << 20
-	smimePrefetchBatch         = 25
-	smimePrefetchPause         = 3 * time.Second
-	smimeConnIdleTTL           = 3 * time.Minute
-	smimeFailedSkipTTL         = 30 * time.Minute
+	smimePrefetchBudget   int64 = 1536 << 20
+	smimePrefetchFastMax  int64 = 1 << 20
+	smimePrefetchMaxItem  int64 = 5 << 20
+	smimePriorityMaxItem  int64 = 10 << 20
+	inlinePrefetchBudget  int64 = 256 << 20
+	inlinePrefetchFastMax int64 = 1 << 20
+	inlinePrefetchMaxItem int64 = 5 << 20
+	inlinePriorityMaxItem int64 = 10 << 20
+	smimePrefetchBatch          = 25
+	smimePrefetchPause          = 3 * time.Second
+	smimeConnIdleTTL            = 3 * time.Minute
+	smimeFailedSkipTTL          = 30 * time.Minute
 )
 
 const (
-	smimeP7MPredicate  = `(COALESCE(lower(a.content_type),'') IN ('application/pkcs7-mime','application/x-pkcs7-mime') OR COALESCE(lower(a.filename),'') = 'smime.p7m')`
-	smimeP7SPredicate  = `(COALESCE(lower(a.content_type),'') IN ('application/pkcs7-signature','application/x-pkcs7-signature') OR COALESCE(lower(a.filename),'') = 'smime.p7s')`
-	smimePartPredicate = `(` + smimeP7MPredicate + ` OR ` + smimeP7SPredicate + `)`
+	smimeP7MPredicate    = `(COALESCE(lower(a.content_type),'') IN ('application/pkcs7-mime','application/x-pkcs7-mime') OR COALESCE(lower(a.filename),'') = 'smime.p7m')`
+	smimeP7SPredicate    = `(COALESCE(lower(a.content_type),'') IN ('application/pkcs7-signature','application/x-pkcs7-signature') OR COALESCE(lower(a.filename),'') = 'smime.p7s')`
+	smimePartPredicate   = `(` + smimeP7MPredicate + ` OR ` + smimeP7SPredicate + `)`
+	inlineImagePredicate = `(COALESCE(lower(a.content_type),'') LIKE 'image/%' AND (a.inline = 1 OR COALESCE(a.content_id,'') != ''))`
 
 	smimeTierUrgent = iota + 1
 	smimeTierVisible
 	smimeTierGlobal
 )
+
+func isInlineImagePart(contentType string, inline bool, contentID string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(contentType)), "image/") && (inline || strings.TrimSpace(contentID) != "")
+}
 
 type smimeConn struct {
 	recv    backend.Receiver
@@ -51,6 +60,12 @@ type smimeCandidate struct {
 	id        int64
 	folderRef string
 	date      int64
+}
+
+type inflightFetch struct {
+	done chan struct{}
+	path string
+	err  error
 }
 
 type smimeState struct {
@@ -67,6 +82,7 @@ type smimeState struct {
 	prefetchMu       map[int64]*sync.Mutex
 	interactiveConns map[int64]*smimeConn
 	prefetchConns    map[int64]*smimeConn
+	inflight         map[int64]*inflightFetch
 	holdUntil        map[int64]time.Time
 	backoffUntil     map[int64]time.Time
 	backoffStep      map[int64]time.Duration
@@ -75,6 +91,34 @@ type smimeState struct {
 	visibleThreads   []int64
 	prioGen          uint64
 	gen              uint64
+}
+
+func (st *smimeState) acquireInflight(id int64) (existing *inflightFetch, finish func(path string, err error)) {
+	st.mu.Lock()
+	if e := st.inflight[id]; e != nil {
+		st.mu.Unlock()
+		return e, nil
+	}
+	if st.inflight == nil {
+		st.inflight = map[int64]*inflightFetch{}
+	}
+	e := &inflightFetch{done: make(chan struct{})}
+	st.inflight[id] = e
+	st.mu.Unlock()
+
+	var once sync.Once
+	finish = func(path string, err error) {
+		once.Do(func() {
+			e.path, e.err = path, err
+			st.mu.Lock()
+			if st.inflight[id] == e {
+				delete(st.inflight, id)
+			}
+			st.mu.Unlock()
+			close(e.done)
+		})
+	}
+	return nil, finish
 }
 
 func (st *smimeState) lockFor(accountID int64, interactive bool) *sync.Mutex {
@@ -460,19 +504,19 @@ func (s *Service) prioritizeSMIMEThread(threadID int64) {
 	s.wakeSMIMEPrefetch()
 }
 
-// prioritizeSMIMEThreads 将当前列表视图可见的会话提到预取队列前列。
-func (s *Service) prioritizeSMIMEThreads(items []ThreadSummary) {
+// prioritizeThreadIDs 将当前列表视图可见的会话提到预取队列前列。
+func (s *Service) prioritizeThreadIDs(ids []int64) {
 	st := s.smime
-	if st == nil || len(items) == 0 {
+	if st == nil || len(ids) == 0 {
 		return
 	}
 	const maxVisible = 50
-	next := make([]int64, 0, min(len(items), maxVisible))
-	for _, it := range items {
-		if it.ID == 0 {
+	next := make([]int64, 0, min(len(ids), maxVisible))
+	for _, id := range ids {
+		if id == 0 || slices.Contains(next, id) {
 			continue
 		}
-		next = append(next, it.ID)
+		next = append(next, id)
 		if len(next) >= maxVisible {
 			break
 		}
@@ -491,6 +535,29 @@ func (s *Service) prioritizeSMIMEThreads(items []ThreadSummary) {
 	}
 	st.mu.Unlock()
 	s.wakeSMIMEPrefetch()
+}
+
+// prioritizeSMIMEThreads 将当前列表视图可见的会话提到预取队列前列。
+func (s *Service) prioritizeSMIMEThreads(items []ThreadSummary) {
+	if len(items) == 0 {
+		return
+	}
+	ids := make([]int64, 0, len(items))
+	for _, it := range items {
+		ids = append(ids, it.ID)
+	}
+	s.prioritizeThreadIDs(ids)
+}
+
+func (s *Service) prioritizeMessageThreads(items []MessageSummary) {
+	if len(items) == 0 {
+		return
+	}
+	ids := make([]int64, 0, len(items))
+	for _, it := range items {
+		ids = append(ids, it.ThreadID)
+	}
+	s.prioritizeThreadIDs(ids)
 }
 
 // pauseSMIMEPrefetch 暂停正在后台预取该账户 smime.p7m 密文的批次，让交互打开优先而不拆断连接。
@@ -529,7 +596,7 @@ func (s *Service) fetchSMIMEDirect(ctx context.Context, a attRow) (string, bool,
 	return path, handled, err
 }
 
-// fetchInlineDirect 使用交互式常驻只读连接优先下载内嵌图片并暂停后台 S/MIME 预取，
+// fetchInlineDirect 使用交互式常驻只读连接优先下载内嵌图片并暂停后台预取，
 // 避免被文件夹全量同步阻塞或每封邮件重复握手登录；本地归档或并发受限时交回常规路径。
 func (s *Service) fetchInlineDirect(ctx context.Context, attachmentID int64) (path string, handled, saved bool, err error) {
 	st := s.smime
@@ -549,10 +616,37 @@ func (s *Service) fetchInlineDirect(ctx context.Context, attachmentID int64) (pa
 	if a.contentHash != "" {
 		return "", false, false, nil
 	}
-	if p, ok, cerr := s.cached(ctx, a); ok || cerr != nil {
+	if p, ok, cerr := s.cachedSMIME(ctx, a); ok || cerr != nil {
 		return p, true, false, cerr
 	}
 	st.holdPrefetch(a.accountID, smimePrefetchPause)
+
+	var finish func(string, error)
+	for {
+		var existing *inflightFetch
+		existing, finish = st.acquireInflight(attachmentID)
+		if existing == nil {
+			break
+		}
+		select {
+		case <-existing.done:
+		case <-ctx.Done():
+			return "", true, false, ctx.Err()
+		}
+		if existing.err == nil && existing.path != "" {
+			if _, serr := os.Stat(existing.path); serr == nil {
+				if !st.enqueueTouch(attachmentID) {
+					_ = s.touch(ctx, attachmentID)
+				}
+				return existing.path, true, false, nil
+			}
+		}
+		if err := ctx.Err(); err != nil {
+			return "", true, false, err
+		}
+	}
+	defer func() { finish(path, err) }()
+
 	mu := st.lockFor(a.accountID, true)
 	mu.Lock()
 	defer mu.Unlock()
@@ -563,7 +657,7 @@ func (s *Service) fetchInlineDirect(ctx context.Context, attachmentID int64) (pa
 	if err != nil {
 		return "", true, false, err
 	}
-	if p, ok, cerr := s.cached(ctx, a); ok || cerr != nil {
+	if p, ok, cerr := s.cachedSMIME(ctx, a); ok || cerr != nil {
 		return p, true, false, cerr
 	}
 	if int64(a.info.Size) > attachLimit {
@@ -621,7 +715,7 @@ func (s *Service) fetchInlineDirect(ctx context.Context, attachmentID int64) (pa
 	return path, true, true, nil
 }
 
-func (s *Service) fetchSMIMEPart(ctx context.Context, attachmentID, accountID int64, interactive, runEvict bool) (string, bool, bool, error) {
+func (s *Service) fetchSMIMEPart(ctx context.Context, attachmentID, accountID int64, interactive, runEvict bool) (path string, handled, dialFailed bool, err error) {
 	st := s.smime
 	if st == nil {
 		return "", false, false, nil
@@ -635,6 +729,20 @@ func (s *Service) fetchSMIMEPart(ctx context.Context, attachmentID, accountID in
 		return "", true, false, err
 	}
 
+	existing, finish := st.acquireInflight(attachmentID)
+	if existing != nil {
+		select {
+		case <-existing.done:
+		case <-ctx.Done():
+			return "", true, false, ctx.Err()
+		}
+		if existing.err == nil && existing.path != "" {
+			return existing.path, true, false, nil
+		}
+		return "", true, false, existing.err
+	}
+	defer func() { finish(path, err) }()
+
 	mu := st.lockFor(accountID, interactive)
 	mu.Lock()
 	defer mu.Unlock()
@@ -646,7 +754,8 @@ func (s *Service) fetchSMIMEPart(ctx context.Context, attachmentID, accountID in
 	if err != nil {
 		return "", true, false, err
 	}
-	if !smime.IsCMSPart(a.info.ContentType, a.info.Filename) || a.contentHash != "" {
+	wantPart := smime.IsCMSPart(a.info.ContentType, a.info.Filename) || (!interactive && isInlineImagePart(a.info.ContentType, a.info.Inline, a.contentID))
+	if !wantPart || a.contentHash != "" {
 		return "", false, false, nil
 	}
 	if p, ok, err := s.cachedSMIME(ctx, a); ok || err != nil {
@@ -702,7 +811,7 @@ func (s *Service) fetchSMIMEPart(ctx context.Context, attachmentID, accountID in
 	}
 
 	st.returnConn(a.accountID, interactive, c)
-	path, err := s.saveAttachmentChecked(ctx, a, data)
+	path, err = s.saveAttachmentChecked(ctx, a, data)
 	if errors.Is(err, ErrTooLarge) {
 		s.db.Execute(ctx, "UPDATE attachments SET size = ? WHERE id = ?", attachLimit+1, attachmentID)
 		return "", true, false, err
@@ -898,27 +1007,59 @@ func smimeNotInClause(col string, ids []int64, args *[]any) string {
 	return " AND " + col + " NOT IN (" + smimePlaceholders(len(ids)) + ")"
 }
 
-func (s *Service) querySMIMEBatch(ctx context.Context, accountID int64, used int64) (rows []smimeCandidate, tier int, gen uint64, err error) {
-	st := s.smime
-	tierBudget := (cacheLimit * 7) / 8
-	if smimePrefetchBudget < cacheLimit {
-		if b := smimePrefetchBudget + smimePrefetchBudget/4; b < tierBudget {
-			tierBudget = b
+func prefetchBudgetLimit(budget, maxCap int64) int64 {
+	if budget < cacheLimit {
+		if b := budget + budget/4; b < maxCap {
+			return b
 		}
 	}
-	globalBudget := min(smimePrefetchBudget, (cacheLimit*3)/4)
+	return maxCap
+}
+
+func prefetchKindClause(allowSMIME bool, smimeMax int64, allowInline bool, inlineMax int64, args *[]any) string {
+	var arms []string
+	if allowSMIME && smimeMax > 0 {
+		*args = append(*args, smimeMax)
+		arms = append(arms, `(a.part = '1' AND a.size > 0 AND a.size <= ? AND `+smimeP7MPredicate+`)`)
+	}
+	if allowInline && inlineMax > 0 {
+		*args = append(*args, inlineMax)
+		arms = append(arms, `(COALESCE(a.part, '') != '' AND a.size > 0 AND a.size <= ? AND `+inlineImagePredicate+`)`)
+	}
+	if len(arms) == 0 {
+		return ""
+	}
+	if len(arms) == 1 {
+		return arms[0]
+	}
+	return `(` + strings.Join(arms, ` OR `) + `)`
+}
+
+func (s *Service) querySMIMEBatch(ctx context.Context, accountID, smimeUsed, inlineUsed int64) (rows []smimeCandidate, tier int, gen uint64, err error) {
+	st := s.smime
+	maxTier := (cacheLimit * 7) / 8
+	smimeTierBudget := prefetchBudgetLimit(smimePrefetchBudget, maxTier)
+	inlineTierBudget := prefetchBudgetLimit(inlinePrefetchBudget, maxTier)
+	smimeGlobalBudget := min(smimePrefetchBudget, (cacheLimit*3)/4)
+	inlineGlobalBudget := min(inlinePrefetchBudget, cacheLimit/2)
 	urgent, visible, prioGen := st.snapshotPrio()
 	skip := st.failedIDs()
 
+	allowTierSMIME := smimeUsed < smimeTierBudget
+	allowTierInline := inlineUsed < inlineTierBudget
+
 	queryThreads := func(threads []int64) ([]smimeCandidate, error) {
-		if len(threads) == 0 || used >= tierBudget {
+		if len(threads) == 0 || (!allowTierSMIME && !allowTierInline) {
 			return nil, nil
 		}
 		args := []any{accountID}
 		for _, id := range threads {
 			args = append(args, id)
 		}
-		args = append(args, smimePriorityMaxItem)
+		kindSQL := prefetchKindClause(allowTierSMIME, smimePriorityMaxItem, allowTierInline, inlinePriorityMaxItem, &args)
+		if kindSQL == "" {
+			return nil, nil
+		}
 		skipClause := smimeNotInClause("a.id", skip, &args)
 		args = append(args, smimePrefetchBatch)
 		res, qerr := s.db.Query(ctx, `SELECT a.id, COALESCE(MIN(f.server_ref), ''), MAX(m.date)
@@ -928,9 +1069,8 @@ func (s *Service) querySMIMEBatch(ctx context.Context, accountID int64, used int
 			JOIN folders f ON f.id = l.folder_id
 			WHERE m.account_id = ? AND m.thread_id IN (`+smimePlaceholders(len(threads))+`)
 				AND l.shown = 1 AND l.server_ref IS NOT NULL
-				AND a.cache_path IS NULL AND a.part = '1'
-				AND a.size > 0 AND a.size <= ?
-				AND `+smimeP7MPredicate+skipClause+`
+				AND a.cache_path IS NULL
+				AND `+kindSQL+skipClause+`
 			GROUP BY a.id
 			ORDER BY MAX(m.date) DESC, a.id DESC
 			LIMIT ?`, args...)
@@ -954,12 +1094,19 @@ func (s *Service) querySMIMEBatch(ctx context.Context, accountID int64, used int
 	} else if len(items) > 0 {
 		return items, smimeTierVisible, prioGen, nil
 	}
-	if used >= globalBudget {
+
+	allowGlobalSMIME := smimeUsed < smimeGlobalBudget
+	allowGlobalInline := inlineUsed < inlineGlobalBudget
+	if !allowGlobalSMIME && !allowGlobalInline {
 		return nil, 0, prioGen, nil
 	}
 
-	queryGlobal := func(maxItem int64) ([]smimeCandidate, error) {
-		args := []any{accountID, maxItem}
+	queryGlobal := func(smimeMax, inlineMax int64) ([]smimeCandidate, error) {
+		args := []any{accountID}
+		kindSQL := prefetchKindClause(allowGlobalSMIME, smimeMax, allowGlobalInline, inlineMax, &args)
+		if kindSQL == "" {
+			return nil, nil
+		}
 		skipClause := smimeNotInClause("a.id", skip, &args)
 		args = append(args, smimePrefetchBatch)
 		res, qerr := s.db.Query(ctx, `SELECT a.id, COALESCE(MIN(f.server_ref), ''), MAX(m.date)
@@ -968,9 +1115,8 @@ func (s *Service) querySMIMEBatch(ctx context.Context, accountID int64, used int
 			JOIN message_locations l ON l.message_id = m.id
 			JOIN folders f ON f.id = l.folder_id
 			WHERE m.account_id = ? AND l.shown = 1 AND l.server_ref IS NOT NULL
-				AND a.cache_path IS NULL AND a.part = '1'
-				AND a.size > 0 AND a.size <= ?
-				AND `+smimeP7MPredicate+skipClause+`
+				AND a.cache_path IS NULL
+				AND `+kindSQL+skipClause+`
 			GROUP BY a.id
 			ORDER BY MIN(CASE WHEN f.role IN ('trash','junk','drafts') THEN 1 ELSE 0 END), MAX(m.date) DESC, a.id DESC
 			LIMIT ?`, args...)
@@ -984,14 +1130,15 @@ func (s *Service) querySMIMEBatch(ctx context.Context, accountID int64, used int
 		return out, nil
 	}
 
-	fastMax := min(smimePrefetchFastMax, smimePrefetchMaxItem)
-	if items, qerr := queryGlobal(fastMax); qerr != nil {
+	fastSMIME := min(smimePrefetchFastMax, smimePrefetchMaxItem)
+	fastInline := min(inlinePrefetchFastMax, inlinePrefetchMaxItem)
+	if items, qerr := queryGlobal(fastSMIME, fastInline); qerr != nil {
 		return nil, 0, prioGen, qerr
 	} else if len(items) > 0 {
 		return items, smimeTierGlobal, prioGen, nil
 	}
-	if smimePrefetchMaxItem > fastMax {
-		if items, qerr := queryGlobal(smimePrefetchMaxItem); qerr != nil {
+	if smimePrefetchMaxItem > fastSMIME || inlinePrefetchMaxItem > fastInline {
+		if items, qerr := queryGlobal(smimePrefetchMaxItem, inlinePrefetchMaxItem); qerr != nil {
 			return nil, 0, prioGen, qerr
 		} else if len(items) > 0 {
 			return items, smimeTierGlobal, prioGen, nil
@@ -1023,7 +1170,7 @@ func sortBatchByFolder(items []smimeCandidate) {
 	})
 }
 
-// prefetchSMIMEAccount 按优先级与最近时间分批预取 smime.p7m 密文，遇到交互查看让路并在退避后恢复。
+// prefetchSMIMEAccount 按优先级与最近时间分批预取 smime.p7m 密文与内嵌图片，遇到交互查看让路并在退避后恢复。
 func (s *Service) prefetchSMIMEAccount(ctx context.Context, accountID int64) (retryAfter time.Duration) {
 	st := s.smime
 	if st == nil {
@@ -1033,14 +1180,17 @@ func (s *Service) prefetchSMIMEAccount(ctx context.Context, accountID int64) (re
 		if err := st.waitDelay(ctx, accountID, true); err != nil {
 			return 0
 		}
-		sumRows, err := s.db.Query(ctx, `SELECT COALESCE(SUM(a.size), 0)
+		sumRows, err := s.db.Query(ctx, `SELECT
+			COALESCE(SUM(CASE WHEN a.part = '1' AND `+smimeP7MPredicate+` THEN a.size ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN COALESCE(a.part, '') != '' AND `+inlineImagePredicate+` THEN a.size ELSE 0 END), 0)
 			FROM attachments a JOIN messages m ON m.id = a.message_id
-			WHERE m.account_id = ? AND a.cache_path IS NOT NULL AND a.part = '1' AND `+smimeP7MPredicate, accountID)
+			WHERE m.account_id = ? AND a.cache_path IS NOT NULL`, accountID)
 		if err != nil || len(sumRows.Values) == 0 {
 			return 0
 		}
-		used := store.Int(sumRows.Values[0][0])
-		items, tier, prioGen, err := s.querySMIMEBatch(ctx, accountID, used)
+		smimeUsed := store.Int(sumRows.Values[0][0])
+		inlineUsed := store.Int(sumRows.Values[0][1])
+		items, tier, prioGen, err := s.querySMIMEBatch(ctx, accountID, smimeUsed, inlineUsed)
 		if err != nil || len(items) == 0 {
 			return 0
 		}

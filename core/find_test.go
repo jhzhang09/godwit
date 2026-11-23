@@ -292,3 +292,29 @@ func TestFindAndCompleteCardDAVContacts(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, comp)
 }
+
+func TestFindMultiKeywordAcrossKinds(t *testing.T) {
+	s := newMailContextService(t)
+	day := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	m1 := addMessage(t, s, "【人事行政部】2024年清明放假通知", "Alice <alice@acme.example>", "请查收附件", "", day.Unix())
+	_, err := s.db.Execute(t.Context(), `INSERT INTO attachments(message_id, part, filename, content_type, size, inline) VALUES (?, '2', '2024年审查模板.docx', 'application/octet-stream', 100, 0)`, m1)
+	require.NoError(t, err)
+	_, err = s.db.Execute(t.Context(), `INSERT INTO attachments(message_id, part, filename, content_type, size, inline) VALUES (?, '3', '2025年审查模板.docx', 'application/octet-stream', 100, 0)`, m1)
+	require.NoError(t, err)
+	_, err = s.db.Execute(t.Context(), `INSERT INTO conversations(kind, title, created_at, updated_at) VALUES ('ask', '2024 清明放假安排汇总', 100, 200)`)
+	require.NoError(t, err)
+
+	got, err := s.Find(t.Context(), FindQuery{SearchQuery: SearchQuery{Text: "2024 模板"}, Kind: "attachment"})
+	require.NoError(t, err)
+	require.Len(t, got.Attachments.Items, 1)
+	assert.Equal(t, "2024年审查模板.docx", got.Attachments.Items[0].Filename)
+
+	got, err = s.Find(t.Context(), FindQuery{SearchQuery: SearchQuery{Text: "2024 汇总"}, Kind: "conversation"})
+	require.NoError(t, err)
+	require.Len(t, got.Conversations.Items, 1)
+
+	got, err = s.Find(t.Context(), FindQuery{SearchQuery: SearchQuery{Text: "Alice acme"}, Kind: "contact"})
+	require.NoError(t, err)
+	require.Len(t, got.Contacts.Items, 1)
+	assert.Equal(t, "alice@acme.example", got.Contacts.Items[0].Address)
+}

@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/godwit-email/godwit/core/store"
 	"github.com/stretchr/testify/require"
 )
 
@@ -70,4 +71,43 @@ func TestSearchWithFilters(t *testing.T) {
 	require.NoError(t, s.SetLabel(t.Context(), []int64{old}, otp, false))
 	require.Equal(t, []int64{recent}, ids(SearchQuery{LabelID: otp}))
 	require.Equal(t, []int64{recent}, ids(SearchQuery{Text: "budget", LabelID: otp}))
+}
+
+func TestSearchMultiKeyword(t *testing.T) {
+	s := newMailContextService(t)
+	day := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	m1 := addMessage(t, s, "【人事行政部】2024年清明放假通知", "HR <hr@tendyron.com>", "请查收2024年清明放假安排", "", day.Unix())
+	m2 := addMessage(t, s, "【人事行政部】2025年清明放假通知", "HR <hr@tendyron.com>", "请查收2025年清明放假安排", "", day.AddDate(0, 0, 1).Unix())
+	m3 := addMessage(t, s, "2024年度总结", "Alice <alice@tendyron.com>", "全年工作汇报", "", day.AddDate(0, 0, 2).Unix())
+
+	ids := func(text string) []int64 {
+		t.Helper()
+		got, err := s.SearchWith(t.Context(), SearchQuery{Text: text}, 10)
+		require.NoError(t, err)
+		var out []int64
+		for _, m := range got {
+			out = append(out, m.ID)
+		}
+		return out
+	}
+
+	// Mixed 4-rune (FTS) + 2-rune (LIKE) keywords.
+	require.Equal(t, []int64{m1}, ids("2024 清明"))
+	// Full-width space separator.
+	require.Equal(t, []int64{m1}, ids("2024\u3000清明"))
+	// Cross-field: sender + subject/body.
+	require.Equal(t, []int64{m2}, ids("hr 2025"))
+	require.Equal(t, []int64{m3}, ids("alice 汇报"))
+	// Extra non-matching keyword yields empty.
+	require.Empty(t, ids("2024 清明 不存在"))
+
+	// OpNotContains on FieldAny with multi-keyword value must negate the whole AND expression.
+	sqlStr, args := (RuleCondition{Field: FieldAny, Op: OpNotContains, Value: "2024 清明"}).sql(day.Unix())
+	rows, err := s.db.Query(t.Context(), "SELECT id FROM messages m WHERE "+sqlStr+" ORDER BY id", args...)
+	require.NoError(t, err)
+	var kept []int64
+	for _, r := range rows.Values {
+		kept = append(kept, store.Int(r[0]))
+	}
+	require.Equal(t, []int64{m2, m3}, kept)
 }

@@ -44,6 +44,7 @@ func readFile(p string) ([]byte, error) { return os.ReadFile(p) }
 type attRow struct {
 	info                    AttachmentInfo
 	part, encoding, charset string
+	contentID               string
 	cachePath               string
 	accountID               int64
 	at                      backend.Location
@@ -52,7 +53,7 @@ type attRow struct {
 }
 
 func (s *Service) loadAttachment(ctx context.Context, id int64) (attRow, error) {
-	rows, err := s.db.Query(ctx, `SELECT a.part, a.encoding, a.charset, a.filename, a.content_type, a.size, a.inline, a.cache_path,
+	rows, err := s.db.Query(ctx, `SELECT a.part, a.encoding, a.charset, COALESCE(a.content_id, ''), a.filename, a.content_type, a.size, a.inline, a.cache_path,
 		m.account_id, f.server_ref, l.server_ref, m.content_hash
 		FROM attachments a JOIN messages m ON m.id = a.message_id LEFT JOIN `+serverLocation+`
 		WHERE a.id = ?`, id)
@@ -64,10 +65,10 @@ func (s *Service) loadAttachment(ctx context.Context, id int64) (attRow, error) 
 	}
 	r := rows.Values[0]
 	return attRow{
-		info: AttachmentInfo{ID: id, Filename: store.Str(r[3]), ContentType: store.Str(r[4]), Size: int(store.Int(r[5])), Inline: store.Int(r[6]) != 0},
-		part: store.Str(r[0]), encoding: store.Str(r[1]), charset: store.Str(r[2]), cachePath: store.Str(r[7]),
-		accountID: store.Int(r[8]), at: location(r[9], r[10]),
-		onServer: store.Str(r[9]) != "" && r[10] != nil, contentHash: store.Str(r[11]),
+		info: AttachmentInfo{ID: id, Filename: store.Str(r[4]), ContentType: store.Str(r[5]), Size: int(store.Int(r[6])), Inline: store.Int(r[7]) != 0},
+		part: store.Str(r[0]), encoding: store.Str(r[1]), charset: store.Str(r[2]), contentID: store.Str(r[3]), cachePath: store.Str(r[8]),
+		accountID: store.Int(r[9]), at: location(r[10], r[11]),
+		onServer: store.Str(r[10]) != "" && r[11] != nil, contentHash: store.Str(r[12]),
 	}, nil
 }
 

@@ -886,23 +886,33 @@ func dateGroup(now, t time.Time) string {
 	return i18n.T("mail.group.older")
 }
 
-// highlight splits text into spans, the matches of query (a plain substring,
-// each rune compared case-insensitively) marked with the highlight tokens.
-// No query gives no spans.
+// highlight splits text into spans, the matches of query's whitespace-separated
+// terms (each rune compared case-insensitively, longest match first) marked with
+// the highlight tokens. No query gives no spans.
 func highlight(t theme.Tokens, text, query string) []ui.Span {
-	q := []rune(query)
-	if len(q) == 0 {
+	fields := strings.Fields(query)
+	if len(fields) == 0 {
 		return nil
+	}
+	terms := make([][]rune, len(fields))
+	for i, f := range fields {
+		terms[i] = []rune(f)
 	}
 	var out []ui.Span
 	start := 0
 	for i := 0; i < len(text); {
-		if n := matchAt(text[i:], q); n > 0 {
+		best := 0
+		for _, q := range terms {
+			if n := matchAt(text[i:], q); n > best {
+				best = n
+			}
+		}
+		if best > 0 {
 			if i > start {
 				out = append(out, ui.Span{Text: text[start:i]})
 			}
-			out = append(out, ui.Span{Text: text[i : i+n], Background: t.Highlight, Color: t.HighlightText})
-			i += n
+			out = append(out, ui.Span{Text: text[i : i+best], Background: t.Highlight, Color: t.HighlightText})
+			i += best
 			start = i
 			continue
 		}

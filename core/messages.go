@@ -329,6 +329,7 @@ func (s *Service) ListMessages(ctx context.Context, v View, cursor string, limit
 	if err := s.fillFromNames(ctx, page.Items); err != nil {
 		return MessagePage{}, err
 	}
+	s.prioritizeMessageThreads(page.Items)
 	return page, nil
 }
 
@@ -421,24 +422,49 @@ func (s *Service) searchMessages(ctx context.Context, cond string, args []any, l
 	return out, nil
 }
 
-// searchText is the condition on messages alias m that text matches: "1"
-// for blank text.
-func searchText(text string) (string, []any) {
-	query := strings.TrimSpace(text)
-	cond, args := "1", []any(nil)
-	switch {
-	case query == "":
-	case utf8.RuneCountInString(query) < 3:
-		// ponytail: full scan; use a bigram index when mailboxes get large.
-		like := likeArg(query)
-		cond = `(m.subject LIKE ? ESCAPE '\' OR m.from_addr LIKE ? ESCAPE '\' OR m.body_text LIKE ? ESCAPE '\' OR m.id IN (SELECT ml.message_id FROM message_labels ml JOIN labels l ON l.id = ml.label_id WHERE ml.active = 1 AND (l.name LIKE ? ESCAPE '\' OR l.slug LIKE ? ESCAPE '\')))`
-		args = []any{like, like, like, like, like}
-	default:
-		like := likeArg(query)
-		cond = `(m.id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?) OR m.id IN (SELECT ml.message_id FROM message_labels ml JOIN labels l ON l.id = ml.label_id WHERE ml.active = 1 AND (l.name LIKE ? ESCAPE '\' OR l.slug LIKE ? ESCAPE '\')))`
-		args = []any{`"` + strings.ReplaceAll(query, `"`, `""`) + `"`, like, like}
+// searchTerms splits text on whitespace and deduplicates tokens case-insensitively.
+func searchTerms(text string) []string {
+	fields := strings.Fields(text)
+	if len(fields) <= 1 {
+		return fields
 	}
-	return cond, args
+	seen := make(map[string]bool, len(fields))
+	out := make([]string, 0, len(fields))
+	for _, f := range fields {
+		k := strings.ToLower(f)
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, f)
+	}
+	return out
+}
+
+// searchText is the condition on messages alias m that text matches: "1"
+// for blank text; whitespace-separated terms are ANDed together.
+func searchText(text string) (string, []any) {
+	terms := searchTerms(text)
+	if len(terms) == 0 {
+		return "1", nil
+	}
+	parts := make([]string, 0, len(terms))
+	var args []any
+	for _, t := range terms {
+		like := likeArg(t)
+		if utf8.RuneCountInString(t) < 3 {
+			// ponytail: full scan; use a bigram index when mailboxes get large.
+			parts = append(parts, `(m.subject LIKE ? ESCAPE '\' OR m.from_addr LIKE ? ESCAPE '\' OR m.body_text LIKE ? ESCAPE '\' OR m.id IN (SELECT ml.message_id FROM message_labels ml JOIN labels l ON l.id = ml.label_id WHERE ml.active = 1 AND (l.name LIKE ? ESCAPE '\' OR l.slug LIKE ? ESCAPE '\')))`)
+			args = append(args, like, like, like, like, like)
+		} else {
+			parts = append(parts, `(m.id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?) OR m.id IN (SELECT ml.message_id FROM message_labels ml JOIN labels l ON l.id = ml.label_id WHERE ml.active = 1 AND (l.name LIKE ? ESCAPE '\' OR l.slug LIKE ? ESCAPE '\')))`)
+			args = append(args, `"`+strings.ReplaceAll(t, `"`, `""`)+`"`, like, like)
+		}
+	}
+	if len(parts) == 1 {
+		return parts[0], args
+	}
+	return "(" + strings.Join(parts, " AND ") + ")", args
 }
 
 // searchFilter is the condition on messages alias m for q's account and
@@ -767,6 +793,9 @@ func (s *Service) readMessage(ctx context.Context, id int64, loadRemoteImages, l
 		}
 	}
 	if lazy {
+		if len(inline) > 0 && msg.ThreadID != 0 {
+			s.prioritizeSMIMEThread(msg.ThreadID)
+		}
 		if raw != "" {
 			msg.HTML, msg.RemoteImagesBlocked, msg.TrackersBlocked = gomail.SanitizeLazy(raw, inline, loadRemoteImages)
 		}

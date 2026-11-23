@@ -506,15 +506,21 @@ func (p *palette) convItems(cs []core.Conversation) []palItem {
 }
 
 func (p *palette) contactItems(cs []core.Contact) []palItem {
-	q := strings.ToLower(strings.TrimSpace(p.hl))
+	terms := strings.Fields(strings.ToLower(p.hl))
 	out := make([]palItem, 0, len(cs))
 	for _, ct := range cs {
 		addr := ct.Address
 		sub := addr
-		if q != "" && !strings.Contains(strings.ToLower(addr), q) {
-			for _, ea := range ct.Addresses {
-				if strings.Contains(strings.ToLower(ea.Address), q) {
-					sub = ea.Address
+		if len(terms) > 0 {
+			lowAddr := strings.ToLower(addr)
+			for _, term := range terms {
+				if !strings.Contains(lowAddr, term) {
+					for _, ea := range ct.Addresses {
+						if strings.Contains(strings.ToLower(ea.Address), term) {
+							sub = ea.Address
+							break
+						}
+					}
 					break
 				}
 			}
@@ -579,14 +585,28 @@ func (p *palette) actions() []palItem {
 	for i := range all {
 		all[i].isAction = true
 	}
-	q := []rune(strings.TrimSpace(p.query))
+	fields := strings.Fields(p.query)
+	if len(fields) == 0 {
+		return all
+	}
+	terms := make([][]rune, len(fields))
+	for i, f := range fields {
+		terms[i] = []rune(f)
+	}
 	return slices.DeleteFunc(all, func(it palItem) bool {
-		for i := range it.title {
-			if matchAt(it.title[i:], q) > 0 {
-				return false
+		for _, q := range terms {
+			found := false
+			for i := range it.title {
+				if matchAt(it.title[i:], q) > 0 {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return true
 			}
 		}
-		return len(q) > 0
+		return false
 	})
 }
 

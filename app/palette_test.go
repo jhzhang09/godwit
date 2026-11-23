@@ -470,3 +470,21 @@ func TestPaletteRecentSearches(t *testing.T) {
 		h.until("invoice removed from recent", func() bool { return !inPalette(h, "invoice") })
 	}
 }
+
+func TestPaletteMultiKeywordActions(t *testing.T) {
+	h, accs := mailHarness(t, nil, "alice@example.com")
+	h.put(accs[0], "INBOX", coretest.Msg("hr@tendyron.com", "alice@example.com", "【人事行政部】2024年清明放假通知", "请查收"))
+	h.syncNow(accs[0])
+	h.waitMail("one thread", func() bool { return len(h.items()) == 1 })
+
+	h.tt.Key(ui.Cmd, ui.KeyK)
+	h.until("the palette", func() bool { return paletteShown(h) })
+	h.typeText("2024 清明")
+	h.see("2024年清明放假通知")
+
+	h.tt.Key(ui.Cmd, ui.KeyA)
+	h.tt.Key(0, ui.KeyBackspace)
+	h.typeText("打开 设置")
+	h.see("操作 · 1")
+	h.see("打开设置")
+}

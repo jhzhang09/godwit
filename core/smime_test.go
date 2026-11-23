@@ -921,3 +921,116 @@ func TestSMIMEForwardSkipsSMIMEParts(t *testing.T) {
 	require.Len(t, d.Attachments, 1)
 	assert.Equal(t, "report.pdf", d.Attachments[0].Filename)
 }
+
+func TestInlineImagePrefetchCachesInlineAndRespectsBudget(t *testing.T) {
+	e := newSendEnv(t, false)
+	setFor(t, &smimePrefetchBudget, 10) // S/MIME budget already exhausted
+	setFor(t, &inlinePrefetchBudget, 4096)
+	setFor(t, &inlinePrefetchMaxItem, 2048)
+
+	inlineImg := base64.StdEncoding.EncodeToString([]byte("inline-png-bytes"))
+	attImg := base64.StdEncoding.EncodeToString([]byte("regular-att-png"))
+	raw := "Message-ID: <inline-pref@x>\r\nFrom: bob@example.com\r\nTo: alice@example.com\r\nSubject: Poster\r\nDate: Mon, 05 Oct 2026 09:00:00 +0000\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"B\"\r\n\r\n" +
+		"--B\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<img src=\"cid:poster@x\">\r\n" +
+		"--B\r\nContent-Type: image/png\r\nContent-ID: <poster@x>\r\nContent-Disposition: inline; filename=\"poster.png\"\r\nContent-Transfer-Encoding: base64\r\n\r\n" + inlineImg + "\r\n" +
+		"--B\r\nContent-Type: image/png\r\nContent-Disposition: attachment; filename=\"download.png\"\r\nContent-Transfer-Encoding: base64\r\n\r\n" + attImg + "\r\n" +
+		"--B--\r\n"
+	e.put(t, "INBOX", raw)
+	e.sync(t)
+
+	// Mark existing S/MIME budget as full? smimePrefetchBudget is 10 and inlinePrefetchBudget is 4096.
+	// Also test visible/urgent priority via ListMessages / GetMessageLazyImages.
+	pages, err := e.s.ListMessages(bg, e.inboxView(t), "", 10)
+	require.NoError(t, err)
+	require.Len(t, pages.Items, 1)
+
+	beforeLogins := e.im.Logins()
+	retryAfter := e.s.prefetchSMIMEAccount(t.Context(), e.acc.ID)
+	require.Zero(t, retryAfter)
+	require.Equal(t, beforeLogins+1, e.im.Logins())
+
+	rows := e.rows(t, `SELECT filename, cache_path FROM attachments ORDER BY id`)
+	got := map[string]string{}
+	for _, r := range rows {
+		got[store.Str(r[0])] = store.Str(r[1])
+	}
+	require.NotEmpty(t, got["poster.png"], "inline image should be prefetched")
+	require.Empty(t, got["download.png"], "non-inline image attachment should not be prefetched")
+
+	b, err := os.ReadFile(got["poster.png"])
+	require.NoError(t, err)
+	require.Equal(t, []byte("inline-png-bytes"), b)
+}
+
+func TestInlineImagePrefetchInflightDedup(t *testing.T) {
+	e := newSendEnv(t, false)
+	inlineImg := base64.StdEncoding.EncodeToString([]byte("dedup-png-bytes"))
+	raw := "Message-ID: <inline-dedup@x>\r\nFrom: bob@example.com\r\nTo: alice@example.com\r\nSubject: Dedup\r\nDate: Mon, 05 Oct 2026 09:00:00 +0000\r\nMIME-Version: 1.0\r\nContent-Type: multipart/related; boundary=\"R\"\r\n\r\n" +
+		"--R\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<img src=\"cid:dedup@x\">\r\n" +
+		"--R\r\nContent-Type: image/png\r\nContent-ID: <dedup@x>\r\nContent-Disposition: inline; filename=\"dedup.png\"\r\nContent-Transfer-Encoding: base64\r\n\r\n" + inlineImg + "\r\n" +
+		"--R--\r\n"
+	e.put(t, "INBOX", raw)
+	e.sync(t)
+
+	rows := e.rows(t, `SELECT id FROM attachments WHERE filename = 'dedup.png'`)
+	require.Len(t, rows, 1)
+	attID := store.Int(rows[0][0])
+
+	// Simulate an in-flight prefetch holding the inflight entry while interactive fetchInlineDirect arrives.
+	existing, finish := e.s.smime.acquireInflight(attID)
+	require.Nil(t, existing)
+
+	type res struct {
+		path    string
+		handled bool
+		err     error
+	}
+	ch := make(chan res, 1)
+	go func() {
+		fctx, end, berr := e.s.begin(t.Context(), 0)
+		if berr != nil {
+			ch <- res{err: berr}
+			return
+		}
+		defer end()
+		p, handled, _, err := e.s.fetchInlineDirect(fctx, attID)
+		ch <- res{path: p, handled: handled, err: err}
+	}()
+
+	// Let fetchInlineDirect block on existing.done, then complete the simulated prefetch.
+	time.Sleep(30 * time.Millisecond)
+	beforeLogins := e.im.Logins()
+	p, handled, _, err := e.s.fetchSMIMEPartForDedupTest(t.Context(), attID, e.acc.ID)
+	require.NoError(t, err)
+	require.True(t, handled)
+	finish(p, nil)
+
+	got := <-ch
+	require.NoError(t, got.err)
+	require.True(t, got.handled)
+	require.Equal(t, p, got.path)
+	require.Equal(t, beforeLogins+1, e.im.Logins(), "concurrent prefetch + interactive open should only fetch once")
+}
+
+func (s *Service) fetchSMIMEPartForDedupTest(ctx context.Context, attID, accID int64) (string, bool, bool, error) {
+	a, err := s.loadAttachment(ctx, attID)
+	if err != nil {
+		return "", true, false, err
+	}
+	c := s.smime.borrowConn(accID, false)
+	if c == nil {
+		recv, cancel, derr := s.dialSMIMEConn(ctx, s.smime, accID, false)
+		if derr != nil {
+			return "", true, true, derr
+		}
+		c = &smimeConn{recv: recv, release: cancel}
+	}
+	data, err := fetchPart(ctx, c.recv, a)
+	if err != nil {
+		c.release()
+		return "", true, false, err
+	}
+	s.smime.returnConn(accID, false, c)
+	p, err := s.saveAttachmentChecked(ctx, a, data)
+	return p, true, false, err
+}

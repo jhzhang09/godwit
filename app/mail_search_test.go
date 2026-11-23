@@ -39,6 +39,8 @@ func TestHighlightSpans(t *testing.T) {
 		{"İstanbul", "i", 0}, // no simple fold pairs İ with i
 		{"Kelvin", "k", 1},
 		{"Straße", "ß", 1},
+		{"【人事行政部】2024年清明放假通知", "2024 清明", 2},
+		{"2024年度", "2024 2024年", 1},
 	} {
 		sp := highlight(th, c.text, c.q)
 		if c.q == "" {
