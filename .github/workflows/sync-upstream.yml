@@ -1,0 +1,148 @@
+name: Sync Upstream
+
+# 每天定时检查上游 godwit-email/godwit:main 的更新：
+# 1. 快进同步 origin/main；
+# 2. 在临时分支 sync/upstream-main 上试合并 upstream/main -> smime；
+# 3. 无冲突则推送分支并创建/更新 Sync PR；有冲突则中止合并并在追踪 Issue 汇总冲突文件。
+on:
+  schedule:
+    - cron: "0 20 * * *" # 每日 04:00 CST
+  workflow_dispatch:
+    inputs:
+      sync_main:
+        description: "同时快进同步 origin/main 到上游 main"
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: smime
+          fetch-depth: 0
+
+      - name: Configure git and fetch upstream
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/godwit-email/godwit.git
+          git fetch upstream main
+          git fetch origin main || true
+
+      - name: Fast-forward origin/main
+        if: inputs.sync_main != false
+        run: |
+          git push origin refs/remotes/upstream/main:refs/heads/main || echo "::warning::无法快进推送 origin/main，继续检查 smime 合并状态"
+
+      - name: Try merging upstream/main into sync/upstream-main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ISSUE_TITLE="[Upstream Sync] 上游 main 有新提交待合并（存在冲突）"
+          behind="$(git rev-list --count HEAD..upstream/main)"
+
+          find_open_issue() {
+            gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$ISSUE_TITLE\" in:title" --json number,title --jq ".[] | select(.title == \"$ISSUE_TITLE\") | .number" | head -n 1
+          }
+
+          close_issue_if_open() {
+            local msg="$1"
+            local num
+            num="$(find_open_issue || true)"
+            if [[ -n "$num" ]]; then
+              gh issue close "$num" --repo "$GITHUB_REPOSITORY" --comment "$msg" || true
+            fi
+          }
+
+          if [[ "$behind" == "0" ]]; then
+            echo "smime 已包含上游 main 的全部提交。"
+            close_issue_if_open "当前 \`smime\` 分支已与上游 \`main\` 同步，自动关闭本追踪 Issue。"
+            exit 0
+          fi
+
+          commits="$(git log --oneline --no-merges -n 40 HEAD..upstream/main)"
+          git checkout -B sync/upstream-main
+
+          if git merge --no-edit --no-ff upstream/main; then
+            git push --force origin sync/upstream-main
+            pr_body="$(cat <<EOF
+          自动检测到上游 \`godwit-email/godwit:main\` 新增 **${behind}** 个提交，已无冲突试合并到 \`sync/upstream-main\`。
+
+          ### 上游提交列表
+          \`\`\`text
+          ${commits}
+          \`\`\`
+
+          > 请在合并前确认测试与绑定生成（\`go tool mygo generate\`）通过，并按 \`docs/fork-sync.md\` 核对 Fork 保护项。
+          EOF
+          )"
+            existing_pr="$(gh pr list --repo "$GITHUB_REPOSITORY" --head sync/upstream-main --base smime --state open --json number --jq '.[0].number' || true)"
+            if [[ -n "$existing_pr" ]]; then
+              gh pr edit "$existing_pr" --repo "$GITHUB_REPOSITORY" --title "chore(sync): 合并上游 main (${behind} 个提交)" --body "$pr_body"
+              close_issue_if_open "无冲突试合并分支 \`sync/upstream-main\` 已更新至 PR #${existing_pr}。"
+            elif gh pr create --repo "$GITHUB_REPOSITORY" --base smime --head sync/upstream-main --title "chore(sync): 合并上游 main (${behind} 个提交)" --body "$pr_body"; then
+              close_issue_if_open "已创建无冲突同步 PR（源分支 \`sync/upstream-main\`）。"
+            else
+              echo "::warning::创建 PR 失败（可能未开启 Actions 创建 PR 权限），改为更新追踪 Issue。"
+              issue_body="$(cat <<EOF
+          上游 \`godwit-email/godwit:main\` 新增 **${behind}** 个提交，已在分支 \`sync/upstream-main\` 完成无冲突试合并（因仓库未开启 Actions 自动提 PR 权限，请直接对比合并该分支）。
+
+          ### 上游提交列表
+          \`\`\`text
+          ${commits}
+          \`\`\`
+          EOF
+          )"
+              num="$(find_open_issue || true)"
+              if [[ -n "$num" ]]; then
+                gh issue edit "$num" --repo "$GITHUB_REPOSITORY" --body "$issue_body"
+              else
+                gh issue create --repo "$GITHUB_REPOSITORY" --title "$ISSUE_TITLE" --body "$issue_body"
+              fi
+            fi
+          else
+            conflicts="$(git diff --name-only --diff-filter=U | sort)"
+            git merge --abort || true
+            issue_body="$(cat <<EOF
+          上游 \`godwit-email/godwit:main\` 新增 **${behind}** 个提交，自动试合并到 \`smime\` 时发生冲突，已安全中止（\`smime\` 分支未受影响）。
+
+          ### 冲突文件
+          \`\`\`text
+          ${conflicts}
+          \`\`\`
+
+          ### 上游提交列表
+          \`\`\`text
+          ${commits}
+          \`\`\`
+
+          ### 建议处理方式
+          请参照 [docs/fork-sync.md](docs/fork-sync.md) 在本地合并并解冲突：
+          \`\`\`sh
+          git fetch upstream main
+          git merge upstream/main
+          go tool mygo generate
+          \`\`\`
+          EOF
+          )"
+            num="$(find_open_issue || true)"
+            if [[ -n "$num" ]]; then
+              gh issue edit "$num" --repo "$GITHUB_REPOSITORY" --body "$issue_body"
+            else
+              gh issue create --repo "$GITHUB_REPOSITORY" --title "$ISSUE_TITLE" --body "$issue_body"
+            fi
+          fi

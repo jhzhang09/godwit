@@ -16,6 +16,10 @@ Single-context: one `GLOSSARY.md` and `docs/adr/` at the repo root. See `docs/ag
 
 Before reviewing code changes or re-reviewing fixes, read [docs/agents/code-review.md](docs/agents/code-review.md).
 
+### Upstream sync
+
+When merging upstream `godwit-email/godwit:main` into `smime`, follow [docs/fork-sync.md](docs/fork-sync.md) (especially keeping `core/store/schema.go` `Migrations` aligned 1:1 with upstream and putting Fork-only schema changes in `DB.ensureForkSchema`).
+
 ## Model-facing interfaces
 
 When adding or widening anything a model or extension can call (a Wit tool, a plugin host API or permission, a `godwit mcp` tool, an `mcp`-role method), read ADR 0003 and 0004 first, then hold the change to these rules. Terms follow `GLOSSARY.md`.
