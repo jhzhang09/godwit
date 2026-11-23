@@ -47,6 +47,7 @@ func (p *palette) viewAll() {
 	if !sf.accSet {
 		sf.acc, sf.accSet = 0, true
 	}
+	p.a.recordRecentSearch(p.query)
 	p.open = false
 	p.a.mail.searchFor(p.query, sf)
 }

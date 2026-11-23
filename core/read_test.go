@@ -1061,3 +1061,37 @@ func TestThreadReplyTargetOnlyForwards(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, th.ReplyTarget)
 }
+
+func TestInlineImagesStreamBypassesAccountLockAndReusesConn(t *testing.T) {
+	e := newSyncEnv(t)
+	e.put(t, "INBOX", inlineImagesMail([]string{"a1", "a2"}, nil))
+	e.put(t, "INBOX", inlineImagesMail([]string{"b1", "b2"}, nil))
+	e.sync(t)
+	ids := e.rows(t, "SELECT id FROM messages ORDER BY id")
+	require.Len(t, ids, 2)
+	id1, id2 := ids[0][0].(int64), ids[1][0].(int64)
+
+	// Hold the account lock (simulating a long folder sync): InlineImagesStream still completes immediately.
+	unlock, err := e.s.lockAccount(bg, e.acc.ID)
+	require.NoError(t, err)
+	defer unlock()
+
+	before := e.im.Logins()
+	drain := func(id int64) []string {
+		ctx, cancel := context.WithTimeout(bg, 3*time.Second)
+		defer cancel()
+		ch, err := e.s.InlineImagesStream(ctx, id)
+		require.NoError(t, err)
+		var cids []string
+		for it := range ch {
+			require.NoError(t, it.Err)
+			cids = append(cids, it.CID)
+		}
+		return cids
+	}
+
+	assert.Equal(t, []string{"a1", "a2"}, drain(id1))
+	assert.Equal(t, []string{"b1", "b2"}, drain(id2))
+	// Reuses the warm interactive read-only connection across both messages (1 login total).
+	assert.Equal(t, before+1, e.im.Logins())
+}

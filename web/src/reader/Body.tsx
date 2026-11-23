@@ -1,4 +1,4 @@
-import { RiRefreshLine } from "@remixicon/react";
+import { RiLoaderLine, RiRefreshLine } from "@remixicon/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/button";
 import {
@@ -19,7 +19,17 @@ let nextDocument = 0;
 
 // Go refuses a taller body (webui maxBodyHeight): the page clamps to it.
 const MAX_HEIGHT = 1 << 20;
+const LOADING_MIN_HEIGHT = 96;
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
+const isProxyImage = (img: HTMLImageElement): boolean => {
+  const src = img.getAttribute("src") ?? "";
+  return src.startsWith("godwit-img:") || /^http:\/\/[^/]+\.godwit-img\.localhost\//i.test(src);
+};
+
+const resetScroll = (w: Window | null | undefined) => {
+  if (w && w.scrollY !== 0 && typeof w.scrollTo === "function") w.scrollTo(0, 0);
+};
 
 /**
  * The reader page: one expanded message's body (role "reader"), embedded in the native reader.
@@ -271,6 +281,8 @@ export function Body({ body, theme }: { body: ReaderBody; theme: Theme }) {
   }, [body, theme, systemDark]);
   const frame = useRef<HTMLIFrameElement>(null);
   const [tip, setTip] = useState<QuoteTip | null>(null);
+  const [pendingImages, setPendingImages] = useState(0);
+  const [frameHeight, setFrameHeight] = useState(0);
   const t = useT(body.locale);
   const labels = useMemo(
     () => ({ expand: t("reader.quote.expand"), collapse: t("reader.quote.collapse") }),
@@ -280,7 +292,8 @@ export function Body({ body, theme }: { body: ReaderBody; theme: Theme }) {
   const dark = isDark(theme, systemDark);
   const fold = body.collapseQuotes && body.html !== ""; // plain text folds in its srcdoc
   const wire = useCallback(
-    (f: HTMLIFrameElement) => attach(f, theme, dark, labels, setTip, fold),
+    (f: HTMLIFrameElement) =>
+      attach(f, theme, dark, labels, setTip, fold, setPendingImages, setFrameHeight),
     [theme, dark, labels, fold],
   );
   useEffect(() => {
@@ -317,8 +330,19 @@ export function Body({ body, theme }: { body: ReaderBody; theme: Theme }) {
     };
   }, [wire, marker]);
 
+  const showLoading = pendingImages > 0 && frameHeight < 48;
+
   return (
     <>
+      {showLoading && (
+        <div
+          data-reader-loading=""
+          aria-busy="true"
+          className="flex h-24 items-center justify-center text-muted-foreground"
+        >
+          <RiLoaderLine className="size-4 animate-spin" />
+        </div>
+      )}
       <iframe
         ref={frame}
         title={t("reader.body")}
@@ -360,11 +384,15 @@ function attach(
   labels: { expand: string; collapse: string },
   setTip: (tip: QuoteTip | null) => void,
   fold: boolean,
+  setPendingImages: (count: number) => void,
+  setFrameHeight: (px: number) => void,
 ): () => void {
   const doc = frame.contentDocument;
   const win = frame.contentWindow;
   const wrap = doc?.getElementById("godwit-body");
   if (!doc || !win || !wrap) return ignore; // the initial about:blank
+  resetScroll(window);
+  resetScroll(win);
   // On the rendered document, where the mail's stylesheet applies; before the dark pass reads the
   // light baseline and before the first height. godwit-auto only hides the body until that dark
   // pass, which drops it first thing in this same task: the fold must see the text it hides.
@@ -444,11 +472,21 @@ function attach(
   // change of ≈Δ with no content change since (an image, the width) is that echo, so the last
   // height holds instead of chasing it.
   let last = -1;
+  let lastReported = -1;
   let echo = 0; // the iframe's last change made by the page
   let changed = true; // the content changed since then
   let queued = false;
+  const countPending = () => {
+    let n = 0;
+    for (const img of doc.images) {
+      if (isProxyImage(img) && !img.complete) n++;
+    }
+    return n;
+  };
   const measure = () => {
     syncFoldControls();
+    const pending = countPending();
+    setPendingImages(pending);
     const cs = win.getComputedStyle(doc.body);
     const ws = win.getComputedStyle(wrap);
     const extra = [
@@ -460,13 +498,22 @@ function attach(
       ws.marginBottom,
     ].reduce((a, v) => a + (Number.parseFloat(v) || 0), 0);
     const px = Math.min(MAX_HEIGHT, Math.ceil(wrap.getBoundingClientRect().height + extra));
-    if (px === last) return;
-    if (!changed && echo !== 0 && Math.abs(px - last - echo) <= 1) return;
-    changed = false;
-    echo = px - frame.getBoundingClientRect().height;
-    last = px;
-    frame.style.height = `${px}px`;
-    api.height(px).catch(ignore);
+    const reported = pending > 0 && px < 48 ? Math.max(px, LOADING_MIN_HEIGHT) : px;
+    if (px === last && reported === lastReported) return;
+    if (px !== last) {
+      if (!changed && echo !== 0 && Math.abs(px - last - echo) <= 1) return;
+      changed = false;
+      echo = px - frame.getBoundingClientRect().height;
+      last = px;
+      setFrameHeight(px);
+      frame.style.height = `${px}px`;
+      resetScroll(window);
+      resetScroll(win);
+    }
+    if (reported !== lastReported) {
+      lastReported = reported;
+      api.height(reported).catch(ignore);
+    }
   };
   const contentChanged = () => {
     changed = true;
@@ -641,6 +688,7 @@ function attach(
   return () => {
     live = false;
     setTip(null);
+    setPendingImages(0);
     for (const off of offs) off();
   };
 }

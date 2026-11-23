@@ -273,6 +273,8 @@ type App struct {
 	listW                        float32 // the mail list's width as dragged; 0 until the mail page shows
 	sidebarSave                  func()  // stops the pending save of a dragged width
 	latest                       string  // a newer version the update feed offers (watchLatest); "" none
+	recentSearches               []recentSearch
+	recentSearchesLoaded         bool
 	latestInstalls               bool    // it installs itself and waits for a relaunch
 
 	dirty             []events.Event // events since the last refresh

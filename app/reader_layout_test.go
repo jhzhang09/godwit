@@ -585,3 +585,54 @@ func TestReaderLongSubjectWrapsAndSlimTooltip(t *testing.T) {
 		t.Fatalf("expected hover tooltip on truncated slim bar at centered x=%d (occurrences before=%d, after=%d)", slimInkX+40, before, after)
 	}
 }
+
+// Opening a thread or switching between threads with different header heights
+// never inserts a blank spacer gap between the header and the message avatar.
+func TestReaderNoTopBlankSpacerOnOpenOrSwitch(t *testing.T) {
+	h, acc, _ := aiHarness(t, false, noAuto)
+	shortMsg := h.deliverOne(acc, coretest.Msg("bob@example.com", acc.Email, "Short", "first body"))
+	longSubj := "Very long subject line that wraps across multiple lines in the expanded reader header to produce a taller header height"
+	longMsg := h.deliverOne(acc, coretest.Msg("carol@example.com", acc.Email, longSubj, "second body"))
+
+	checkNoBlankGap := func(addr string) {
+		t.Helper()
+		r := h.app.mail.reader
+		avatar, ok := h.tt.Find(addr)
+		if !ok {
+			t.Fatalf("avatar %q not found", addr)
+		}
+		gap := avatar.Y - (r.pane.Y + r.barTop)
+		// Message row padding + avatar margin is ~28 px; a header-height blank spacer would be > 70 px.
+		if gap > 56 {
+			t.Fatalf("blank spacer gap between header (pane.Y=%.1f, barTop=%.1f) and %s avatar (Y=%.1f): gap=%.1f",
+				r.pane.Y, r.barTop, addr, avatar.Y, gap)
+		}
+	}
+
+	h.openThread(shortMsg.ThreadID)
+	h.seeBody(shortMsg.ID)
+	h.tt.Frame()
+	checkNoBlankGap("bob@example.com")
+
+	// Scroll first thread so p > 0, then switch to a thread with a taller header.
+	r := h.app.mail.reader
+	r.scroll.Y = 200
+	h.tt.Frame()
+
+	h.openThread(longMsg.ThreadID)
+	v := h.seeBody(longMsg.ID)
+	h.app.BodyHeight(v, longMsg.ID, 600)
+	for range 4 {
+		h.tt.Frame()
+		checkNoBlankGap("carol@example.com")
+	}
+
+	// Switch back to the shorter-header thread.
+	h.openThread(shortMsg.ThreadID)
+	v2 := h.seeBody(shortMsg.ID)
+	h.app.BodyHeight(v2, shortMsg.ID, 600)
+	for range 4 {
+		h.tt.Frame()
+		checkNoBlankGap("bob@example.com")
+	}
+}

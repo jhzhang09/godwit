@@ -1459,3 +1459,29 @@ test("fold summary inside a linked blockquote toggles without triggering openLin
   (doc.getElementById("q") as HTMLElement).click();
   expect(api.openLink).toHaveBeenCalledExactlyOnceWith("https://example.com");
 });
+
+test("shows loading indicator while image-only mail is pending and hides it after load", async () => {
+  const { doc, frame, win } = await start(
+    body(1, '<img id="poster" src="godwit-img://m1/poster">', { remote: true }),
+  );
+  const img = doc.getElementById("poster") as HTMLImageElement;
+  let complete = false;
+  Object.defineProperty(img, "complete", { configurable: true, get: () => complete });
+  const wrap = doc.getElementById("godwit-body") as HTMLElement;
+  wrap.getBoundingClientRect = () => ({ height: complete ? 420 : 0 }) as DOMRect;
+
+  act(() => {
+    win.dispatchEvent(new win.Event("resize"));
+  });
+  flush();
+  expect(frame.parentElement?.querySelector("[data-reader-loading]")).not.toBeNull();
+  expect(api.height).toHaveBeenLastCalledWith(96);
+
+  complete = true;
+  act(() => {
+    img.dispatchEvent(new Event("load"));
+  });
+  flush();
+  expect(frame.parentElement?.querySelector("[data-reader-loading]")).toBeNull();
+  expect(api.height).toHaveBeenLastCalledWith(420);
+});

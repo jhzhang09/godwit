@@ -3,6 +3,9 @@ package app
 import (
 	"cmp"
 	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -23,6 +26,86 @@ var paletteKinds = []string{"", "mail", "conversation", "contact", "attachment"}
 
 // paletteFew is how many hits of each kind 全部 shows.
 const paletteFew = 3
+
+const maxRecentSearches = 5
+
+type recentSearch struct {
+	Query string `json:"query"`
+	At    int64  `json:"at"`
+}
+
+func (a *App) recentSearchPath() string {
+	if a.plat == nil {
+		return ""
+	}
+	dir, _ := a.plat.DataDir()
+	if dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, "recent-searches.json")
+}
+
+func (a *App) loadRecentSearches() {
+	if a.recentSearchesLoaded {
+		return
+	}
+	a.recentSearchesLoaded = true
+	p := a.recentSearchPath()
+	if p == "" {
+		return
+	}
+	data, err := os.ReadFile(p)
+	if err != nil {
+		return
+	}
+	var list []recentSearch
+	if json.Unmarshal(data, &list) == nil {
+		if len(list) > maxRecentSearches {
+			list = list[:maxRecentSearches]
+		}
+		a.recentSearches = list
+	}
+}
+
+func (a *App) saveRecentSearches() {
+	p := a.recentSearchPath()
+	if p == "" {
+		return
+	}
+	data, err := json.Marshal(a.recentSearches)
+	if err != nil {
+		return
+	}
+	_ = os.MkdirAll(filepath.Dir(p), 0o755)
+	_ = writeAttachmentAtomic(p, data)
+}
+
+func (a *App) recordRecentSearch(q string) {
+	q = strings.TrimSpace(q)
+	if q == "" {
+		return
+	}
+	a.loadRecentSearches()
+	a.recentSearches = slices.DeleteFunc(a.recentSearches, func(rs recentSearch) bool {
+		return strings.EqualFold(rs.Query, q)
+	})
+	a.recentSearches = slices.Insert(a.recentSearches, 0, recentSearch{Query: q, At: a.clock.Now().Unix()})
+	if len(a.recentSearches) > maxRecentSearches {
+		a.recentSearches = a.recentSearches[:maxRecentSearches]
+	}
+	a.saveRecentSearches()
+}
+
+func (a *App) removeRecentSearch(q string) {
+	a.loadRecentSearches()
+	before := len(a.recentSearches)
+	a.recentSearches = slices.DeleteFunc(a.recentSearches, func(rs recentSearch) bool {
+		return strings.EqualFold(rs.Query, q)
+	})
+	if len(a.recentSearches) != before {
+		a.saveRecentSearches()
+	}
+}
 
 // palette is the ⌘K search panel over any page: Find's hits by kind and the
 // app's commands. Only the newest search's answer shows.
@@ -72,6 +155,8 @@ type palItem struct {
 	open             func()
 	msg              *core.MessageSummary // a mail's, for its preview card
 	acts             func() []palAct      // its ⌥↵ menu; nil for none
+	keepOpen         bool                 // choosing it keeps the palette open (e.g. a recent search)
+	isAction         bool                 // command action, not recorded as a search query
 }
 
 // palGroup is a heading and its rows; total, when not 0, is how many there
@@ -84,6 +169,7 @@ type palGroup struct {
 
 // openPalette shows the palette afresh, as ⌘K, ⌘F and the search buttons do.
 func (a *App) openPalette() {
+	a.loadRecentSearches()
 	// finding carries on: an answer still on its way from before must not match a new search
 	a.palette = palette{a: a, open: true, hover: -1, finding: a.palette.finding}
 }
@@ -138,6 +224,7 @@ func (p *palette) view(c *ui.Context) {
 	if p.m.open {
 		o.Keys = p.menuShortcut
 	}
+	wasOpen := p.open
 	kit.Palette(c, &p.open, &p.query, o, func() {
 		kinds := make([]string, len(paletteKinds))
 		for i, k := range paletteKinds {
@@ -177,6 +264,11 @@ func (p *palette) view(c *ui.Context) {
 			}
 		}
 	})
+	if wasOpen && !p.open && !p.asking {
+		if q := strings.TrimSpace(p.hl); q != "" {
+			p.a.recordRecentSearch(q)
+		}
+	}
 	if p.open && !p.asking && !p.filtering && !p.m.open && p.sel < len(p.rows) && p.rows[p.sel].msg != nil { // the menu covers the card
 		m := *p.rows[p.sel].msg
 		kit.PalettePreview(c, func() { p.preview(c, m) })
@@ -308,9 +400,18 @@ func (p *palette) choose(i int) {
 	if i < 0 || i >= len(p.rows) {
 		return
 	}
-	open := p.rows[i].open
+	it := p.rows[i]
+	if it.keepOpen {
+		it.open()
+		return
+	}
+	if !it.isAction && !p.asking {
+		if q := strings.TrimSpace(p.query); q != "" {
+			p.a.recordRecentSearch(q)
+		}
+	}
 	p.open = false
-	open()
+	it.open()
 }
 
 // find asks core for the query's hits of the kind: a few of each in 全部,
@@ -349,9 +450,10 @@ func (p *palette) groups() []palGroup {
 		}
 	}
 	if kind == "" && p.hl == "" && !p.hf {
+		searches := p.recentSearchItems()
 		recent := slices.Concat(mail, convs, atts)
 		slices.SortStableFunc(recent, func(a, b palItem) int { return b.when.Compare(a.when) })
-		add(palGroup{title: i18n.T("palette.recent"), items: recent})
+		add(palGroup{title: i18n.T("palette.recent"), items: slices.Concat(searches, recent)})
 		add(palGroup{title: i18n.T("palette.actions"), items: p.actions()})
 		return out
 	}
@@ -438,6 +540,28 @@ func (p *palette) attachmentItems(as []core.FoundAttachment) []palItem {
 	return out
 }
 
+func (p *palette) recentSearchItems() []palItem {
+	p.a.loadRecentSearches()
+	out := make([]palItem, 0, len(p.a.recentSearches))
+	for _, rs := range p.a.recentSearches {
+		q := rs.Query
+		out = append(out, palItem{
+			icon:     "time",
+			bare:     true,
+			title:    q,
+			when:     time.Unix(rs.At, 0),
+			keepOpen: true,
+			open: func() {
+				p.query, p.typed, p.sel = q, q, 0
+			},
+			acts: func() []palAct {
+				return []palAct{{title: i18n.T("common.delete"), icon: "trash-2", run: func() { p.a.removeRecentSearch(q) }}}
+			},
+		})
+	}
+	return out
+}
+
 // actions are the app's commands whose names hold the query.
 func (p *palette) actions() []palItem {
 	a := p.a
@@ -451,6 +575,9 @@ func (p *palette) actions() []palItem {
 		{icon: "tag", title: i18n.T("palette.action.labels"), open: func() { a.navigate(Route{Page: PageSettings, Settings: "labels"}) }},
 		{icon: "plus", title: i18n.T("palette.action.add_account"), open: a.openAddAccount},
 		{icon: "settings", title: i18n.T("palette.action.settings"), open: a.OpenSettings},
+	}
+	for i := range all {
+		all[i].isAction = true
 	}
 	q := []rune(strings.TrimSpace(p.query))
 	return slices.DeleteFunc(all, func(it palItem) bool {
@@ -536,6 +663,9 @@ func (p *mailPage) mailFrom(addr string) {
 // and filters sf, in the view left there unless it draws no search (Drafts,
 // the Outbox, none yet), where it is the unified inbox.
 func (p *mailPage) searchFor(query string, sf searchFilters) {
+	if strings.TrimSpace(query) != "" {
+		p.a.recordRecentSearch(query)
+	}
 	v := p.view
 	if _, drafts := draftsOf(p.folders, v); drafts || v.Unified == "outbox" || v.Unified == "scheduled" || v == (core.View{}) {
 		v = core.View{Unified: "inbox"}

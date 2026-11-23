@@ -631,17 +631,44 @@ func (s *Service) InlineImagesStream(ctx context.Context, id int64) (<-chan Inli
 	fetcher := &attachmentFetcher{s: s, ctx: fctx, end: end}
 	go func() {
 		defer close(ch)
-		defer fetcher.close()
+		var directSaved []int64
+		defer func() {
+			if len(directSaved) > 0 {
+				evictCtx, cancel := context.WithTimeout(context.WithoutCancel(fctx), 5*time.Second)
+				_ = s.evict(evictCtx, cacheLimit, directSaved...)
+				cancel()
+			}
+			_ = fetcher.close()
+		}()
 		for _, it := range items {
-			path, _, err := fetcher.get(it.attID)
-			if err != nil {
-				if fctx.Err() != nil {
-					if ctx.Err() != nil {
-						sendStreamFinal(fctx, ch, InlineImage{Err: ctx.Err()})
+			path, handled, saved, err := s.fetchInlineDirect(fctx, it.attID)
+			if handled {
+				if err != nil {
+					if fctx.Err() != nil {
+						if ctx.Err() != nil {
+							sendStreamFinal(fctx, ch, InlineImage{Err: ctx.Err()})
+						}
+						return
 					}
-					return
+					if errors.Is(err, backend.ErrAuthFailed) {
+						return
+					}
+					continue
 				}
-				continue
+				if saved {
+					directSaved = append(directSaved, it.attID)
+				}
+			} else {
+				path, _, err = fetcher.get(it.attID)
+				if err != nil {
+					if fctx.Err() != nil {
+						if ctx.Err() != nil {
+							sendStreamFinal(fctx, ch, InlineImage{Err: ctx.Err()})
+						}
+						return
+					}
+					continue
+				}
 			}
 			if _, err := os.Stat(path); err == nil {
 				if !sendStream(fctx, ch, InlineImage{CID: it.cid, Path: path, ContentType: it.contentType}) {
@@ -651,6 +678,36 @@ func (s *Service) InlineImagesStream(ctx context.Context, id int64) (<-chan Inli
 		}
 	}()
 	return ch, nil
+}
+
+// inlineImagesLocked fetches inline images through attachmentFetcher under the
+// account lock, used by GetMessage so callers that expect account-lock
+// serialization keep that behavior.
+func (s *Service) inlineImagesLocked(ctx context.Context, id int64, each func(cid string, a gomail.Attachment)) error {
+	fctx, end, err := s.begin(ctx, 0)
+	if err != nil {
+		return err
+	}
+	items, err := s.inlineImageRefs(fctx, id)
+	if err != nil {
+		end()
+		return err
+	}
+	fetcher := &attachmentFetcher{s: s, ctx: fctx, end: end}
+	defer fetcher.close()
+	for _, it := range items {
+		path, _, err := fetcher.get(it.attID)
+		if err != nil {
+			if fctx.Err() != nil {
+				return ctx.Err()
+			}
+			continue
+		}
+		if data, err := readFile(path); err == nil {
+			each(it.cid, gomail.Attachment{Data: data, ContentType: it.contentType})
+		}
+	}
+	return ctx.Err()
 }
 
 // inlineCID returns cid as the body raw spells it when raw shows that attachment
@@ -715,7 +772,7 @@ func (s *Service) readMessage(ctx context.Context, id int64, loadRemoteImages, l
 		}
 		return msg, nil
 	}
-	if err := s.InlineImages(ctx, id, func(cid string, a gomail.Attachment) { inline[cid] = a }); err != nil {
+	if err := s.inlineImagesLocked(ctx, id, func(cid string, a gomail.Attachment) { inline[cid] = a }); err != nil {
 		return Message{}, err
 	}
 	if raw != "" {

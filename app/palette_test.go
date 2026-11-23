@@ -408,3 +408,65 @@ func TestPaletteAddressBookContact(t *testing.T) {
 		return !paletteShown(h) && h.app.route.Page == PageContacts && h.app.route.Contact == "bob@home.com"
 	})
 }
+
+func TestPaletteRecentSearches(t *testing.T) {
+	h, accs := mailHarness(t, nil, "alice@example.com")
+	h.put(accs[0], "INBOX", coretest.Msg("bob@example.com", "alice@example.com", "Budget Report", "q1"))
+	h.put(accs[0], "INBOX", coretest.Msg("carol@example.com", "alice@example.com", "Invoice April", "q2"))
+	h.syncNow(accs[0])
+	h.waitMail("two threads", func() bool { return len(h.items()) == 2 })
+
+	// Search "budget" and open a result -> recorded in 最近.
+	h.tt.Key(ui.Cmd, ui.KeyK)
+	h.until("the palette", func() bool { return paletteShown(h) })
+	h.typeText("budget")
+	h.see("Budget Report")
+	h.tt.Key(0, ui.KeyEnter)
+	h.until("palette closed", func() bool { return !paletteShown(h) })
+
+	// Search "invoice" and press Esc -> recorded in 最近 newest-first.
+	h.tt.Key(ui.Cmd, ui.KeyK)
+	h.until("the palette", func() bool { return paletteShown(h) })
+	h.see("budget")
+	h.typeText("invoice")
+	h.see("Invoice April")
+	h.tt.Key(0, ui.KeyEscape)
+	h.until("palette closed", func() bool { return !paletteShown(h) })
+
+	// Running a command action ("打开设置") is NOT recorded as a recent search.
+	h.tt.Key(ui.Cmd, ui.KeyK)
+	h.until("the palette", func() bool { return paletteShown(h) })
+	h.see("invoice")
+	h.see("budget")
+	h.typeText("打开设置")
+	h.see("操作 · 1")
+	h.tt.Key(0, ui.KeyEnter)
+	h.until("settings", func() bool { return h.app.route.Page == PageSettings && !paletteShown(h) })
+
+	// Reopen: "打开设置" is not in recent searches; choosing "budget" keeps palette open and searches it.
+	h.tt.Key(ui.Cmd, ui.KeyK)
+	h.until("the palette", func() bool { return paletteShown(h) })
+	if slices.ContainsFunc(h.app.recentSearches, func(rs recentSearch) bool { return rs.Query == "打开设置" }) {
+		t.Fatal("command action was recorded as a recent search")
+	}
+	r, ok := h.tt.Find("budget")
+	if !ok {
+		t.Fatal("budget not in recent searches")
+	}
+	h.tt.ClickAt(r.X+r.W/2, r.Y+r.H/2)
+	h.until("clicking recent search fills query and searches", func() bool {
+		return paletteShown(h) && h.app.palette.query == "budget" && inPalette(h, "Budget Report")
+	})
+
+	// Delete "invoice" via ⌥↵ menu when back at empty query.
+	h.tt.Key(ui.Cmd, ui.KeyA)
+	h.tt.Key(0, ui.KeyBackspace)
+	h.until("recent list", func() bool { return inPalette(h, "invoice") })
+	if r, ok := h.tt.Find("invoice"); ok {
+		h.tt.Move(r.X+r.W/2, r.Y+r.H/2)
+		h.tt.Frame()
+		h.tt.Key(ui.Alt, ui.KeyEnter)
+		h.click("删除")
+		h.until("invoice removed from recent", func() bool { return !inPalette(h, "invoice") })
+	}
+}

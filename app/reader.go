@@ -1205,16 +1205,24 @@ func (r *reader) draw(c *ui.Context, next *session) {
 			curH = r.headerH + (slimH-r.headerH)*p
 		}
 		r.barTop = curH
-		r.pane = ui.Scroll(c).Grow(1).TrackScroll(&r.scroll).ScrollbarInsets(r.barTop, 0, r.barBottom).Children(func() {
+		r.pane = ui.Scroll(c.Key(r.visit)).Grow(1).TrackScroll(&r.scroll).ScrollbarInsets(r.barTop, 0, r.barBottom).Children(func() {
 			ui.Column(c).FillWidth().Children(func() {
 				head := r.readerHeader(c, p, curH).Sticky().Top(0)
 				if p == 0 {
 					r.headerH = r.measured(c, head, r.headerH)
+					if r.headerH == 0 {
+						c.Invalidate()
+					}
+					curH = r.headerH
 					r.barTop = r.headerH
 				}
 				// Compensate for the shrunk sticky header so total scroll height
 				// stays constant across p ∈ [0, 1] with zero clamp oscillation.
-				ui.Box(c).FillWidth().Height(max(0, r.headerH-curH))
+				spacerH := float32(0)
+				if p > 0 {
+					spacerH = max(0, r.headerH-curH)
+				}
+				ui.Box(c).FillWidth().Height(spacerH)
 				ui.Column(c).FillWidth().Children(func() {
 					if hasSum {
 						if m, ok := r.last(); ok {

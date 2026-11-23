@@ -529,6 +529,98 @@ func (s *Service) fetchSMIMEDirect(ctx context.Context, a attRow) (string, bool,
 	return path, handled, err
 }
 
+// fetchInlineDirect 使用交互式常驻只读连接优先下载内嵌图片并暂停后台 S/MIME 预取，
+// 避免被文件夹全量同步阻塞或每封邮件重复握手登录；本地归档或并发受限时交回常规路径。
+func (s *Service) fetchInlineDirect(ctx context.Context, attachmentID int64) (path string, handled, saved bool, err error) {
+	st := s.smime
+	if st == nil {
+		return "", false, false, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return "", true, false, err
+	}
+	a, err := s.loadAttachment(ctx, attachmentID)
+	if err != nil {
+		return "", true, false, err
+	}
+	if err := s.bind(ctx, a.accountID); err != nil {
+		return "", true, false, err
+	}
+	if a.contentHash != "" {
+		return "", false, false, nil
+	}
+	if p, ok, cerr := s.cached(ctx, a); ok || cerr != nil {
+		return p, true, false, cerr
+	}
+	st.holdPrefetch(a.accountID, smimePrefetchPause)
+	mu := st.lockFor(a.accountID, true)
+	mu.Lock()
+	defer mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return "", true, false, err
+	}
+	a, err = s.loadAttachment(ctx, attachmentID)
+	if err != nil {
+		return "", true, false, err
+	}
+	if p, ok, cerr := s.cached(ctx, a); ok || cerr != nil {
+		return p, true, false, cerr
+	}
+	if int64(a.info.Size) > attachLimit {
+		return "", true, false, ErrTooLarge
+	}
+	if !a.onServer {
+		return "", true, false, ErrNotOnServerYet
+	}
+	c := st.borrowConn(a.accountID, true)
+	if c == nil {
+		c = st.borrowConn(a.accountID, false)
+	}
+	var data []byte
+	for {
+		reused := c != nil
+		if c == nil {
+			recv, cancel, derr := s.dialSMIMEConn(ctx, st, a.accountID, true)
+			if derr != nil {
+				if errors.Is(derr, backend.ErrAuthFailed) || ctx.Err() != nil {
+					return "", true, false, derr
+				}
+				return "", false, false, nil
+			}
+			c = &smimeConn{recv: recv, release: cancel}
+		}
+		stopFetch := context.AfterFunc(ctx, func() { _ = c.recv.Close() })
+		fetched, ferr := fetchPart(ctx, c.recv, a)
+		alive := stopFetch()
+		if ferr == nil && alive && ctx.Err() == nil {
+			data = fetched
+			break
+		}
+		c.release()
+		c = nil
+		if !alive || ctx.Err() != nil {
+			return "", true, false, ctx.Err()
+		}
+		if errors.Is(ferr, ErrTooLarge) {
+			s.db.Execute(ctx, "UPDATE attachments SET size = ? WHERE id = ?", attachLimit+1, attachmentID)
+			return "", true, false, ferr
+		}
+		if !reused || isSMIMEMissingPartErr(ferr) {
+			return "", true, false, ferr
+		}
+	}
+	st.returnConn(a.accountID, true, c)
+	path, err = s.saveAttachmentChecked(ctx, a, data)
+	if errors.Is(err, ErrTooLarge) {
+		s.db.Execute(ctx, "UPDATE attachments SET size = ? WHERE id = ?", attachLimit+1, attachmentID)
+		return "", true, false, err
+	}
+	if err != nil {
+		return "", true, false, err
+	}
+	return path, true, true, nil
+}
+
 func (s *Service) fetchSMIMEPart(ctx context.Context, attachmentID, accountID int64, interactive, runEvict bool) (string, bool, bool, error) {
 	st := s.smime
 	if st == nil {
