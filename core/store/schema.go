@@ -863,13 +863,9 @@ var Migrations = [][]string{{
 	// changed; local only, never an IMAP keyword (ADR 0043).
 	`ALTER TABLE drafts ADD COLUMN from_program INTEGER NOT NULL DEFAULT 0`,
 }, {
-	`CREATE TABLE IF NOT EXISTS draft_images (
-		draft_id INTEGER NOT NULL REFERENCES drafts(id) ON DELETE CASCADE,
-		cid TEXT NOT NULL,
-		content_type TEXT NOT NULL,
-		data BLOB NOT NULL,
-		PRIMARY KEY (draft_id, cid)
-	)`,
+	// Taking back a scheduled message copies send_at (Unix milliseconds) to
+	// its draft. Queuing the draft again clears it.
+	`ALTER TABLE drafts ADD COLUMN scheduled_for INTEGER`,
 }}
 
 // HistoryRowsVersion is the schema version that keeps a conversation's

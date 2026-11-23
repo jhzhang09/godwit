@@ -90,7 +90,34 @@ func TestReplyAllDraft(t *testing.T) {
 	assert.Equal(t, "Re: plan", d.Subject)
 	assert.Contains(t, d.HTML, "<blockquote>the plan")
 	assert.Contains(t, d.HTML, "Godwit")
-	assert.Greater(t, strings.Index(d.HTML, "Godwit"), strings.Index(d.HTML, "<blockquote>"), "signature at the end")
+	assert.Less(t, strings.Index(d.HTML, "Godwit"), strings.Index(d.HTML, "<blockquote>"), "signature above the quote")
+}
+
+// A sent reply has new text, signature, then the quote, in its HTML and text part.
+func TestReplySignatureAboveQuote(t *testing.T) {
+	e := newSendEnv(t, false)
+	e.put(t, "INBOX", eml("o@x", "Bob <bob@example.com>", "alice@example.com", "plan", day, "the plan"))
+	e.sync(t)
+	d, err := e.s.NewDraft(bg, e.acc.ID, "reply", e.idOf(t, "o@x"))
+	require.NoError(t, err)
+	_, quote, sig := mail.SplitDraft(d.HTML)
+	d.HTML = mail.JoinDraft("<p>Thanks, will do.</p>", quote, sig)
+	d, err = e.s.SaveDraft(bg, d)
+	require.NoError(t, err)
+	require.NoError(t, e.s.Send(bg, d.ID))
+	e.clock.Advance(UndoSendWindow)
+	e.sync(t)
+
+	got := e.smtp.Messages()
+	require.Len(t, got, 1)
+	p, err := mail.Parse(got[0].Data)
+	require.NoError(t, err)
+	for part, body := range map[string]string{"html": p.HTML, "text": p.Text} {
+		reply, sig, quote := strings.Index(body, "Thanks, will do."), strings.Index(body, "Godwit"), strings.Index(body, "the plan")
+		require.True(t, reply >= 0 && sig >= 0 && quote >= 0, "%s: %s", part, body)
+		assert.Less(t, reply, sig, part)
+		assert.Less(t, sig, quote, "%s: signature above the quote", part)
+	}
 }
 
 // Display names with commas, quotes and backslashes survive sync, reply and Send.
@@ -290,9 +317,6 @@ func TestResolveOnlyUncertainOrFailed(t *testing.T) {
 		r, err := e.s.db.Execute(bg, "INSERT INTO outbox(account_id, state) VALUES (?, ?)", e.acc.ID, st)
 		require.NoError(t, err)
 		for _, a := range []string{"confirm_sent", "resend", "discard", "edit"} {
-			if st == "queued" && a == "resend" {
-				continue // retry now
-			}
 			if st == "archive_uncertain" && a != "resend" {
 				continue // decidable, but never sent again
 			}

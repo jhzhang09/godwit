@@ -88,8 +88,7 @@ func (s *Service) SetDraftAccount(ctx context.Context, id, accountID, revision i
 	if err != nil {
 		return Draft{}, err
 	}
-	ed, quote, _ := mail.SplitDraft(d.HTML)
-	body := mail.SanitizeDraft(mail.JoinDraft(ed, quote, signatureHTML(acc.Signature, cids, st.SignatureDelimiter)), allowed)
+	body := mail.SanitizeDraft(withSignature(d.HTML, acc, cids, st.SignatureDelimiter), allowed)
 	r, err := s.db.Execute(ctx, `UPDATE drafts SET account_id = ?, body_html = ?, updated_at = ?, revision = revision + 1,
 		from_program = MAX(from_program, ?) WHERE id = ? AND revision = ?`, accountID, body, time.Now().Unix(), fromProgram(ctx), id, revision)
 	if err != nil {
@@ -166,6 +165,7 @@ func (s *Service) SendAcknowledgedRevision(ctx context.Context, draftID, revisio
 // revision and holds nothing the user added: no attachments, no text
 // outside the quote and the signature, and the addresses and subject a new
 // draft of its mode starts with (none for a new one; a reply's own). A
+// draft with a send time (taken back from the outbox) is never empty. A
 // draft Wit is working on (an assist run active, or an approval pending) is
 // in use, never empty; one in the outbox is ErrStaleDraft. deleted reports
 // whether it went.
@@ -194,7 +194,7 @@ func (s *Service) DeleteDraftIfEmpty(ctx context.Context, id, revision int64) (d
 		return false, nil
 	}
 	ed, _, _ := mail.SplitDraft(d.HTML)
-	if d.Revision != revision || len(d.Attachments) > 0 || strings.TrimSpace(mail.HTMLToText(ed)) != "" { // TrimSpace trims U+00A0 too
+	if d.Revision != revision || !d.ScheduledFor.IsZero() || len(d.Attachments) > 0 || strings.TrimSpace(mail.HTMLToText(ed)) != "" { // TrimSpace trims U+00A0 too
 		return false, nil
 	}
 	from := d.AccountID

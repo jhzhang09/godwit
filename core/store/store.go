@@ -130,8 +130,47 @@ func (db *DB) init(ctx context.Context, path string) error {
 			return fmt.Errorf("store: migration %d: %w", v, err)
 		}
 	}
+	if err := db.ensureForkSchema(ctx); err != nil {
+		return err
+	}
 	dropBackups(path, cur)
 	return db.convertAutoVacuum(ctx)
+}
+
+// ensureForkSchema reconciles Fork-only tables/columns outside Migrations so
+// PRAGMA user_version stays aligned 1:1 with upstream.
+func (db *DB) ensureForkSchema(ctx context.Context) error {
+	rows, err := db.Query(ctx, "PRAGMA table_info(drafts)")
+	if err != nil {
+		return err
+	}
+	if len(rows.Values) == 0 {
+		return nil
+	}
+	hasFromProgram, hasScheduledFor := false, false
+	for _, r := range rows.Values {
+		switch Str(r[1]) {
+		case "from_program":
+			hasFromProgram = true
+		case "scheduled_for":
+			hasScheduledFor = true
+		}
+	}
+	if _, err := db.Execute(ctx, `CREATE TABLE IF NOT EXISTS draft_images (
+		draft_id INTEGER NOT NULL REFERENCES drafts(id) ON DELETE CASCADE,
+		cid TEXT NOT NULL,
+		content_type TEXT NOT NULL,
+		data BLOB NOT NULL,
+		PRIMARY KEY (draft_id, cid)
+	)`); err != nil {
+		return fmt.Errorf("store: fork schema draft_images: %w", err)
+	}
+	if hasFromProgram && !hasScheduledFor {
+		if _, err := db.Execute(ctx, `ALTER TABLE drafts ADD COLUMN scheduled_for INTEGER`); err != nil {
+			return fmt.Errorf("store: fork schema drafts.scheduled_for: %w", err)
+		}
+	}
+	return nil
 }
 
 // backup copies the database at path, at schema version cur, to

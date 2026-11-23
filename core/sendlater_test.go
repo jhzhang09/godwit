@@ -72,17 +72,59 @@ func TestSendLaterInThePast(t *testing.T) {
 // Cancelling gives the draft back, writable, and nothing goes.
 func TestCancelScheduled(t *testing.T) {
 	e := newSendEnv(t, false)
-	d := e.sendLater(t, e.clock.Now().Add(time.Hour))
+	at := e.clock.Now().Add(UndoSendWindow / 2).Truncate(time.Millisecond) // earlier than send_after, which includes the undo window
+	d := e.sendLater(t, at)
 	require.NoError(t, e.s.CancelOutbox(bg, e.onlyItem(t).ID))
+	got, err := e.s.GetDraft(bg, d.ID)
+	require.NoError(t, err)
+	assert.Equal(t, at, got.ScheduledFor)
+	got.Subject, got.ScheduledFor = "edited", at.Add(time.Hour)
+	got, err = e.s.SaveDraft(bg, got)
+	require.NoError(t, err)
+	assert.Equal(t, at, got.ScheduledFor, "saving the draft must not overwrite its original send time")
+
+	e.reopen(t)
 	e.clock.Advance(2 * time.Hour)
 	e.sync(t)
 	assert.Empty(t, e.smtp.Messages())
 	assert.True(t, e.listed(t, d.ID))
-	got, err := e.s.GetDraft(bg, d.ID)
+	got, err = e.s.GetDraft(bg, d.ID)
 	require.NoError(t, err)
-	got.Subject = "edited"
-	_, err = e.s.SaveDraft(bg, got)
-	require.NoError(t, err, "writable again")
+	assert.Equal(t, at, got.ScheduledFor)
+	assert.Equal(t, "edited", got.Subject)
+}
+
+func TestRequeueClearsScheduledFor(t *testing.T) {
+	e := newSendEnv(t, false)
+	at := e.clock.Now().Add(time.Hour).Truncate(time.Millisecond)
+	d := e.sendLater(t, at)
+	checkTime := func(want time.Time) {
+		t.Helper()
+		got, err := e.s.GetDraft(bg, d.ID)
+		require.NoError(t, err)
+		assert.Equal(t, want, got.ScheduledFor)
+	}
+	require.NoError(t, e.s.CancelOutbox(bg, e.onlyItem(t).ID))
+	next := at.Add(time.Hour)
+	_, err := e.s.db.Execute(bg, `CREATE TRIGGER no_audit BEFORE INSERT ON audit_log BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END`)
+	require.NoError(t, err)
+	require.ErrorContains(t, e.s.SendLater(bg, d.ID, d.Revision, next, ""), "audit unavailable")
+	checkTime(at)
+	_, err = e.s.db.Execute(bg, "DROP TRIGGER no_audit")
+	require.NoError(t, err)
+	require.NoError(t, e.s.SendLater(bg, d.ID, d.Revision, next, ""))
+	checkTime(time.Time{})
+	it := e.onlyItem(t)
+	assert.Equal(t, next, it.SendAt)
+	require.NoError(t, e.s.CancelOutbox(bg, it.ID))
+	checkTime(next)
+
+	require.NoError(t, e.s.Send(bg, d.ID))
+	checkTime(time.Time{})
+	it = e.onlyItem(t)
+	assert.True(t, it.SendAt.IsZero())
+	require.NoError(t, e.s.CancelOutbox(bg, it.ID))
+	checkTime(time.Time{})
 }
 
 // Due while Godwit was closed, it goes on the next start; due more than
@@ -148,4 +190,27 @@ func TestSendLaterRunsSendChecks(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, out, 1)
 	assert.Equal(t, at.UnixMilli(), out[0].SendAt.UnixMilli())
+}
+
+// A scheduled reply taken back unchanged, only its quote and signature, is not
+// empty: closing it keeps the draft and its send time.
+func TestDeleteDraftIfEmptyKeepsScheduled(t *testing.T) {
+	e := newSendEnv(t, false)
+	e.put(t, "INBOX", eml("o@x", "Bob <bob@example.com>", "alice@example.com", "plan", day, "the plan"))
+	e.sync(t)
+	d, err := e.s.NewDraft(bg, e.acc.ID, "reply", e.idOf(t, "o@x"))
+	require.NoError(t, err)
+	at := e.clock.Now().Add(time.Hour).Truncate(time.Millisecond)
+	require.NoError(t, e.s.SendLater(bg, d.ID, d.Revision, at, ""))
+	require.NoError(t, e.s.CancelOutbox(bg, e.onlyItem(t).ID))
+	got, err := e.s.GetDraft(bg, d.ID)
+	require.NoError(t, err)
+	deleted, err := e.s.DeleteDraftIfEmpty(bg, d.ID, got.Revision)
+	require.NoError(t, err)
+	assert.False(t, deleted)
+
+	e.reopen(t)
+	got, err = e.s.GetDraft(bg, d.ID)
+	require.NoError(t, err)
+	assert.Equal(t, at, got.ScheduledFor)
 }

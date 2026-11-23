@@ -734,3 +734,46 @@ func TestMigrationMessagesAccountDateIndex(t *testing.T) {
 		assert.NotContains(t, plan, "TEMP B-TREE", q)
 	}
 }
+
+func TestForkSchemaBackfillsScheduledForAndDraftImages(t *testing.T) {
+	// (a) Simulate an earlier smime.3 DB where user_version == len(Migrations),
+	// draft_images exists, and drafts.scheduled_for is missing.
+	all := store.Migrations
+	pathA := filepath.Join(t.TempDir(), "smime3.db")
+	store.Migrations = all[:len(all)-1]
+	db, err := store.Open(ctx, pathA)
+	store.Migrations = all
+	require.NoError(t, err)
+	_, err = db.Execute(ctx, fmt.Sprintf("PRAGMA user_version = %d", len(all)))
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	db, err = store.Open(ctx, pathA)
+	require.NoError(t, err)
+	cols, err := db.Query(ctx, "PRAGMA table_info(drafts)")
+	require.NoError(t, err)
+	var colNames []string
+	for _, r := range cols.Values {
+		colNames = append(colNames, store.Str(r[1]))
+	}
+	assert.Contains(t, colNames, "scheduled_for")
+	tbls, err := db.Query(ctx, "SELECT name FROM sqlite_master WHERE type='table' AND name='draft_images'")
+	require.NoError(t, err)
+	assert.Len(t, tbls.Values, 1)
+	require.NoError(t, db.Close())
+
+	// (b) Simulate an upstream 1.39.4 DB with scheduled_for present and draft_images missing.
+	pathB := filepath.Join(t.TempDir(), "upstream.db")
+	db, err = store.Open(ctx, pathB)
+	require.NoError(t, err)
+	_, err = db.Execute(ctx, "DROP TABLE draft_images")
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	db, err = store.Open(ctx, pathB)
+	require.NoError(t, err)
+	defer db.Close()
+	tbls, err = db.Query(ctx, "SELECT name FROM sqlite_master WHERE type='table' AND name='draft_images'")
+	require.NoError(t, err)
+	assert.Len(t, tbls.Values, 1)
+}

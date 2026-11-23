@@ -1,6 +1,7 @@
 import { RiArrowRightSLine, RiAttachment2, RiRefreshLine } from "@remixicon/react";
 import { cn } from "cn";
 import { type RefObject, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import { useDefaultLayout } from "react-resizable-panels";
 import { Alert } from "@/components/alert";
 import { Button } from "@/components/button";
@@ -230,6 +231,7 @@ const fmt = (d: Date) =>
 /** The read-only signature: Go's sanitized HTML (core.SignatureShown), "" for none. */
 const sigOf = (s: { signatureHtml: string }) => s.signatureHtml;
 
+<<<<<<< HEAD
 function parseOpaqueColor(value: string): Color | null {
   const c = parse(value.trim());
   return c && c[3] >= 0.1 ? c : null;
@@ -313,6 +315,9 @@ function QuotePreview({ html }: { html: string }) {
 }
 
 const editOf = (s: ComposeState): ComposeEdit => ({
+=======
+const editOf = (s: ComposeEdit): ComposeEdit => ({
+>>>>>>> upstream/main
   to: s.to,
   cc: s.cc,
   bcc: s.bcc,
@@ -387,6 +392,7 @@ function Compose({
   const [initial, setInitial] = useState({ body: state.body, n: 0 }); // n remounts the editor
   const [fieldsKey, setFieldsKey] = useState(0); // remounts the fields
   const [from, setFrom] = useState(state.from);
+  const [accounts, setAccounts] = useState(state.accounts);
   const [fromProgram, setFromProgram] = useState(state.fromProgram); // ADR 0043: check before sending
   const [signature, setSignature] = useState(sigOf(state));
   const [quote, setQuote] = useState(state.quote);
@@ -515,18 +521,27 @@ function Compose({
     (key === "wit.compose.locked" ? toast.warning : toast)(t(key)); // native's toast ID is its text: one at a time
   };
 
-  // The body as stored, adopted: the editor takes it as one undoable step; the saver reads it as saved.
-  const adopt = (revision: number, body: string, subject?: string) => {
-    cur.current = {
-      ...cur.current,
-      body,
-      revision,
-      ...(subject !== undefined ? { subject } : {}),
-    };
-    setF(cur.current);
-    editorRef.current?.setValue(body);
+  // The whole draft as stored, as a reload or a decision returns it: a send passes its revision, so
+  // the recipients, account, attachments and quote shown must be its too. They commit before the
+  // saver takes the revision, so no send or blur in between pairs it with what was shown before. An
+  // address still being typed is kept, and the clash shown.
+  const take = (l: BodyChange | ComposeState) => {
+    const recipients = (e: ComposeEdit) => JSON.stringify([e.to, e.cc, e.bcc, e.replyTo]);
+    if (recipients(l) !== recipients(cur.current)) fieldsRef.current?.replaced();
+    cur.current = editOf(l);
+    flushSync(() => {
+      setF(cur.current);
+      setAccounts(l.accounts); // the account may be one added since the window opened
+      setFrom(l.from);
+      setFromProgram(l.fromProgram);
+      setSignature(sigOf(l));
+      setQuote(l.quote);
+      setAttachments(l.attachments);
+      setSavedAt(fmt(new Date(l.updatedAt)));
+    });
+    editorRef.current?.setValue(l.body);
     // biome-ignore lint/correctness/useHookAtTopLevel: the saver's method, not a hook
-    saver.current?.useLatest(revision, cur.current);
+    saver.current?.useLatest(l.revision, cur.current);
   };
 
   // Reads the draft after a run or a decision; the newest read wins. Skipped in conflict, when the
@@ -546,10 +561,14 @@ function Compose({
       }
       if (s.status === "conflict" || s.dirty || l.revision <= s.revision) return;
       if (edits.current !== runEdits.current) return;
+<<<<<<< HEAD
       adopt(l.revision, l.body, l.subject);
       setFromProgram(l.fromProgram);
       if (l.smime) setSmime(l.smime);
       rcptKeyRef.current = JSON.stringify([l.to, l.cc, l.bcc]);
+=======
+      take(l);
+>>>>>>> upstream/main
       setApplied(true);
     } catch (e) {
       if (n === reloads.current) setReloadErr(witError(message(e), t));
@@ -808,11 +827,7 @@ function Compose({
     try {
       const r = await sv.run(op);
       if (r && !r.conflict) {
-        adopt(r.revision, r.body, r.subject);
-        setFromProgram(r.fromProgram);
-        setSignature(sigOf(r));
-        setAttachments(r.attachments);
-        setSavedAt(fmt(new Date(r.updatedAt)));
+        take(r);
       }
       return r;
     } catch (e) {
@@ -928,6 +943,7 @@ function Compose({
       }
       if (saver.current !== sv) return;
       setLatestFailed(false);
+<<<<<<< HEAD
       setFrom(l.from);
       setFromProgram(l.fromProgram);
       setSignature(sigOf(l));
@@ -939,15 +955,27 @@ function Compose({
         setSmime(l.smime);
       }
       rcptKeyRef.current = JSON.stringify([l.to, l.cc, l.bcc]);
+=======
+      flushSync(() => {
+        setAccounts(l.accounts);
+        setFrom(l.from);
+        setFromProgram(l.fromProgram);
+        setSignature(sigOf(l));
+        setQuote(l.quote);
+        setAttachments(l.attachments);
+      });
+>>>>>>> upstream/main
       if (mine) {
         await sv.keepMine(l.revision);
         return;
       }
       cur.current = editOf(l);
-      setF(cur.current);
-      setInitial((i) => ({ body: l.body, n: i.n + 1 })); // remounts the editor
-      setFieldsKey((k) => k + 1);
-      setSavedAt(fmt(new Date(l.updatedAt)));
+      flushSync(() => {
+        setF(cur.current);
+        setInitial((i) => ({ body: l.body, n: i.n + 1 })); // remounts the editor
+        setFieldsKey((k) => k + 1);
+        setSavedAt(fmt(new Date(l.updatedAt)));
+      });
       // biome-ignore lint/correctness/useHookAtTopLevel: the saver's method, not a hook
       sv.useLatest(l.revision, cur.current);
     } finally {
@@ -1065,7 +1093,7 @@ function Compose({
                 key={fieldsKey}
                 ref={fieldsRef}
                 frozen={locked}
-                accounts={state.accounts}
+                accounts={accounts}
                 menu={api.popupMenu}
                 from={from}
                 onFrom={onFrom}
@@ -1226,6 +1254,7 @@ function Compose({
                 frozen={locked}
                 anyway={warned}
                 className={smime?.supported ? "" : "ml-auto"}
+                scheduledFor={state.scheduledFor}
                 onSend={() => (warned ? send(warnings.digest, warnings.at) : send())}
                 onSendNow={() => send()}
                 onSendLater={(at) => send("", at)}

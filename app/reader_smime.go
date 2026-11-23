@@ -432,7 +432,11 @@ func (r *reader) openSMIME(id int64, b *msgBody, retry bool) {
 		var opened smime.Opened
 		if useAttCache {
 			tAtt := time.Now()
-			path, _, err := a.svc.GetAttachment(ctx, cmsAtt.ID)
+			var path string
+			err := a.svc.FetchAttachments(ctx, []int64{cmsAtt.ID}, func(p string, _ core.AttachmentInfo) error {
+				path = p
+				return nil
+			})
 			attDur = time.Since(tAtt)
 			if err != nil {
 				return fmt.Errorf("read encrypted attachment: %w", err)

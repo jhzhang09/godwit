@@ -237,7 +237,7 @@ func (p *ComposePage) Load(ctx context.Context) (ComposeState, error) {
 	if err != nil {
 		return ComposeState{}, err
 	}
-	accs, err := svc.ListAccounts(ctx)
+	accs, err := senders(ctx, svc)
 	if err != nil {
 		return ComposeState{}, err
 	}
@@ -258,14 +258,27 @@ func (p *ComposePage) Load(ctx context.Context) (ComposeState, error) {
 	if err != nil {
 		return ComposeState{}, err
 	}
-	out := ComposeState{SignatureHTML: sig, Wit: wit, DraftID: d.ID, From: d.AccountID, To: nz(d.To), Cc: nz(d.Cc), Bcc: nz(d.Bcc),
+	out := ComposeState{SignatureHTML: sig, Wit: wit, DraftID: d.ID, Accounts: accs, From: d.AccountID, To: nz(d.To), Cc: nz(d.Cc), Bcc: nz(d.Bcc),
 		ReplyTo: d.ReplyTo, Subject: d.Subject, Body: editable, Quote: mail.HTMLToText(s.quote), QuoteHTML: quoteHTML,
 		Attachments: attachments(d), Revision: d.Revision,
 		UpdatedAt: d.UpdatedAt.UnixMilli(), Theme: ThemeOf(st), Locale: i18n.Language(), FromProgram: d.FromProgram,
 		SMIME: smimeOf(ctx, svc, d.ID)}
+	if !d.ScheduledFor.IsZero() {
+		out.ScheduledFor = d.ScheduledFor.UnixMilli()
+	}
+	return out, nil
+}
+
+// senders are the accounts a draft can be sent from.
+func senders(ctx context.Context, svc Service) ([]Account, error) {
+	accs, err := svc.ListAccounts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var out []Account
 	for _, a := range accs {
 		if a.Kind != core.KindLocalArchive && !a.ReceiveOnly { // no sender
-			out.Accounts = append(out.Accounts, Account{ID: a.ID, Email: a.Email})
+			out = append(out, Account{ID: a.ID, Email: a.Email})
 		}
 	}
 	return out, nil

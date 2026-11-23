@@ -130,6 +130,8 @@ type ComposeState struct {
 	Theme    Theme `json:"theme"`
 	// UpdatedAt is when the draft was last stored, in Unix milliseconds.
 	UpdatedAt int64 `json:"updatedAt"`
+	// ScheduledFor is the draft's original send time in Unix milliseconds, or 0 if none.
+	ScheduledFor int64 `json:"scheduledFor"`
 	// Locale selects the shared catalog bundled with the page.
 	Locale string `json:"locale"`
 	// Wit is what the Wit panel offers, as WitInfo.
