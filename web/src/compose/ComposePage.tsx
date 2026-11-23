@@ -231,7 +231,6 @@ const fmt = (d: Date) =>
 /** The read-only signature: Go's sanitized HTML (core.SignatureShown), "" for none. */
 const sigOf = (s: { signatureHtml: string }) => s.signatureHtml;
 
-<<<<<<< HEAD
 function parseOpaqueColor(value: string): Color | null {
   const c = parse(value.trim());
   return c && c[3] >= 0.1 ? c : null;
@@ -314,10 +313,7 @@ function QuotePreview({ html }: { html: string }) {
   );
 }
 
-const editOf = (s: ComposeState): ComposeEdit => ({
-=======
 const editOf = (s: ComposeEdit): ComposeEdit => ({
->>>>>>> upstream/main
   to: s.to,
   cc: s.cc,
   bcc: s.bcc,
@@ -536,9 +532,15 @@ function Compose({
       setFromProgram(l.fromProgram);
       setSignature(sigOf(l));
       setQuote(l.quote);
+      if ("quoteHtml" in l) setQuoteHtml(l.quoteHtml ?? "");
       setAttachments(l.attachments);
+      if (l.smime) {
+        ++smimeSeq.current;
+        setSmime(l.smime);
+      }
       setSavedAt(fmt(new Date(l.updatedAt)));
     });
+    rcptKeyRef.current = JSON.stringify([l.to, l.cc, l.bcc]);
     editorRef.current?.setValue(l.body);
     // biome-ignore lint/correctness/useHookAtTopLevel: the saver's method, not a hook
     saver.current?.useLatest(l.revision, cur.current);
@@ -561,14 +563,7 @@ function Compose({
       }
       if (s.status === "conflict" || s.dirty || l.revision <= s.revision) return;
       if (edits.current !== runEdits.current) return;
-<<<<<<< HEAD
-      adopt(l.revision, l.body, l.subject);
-      setFromProgram(l.fromProgram);
-      if (l.smime) setSmime(l.smime);
-      rcptKeyRef.current = JSON.stringify([l.to, l.cc, l.bcc]);
-=======
       take(l);
->>>>>>> upstream/main
       setApplied(true);
     } catch (e) {
       if (n === reloads.current) setReloadErr(witError(message(e), t));
@@ -943,28 +938,20 @@ function Compose({
       }
       if (saver.current !== sv) return;
       setLatestFailed(false);
-<<<<<<< HEAD
-      setFrom(l.from);
-      setFromProgram(l.fromProgram);
-      setSignature(sigOf(l));
-      setQuote(l.quote);
-      setQuoteHtml(l.quoteHtml ?? "");
-      setAttachments(l.attachments);
-      if (l.smime) {
-        ++smimeSeq.current;
-        setSmime(l.smime);
-      }
-      rcptKeyRef.current = JSON.stringify([l.to, l.cc, l.bcc]);
-=======
       flushSync(() => {
         setAccounts(l.accounts);
         setFrom(l.from);
         setFromProgram(l.fromProgram);
         setSignature(sigOf(l));
         setQuote(l.quote);
+        setQuoteHtml(l.quoteHtml ?? "");
         setAttachments(l.attachments);
+        if (l.smime) {
+          ++smimeSeq.current;
+          setSmime(l.smime);
+        }
       });
->>>>>>> upstream/main
+      rcptKeyRef.current = JSON.stringify([l.to, l.cc, l.bcc]);
       if (mine) {
         await sv.keepMine(l.revision);
         return;
