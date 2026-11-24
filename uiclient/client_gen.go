@@ -177,6 +177,10 @@ func (cl *Client) CompleteContacts(ctx context.Context, query string, limit int)
 	return call[[]core.ContactCompletion](cl, ctx, "CompleteContacts", query, limit)
 }
 
+func (cl *Client) ConfirmSummaryService(ctx context.Context) error {
+	return callErr(cl, ctx, "ConfirmSummaryService")
+}
+
 func (cl *Client) ContactAvatar(ctx context.Context, addr string) (core.Avatar, error) {
 	return call[core.Avatar](cl, ctx, "ContactAvatar", addr)
 }
@@ -191,6 +195,14 @@ func (cl *Client) ContactMail(ctx context.Context, addr string, cursor string, l
 
 func (cl *Client) Contacts(ctx context.Context) ([]core.Contact, error) {
 	return call[[]core.Contact](cl, ctx, "Contacts")
+}
+
+func (cl *Client) CountAppAndWitDeadlines(ctx context.Context) (int, error) {
+	return call[int](cl, ctx, "CountAppAndWitDeadlines")
+}
+
+func (cl *Client) CountUnrepliedToSummarize(ctx context.Context) (int, error) {
+	return call[int](cl, ctx, "CountUnrepliedToSummarize")
 }
 
 func (cl *Client) CreateLabel(ctx context.Context, in core.LabelInput) (core.Label, error) {
@@ -641,6 +653,10 @@ func (cl *Client) RemoveAddressBook(ctx context.Context, id int64) error {
 	return callErr(cl, ctx, "RemoveAddressBook", id)
 }
 
+func (cl *Client) RemoveAppAndWitDeadlines(ctx context.Context) ([]core.RemovedDeadline, error) {
+	return call[[]core.RemovedDeadline](cl, ctx, "RemoveAppAndWitDeadlines")
+}
+
 func (cl *Client) RemoveAttachmentAt(ctx context.Context, draftID int64, attachmentID int64, revision int64) (int64, error) {
 	return call[int64](cl, ctx, "RemoveAttachmentAt", draftID, attachmentID, revision)
 }
@@ -873,6 +889,10 @@ func (cl *Client) SetSkillEnabled(ctx context.Context, name string, enabled bool
 	return callErr(cl, ctx, "SetSkillEnabled", name, enabled)
 }
 
+func (cl *Client) SetThreadDeadline(ctx context.Context, threadID int64, d core.Deadline) (core.RemovedDeadline, error) {
+	return call[core.RemovedDeadline](cl, ctx, "SetThreadDeadline", threadID, d)
+}
+
 func (cl *Client) SetUIForeground(ctx context.Context, on bool) error {
 	return callErr(cl, ctx, "SetUIForeground", on)
 }
@@ -917,6 +937,14 @@ func (cl *Client) SubscribeConversation(id int64) (<-chan core.WitEvent, func())
 	return streamStop[core.WitEvent](cl, "SubscribeConversation", id)
 }
 
+func (cl *Client) SummarizeUnreplied(ctx context.Context) (int, error) {
+	return call[int](cl, ctx, "SummarizeUnreplied")
+}
+
+func (cl *Client) SummaryArrivalState(ctx context.Context) (core.SummaryArrival, error) {
+	return call[core.SummaryArrival](cl, ctx, "SummaryArrivalState")
+}
+
 func (cl *Client) SyncAddressBook(ctx context.Context, id int64) error {
 	return callErr(cl, ctx, "SyncAddressBook", id)
 }
@@ -943,6 +971,10 @@ func (cl *Client) TestCapability(ctx context.Context, id int64, in core.ModelSer
 
 func (cl *Client) TestPluginModel(ctx context.Context, ref string) (core.CapStatus, error) {
 	return call[core.CapStatus](cl, ctx, "TestPluginModel", ref)
+}
+
+func (cl *Client) ThreadDeadline(ctx context.Context, threadID int64) (core.ReaderDeadline, error) {
+	return call[core.ReaderDeadline](cl, ctx, "ThreadDeadline", threadID)
 }
 
 func (cl *Client) ThreadLabels(ctx context.Context, threadIDs []int64) (map[int64][]core.AppliedLabel, error) {
@@ -981,8 +1013,16 @@ func (cl *Client) UndoPurge(ctx context.Context, ids []int64) (int, error) {
 	return call[int](cl, ctx, "UndoPurge", ids)
 }
 
+func (cl *Client) UndoRemoveAppAndWitDeadlines(ctx context.Context, removed []core.RemovedDeadline) error {
+	return callErr(cl, ctx, "UndoRemoveAppAndWitDeadlines", removed)
+}
+
 func (cl *Client) UndoRuleRun(ctx context.Context, runID int64) (int, error) {
 	return call[int](cl, ctx, "UndoRuleRun", runID)
+}
+
+func (cl *Client) UndoSetThreadDeadline(ctx context.Context, before core.RemovedDeadline) error {
+	return callErr(cl, ctx, "UndoSetThreadDeadline", before)
 }
 
 func (cl *Client) UninstallPlugin(ctx context.Context, name string) error {

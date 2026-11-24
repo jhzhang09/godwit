@@ -41,6 +41,7 @@ type Service interface {
 	ContactDetail(ctx context.Context, addr string) (core.ContactDetail, error)
 	ContactMail(ctx context.Context, addr, cursor string, limit int) (core.MessagePage, error)
 	Contacts(ctx context.Context) ([]core.Contact, error)
+	CountAppAndWitDeadlines(ctx context.Context) (int, error)
 	CreateLabel(ctx context.Context, in core.LabelInput) (core.Label, error)
 	CreateLocalFolder(ctx context.Context, accountID int64, name string) (core.Folder, error)
 	CreateSignature(ctx context.Context, name string) (core.Signature, error)
@@ -140,6 +141,7 @@ type Service interface {
 	RefreshMCPTools(ctx context.Context, id int64) error
 	RefreshPluginRegistry(ctx context.Context) error
 	RemoveAccount(ctx context.Context, id int64) error
+	RemoveAppAndWitDeadlines(ctx context.Context) ([]core.RemovedDeadline, error)
 	RemoveContactCertificate(ctx context.Context, address, sha256 string) error
 	RemoveMCPServer(ctx context.Context, id int64) error
 	RemoveModelFiles(ctx context.Context, ref string) error
@@ -196,6 +198,10 @@ type Service interface {
 	Subscribe() (<-chan events.Event, func())
 	SyncNow(ctx context.Context, accountID int64) error
 	TaskModel(ctx context.Context, skill string) (string, error)
+	SummaryArrivalState(ctx context.Context) (core.SummaryArrival, error)
+	ConfirmSummaryService(ctx context.Context) error
+	CountUnrepliedToSummarize(ctx context.Context) (int, error)
+	SummarizeUnreplied(ctx context.Context) (int, error)
 	TestCapability(ctx context.Context, id int64, in core.ModelServiceInput, c string) (core.CapStatus, error)
 	TestPluginModel(ctx context.Context, ref string) (core.CapStatus, error)
 	ThreadLabels(ctx context.Context, threadIDs []int64) (map[int64][]core.AppliedLabel, error)
@@ -204,6 +210,7 @@ type Service interface {
 	UnblockSender(ctx context.Context, addr string) error
 	UndoArchive(ctx context.Context, a core.SenderArchive) error
 	UndoArchiveThreads(ctx context.Context, u core.ArchiveUndo) error
+	UndoRemoveAppAndWitDeadlines(ctx context.Context, removed []core.RemovedDeadline) error
 	UndoPurge(ctx context.Context, ids []int64) (gone int, err error)
 	UndoRuleRun(ctx context.Context, runID int64) (kept int, err error)
 	UninstallPlugin(ctx context.Context, name string) error
@@ -221,6 +228,9 @@ type Service interface {
 	ViewGroupPage(ctx context.Context, id int64, groupID, cursor string, limit int) (core.ViewGroupPage, error)
 	ViewTemplates(ctx context.Context) ([]core.ViewTemplate, error)
 	ViewWhy(ctx context.Context, id, threadID int64) (core.ViewReason, error)
+	ThreadDeadline(ctx context.Context, threadID int64) (core.ReaderDeadline, error)
+	SetThreadDeadline(ctx context.Context, threadID int64, d core.Deadline) (core.RemovedDeadline, error)
+	UndoSetThreadDeadline(ctx context.Context, before core.RemovedDeadline) error
 	AddAddressBook(ctx context.Context, in core.AddressBookInput) (core.AddressBook, error)
 	ContactAvatar(ctx context.Context, addr string) (core.Avatar, error)
 	ListAddressBookPresets() []core.AddressBookPreset

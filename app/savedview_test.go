@@ -76,7 +76,7 @@ func TestViewCreateFromSidebar(t *testing.T) {
 	}
 	h.see("To reply")
 	h.see(i18n.T("view.other"))
-	h.see(i18n.T("view.status.unreplied.today"))
+	h.see(i18n.T("view.status.unreplied"))
 }
 
 // TestViewArchiveAndUndo: archiving takes a conversation out of a group by
@@ -159,7 +159,7 @@ func TestViewToHandleFirstRun(t *testing.T) {
 	h.click(toHandle.Name)
 	h.waitMail("the mail in it", func() bool { return h.groupOf("needs a reply") == "reply" })
 	h.waitMail("its count", func() bool { b, _ := h.app.mail.savedView(toHandle.ID); return b.Unread == 1 })
-	h.see(i18n.T("view.status.unreplied.today"))
+	h.see(i18n.T("view.status.unreplied"))
 
 	it := h.items()[0]
 	th, err := h.env.Svc.GetThread(context.Background(), it.ID)
@@ -489,6 +489,40 @@ func TestViewRefreshesAtMidnight(t *testing.T) {
 	h.advance(time.Date(y, m, d+1, 0, 0, 2, 0, now.Location()).Sub(now))
 	if h.app.mail.list.Gen() == before {
 		t.Fatal("no reread just after midnight")
+	}
+}
+
+// TestViewDeadlineCondition: 回复日期 starts at 有, shows its day count, says
+// each choice, and a count out of range keeps the view from saving.
+func TestViewDeadlineCondition(t *testing.T) {
+	h, _ := mailHarness(t, nil, "alice@example.com")
+	p := h.app.mail
+	e := newViewEditor(p)
+	cd := core.RuleCondition{Field: core.FieldDeadline}
+	e.fieldChanged(&cd, core.FieldFrom)
+	if cd.Op != core.OpIs || cd.Value != core.RuleYes {
+		t.Fatalf("new 回复日期 condition: %+v", cd)
+	}
+	e.box.Name = "本周要回"
+	e.box.Doc.Match = core.MatchAll
+	e.box.Doc.Conditions = []core.RuleCondition{{Field: core.FieldDeadline, Op: core.OpIs, Value: "7"}}
+	p.openViewEditor(e)
+	h.see(i18n.T("settings.rules.field.deadline"))
+	h.see(i18n.T("view.deadline.days"))
+	if got := e.docProblem(); got != "" {
+		t.Fatalf("problem with 7 days: %q", got)
+	}
+	e.box.Doc.Conditions[0].Value = "0"
+	if got := e.docProblem(); got != i18n.Tf("view.problem.days", core.MaxViewDateDays) {
+		t.Fatalf("problem with 0 days: %q", got)
+	}
+	seen := map[string]bool{}
+	for _, v := range []string{core.RuleYes, core.RuleNo, core.ViewDeadlineOverdue, "7"} {
+		s := h.app.viewCondText(core.RuleCondition{Field: core.FieldDeadline, Op: core.OpIs, Value: v})
+		if s == "" || seen[s] || slices.Contains([]byte(s), '.') { // a key, not text
+			t.Fatalf("condition text for %q: %q", v, s)
+		}
+		seen[s] = true
 	}
 }
 

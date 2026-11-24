@@ -322,6 +322,7 @@ func (a *App) View(c *ui.Context) {
 	a.smimeEncryptDialog(c)
 	a.smimeSigDialog(c)
 	a.mcpSendDialog(c)
+	a.replyDateDialog(c)
 	a.pages[PageSettings].(*settingsPage).importDialog(c)
 	kit.ToastHost(c, i18n.T("toast.close"))
 	// Last, on the root, which overlays (menus, dialogs, Select lists, toasts)

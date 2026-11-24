@@ -597,15 +597,20 @@ func TestReaderNoTopBlankSpacerOnOpenOrSwitch(t *testing.T) {
 	checkNoBlankGap := func(addr string) {
 		t.Helper()
 		r := h.app.mail.reader
-		avatar, ok := h.tt.Find(addr)
+		target, ok := h.tt.Find(addr)
 		if !ok {
 			t.Fatalf("avatar %q not found", addr)
 		}
-		gap := avatar.Y - (r.pane.Y + r.barTop)
-		// Message row padding + avatar margin is ~28 px; a header-height blank spacer would be > 70 px.
+		if r.todoShown() {
+			if badge, found := h.tt.Find(i18n.T("reader.ai.todo")); found && badge.Y < target.Y {
+				target = badge
+			}
+		}
+		gap := target.Y - (r.pane.Y + r.barTop)
+		// Topmost content padding + margin is ~28-36 px; a header-height blank spacer would be > 70 px.
 		if gap > 56 {
-			t.Fatalf("blank spacer gap between header (pane.Y=%.1f, barTop=%.1f) and %s avatar (Y=%.1f): gap=%.1f",
-				r.pane.Y, r.barTop, addr, avatar.Y, gap)
+			t.Fatalf("blank spacer gap between header (pane.Y=%.1f, barTop=%.1f) and %s topmost content (Y=%.1f): gap=%.1f",
+				r.pane.Y, r.barTop, addr, target.Y, gap)
 		}
 	}
 

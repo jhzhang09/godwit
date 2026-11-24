@@ -1267,6 +1267,7 @@ function Compose({
                 onSendNow={() => send()}
                 onSendLater={(at) => send("", at)}
                 menu={api.popupMenu}
+                later={api.sendLater}
                 t={t}
               />
             </div>

@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"fmt"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -93,7 +94,7 @@ type viewGroupState struct {
 // viewItem is a view's conversation as a row of group.
 func viewItem(r core.ViewRow, group string) mailItem {
 	it := threadItem(r.ThreadSummary)
-	it.Group, it.Status, it.NewReply, it.WaitingDays, it.Manual = group, r.Status, r.NewReply, r.WaitingDays, r.Manual
+	it.Group, it.Status, it.NewReply, it.WaitingDays, it.Manual, it.Deadline = group, r.Status, r.NewReply, r.WaitingDays, r.Manual, r.Deadline
 	return it
 }
 
@@ -213,30 +214,24 @@ func viewHeading(c *ui.Context, e listEntry) {
 	})
 }
 
-// viewDaysAgo is how many calendar days t is before now.
+// viewDaysAgo is how many calendar days t is before now, negative after.
 func viewDaysAgo(now, t time.Time) int {
 	day := func(x time.Time) time.Time {
 		y, m, d := x.In(now.Location()).Date()
 		return time.Date(y, m, d, 12, 0, 0, 0, now.Location()) // noon: a DST change stays under half a day
 	}
-	return int(day(now).Sub(day(t)).Hours()/24 + 0.5)
+	return int(math.Round(day(now).Sub(day(t)).Hours() / 24))
 }
 
 // viewLine is a row's status for its third line, "" for none: the row shows
-// its preview instead. Only a view's rows have one.
-func (p *mailPage) viewLine(it mailItem) (icon, text string) {
+// its preview instead. Only a view's rows have one. An unreplied row's says
+// nothing of when it came: the row's time says that.
+func viewLine(it mailItem) (icon, text string) {
 	switch {
 	case it.Status == core.ReplyStatusUnreplied && it.NewReply:
 		return "reply", i18n.T("view.status.new_reply")
 	case it.Status == core.ReplyStatusUnreplied:
-		switch n := viewDaysAgo(p.a.clock.Now(), it.Date); {
-		case n <= 0:
-			return "reply", i18n.T("view.status.unreplied.today")
-		case n == 1:
-			return "reply", i18n.T("view.status.unreplied.yesterday")
-		default:
-			return "reply", i18n.Tf("view.status.unreplied.days", n)
-		}
+		return "reply", i18n.T("view.status.unreplied")
 	case it.Status == core.ReplyStatusWaiting:
 		return "time", i18n.Tf("view.status.waiting", it.WaitingDays)
 	case it.Manual:
@@ -563,6 +558,14 @@ func (a *App) viewCondText(cd core.RuleCondition) string {
 		return i18n.T("view.starred." + cd.Value)
 	case core.FieldWrote:
 		return i18n.T("view.wrote." + cd.Value)
+	case core.FieldDeadline:
+		if n, err := strconv.Atoi(cd.Value); err == nil {
+			return i18n.Tf("view.cond.deadline_days", n)
+		}
+		if cd.Value == core.ViewDeadlineOverdue {
+			return i18n.T("view.cond.deadline_overdue")
+		}
+		return i18n.T("view.deadline." + cd.Value)
 	case core.FieldDate:
 		op, val := i18n.T("settings.rules.op.is"), ""
 		if cd.Op == core.OpNotContains {
@@ -578,9 +581,20 @@ func (a *App) viewCondText(cd core.RuleCondition) string {
 	return a.pages[PageSettings].(*settingsPage).rules.condText(cd)
 }
 
-// loadWhy reads why the open conversation is in the view shown.
+// loadWhy reads why the open conversation is in the view shown, and its 回复日期.
 func (r *reader) loadWhy() {
 	a, k := r.p.a, r.key
+	if k[0] != 0 {
+		var d core.ReaderDeadline
+		a.query(func(ctx context.Context) (err error) {
+			d, err = a.svc.ThreadDeadline(ctx, k[0])
+			return err
+		}, func(err error) {
+			if err == nil && r.key == k {
+				r.deadline, r.unreplied, r.awaited, r.waitDays = d.Deadline, d.Unreplied, d.Waiting, d.WaitingDays
+			}
+		})
+	}
 	id, ok := savedViewOf(a.route.View)
 	if !ok || k[0] == 0 {
 		r.why = core.ViewReason{}
@@ -597,26 +611,35 @@ func (r *reader) loadWhy() {
 	})
 }
 
+// unrepliedText says the conversation waits on the user's reply, and how long.
+func (r *reader) unrepliedText() string {
+	if r.why.NewReply {
+		return i18n.T("view.band.new_reply")
+	}
+	if m, ok := r.last(); ok {
+		if n := viewDaysAgo(r.p.a.clock.Now(), m.Date); n > 1 {
+			return i18n.Tf("view.band.unreplied.days", n)
+		}
+	}
+	return i18n.T("view.band.unreplied")
+}
+
 // viewBand is the status above the conversation, in a view, with 写催促信
-// while it waits on someone.
+// while it waits on someone, and then under it the 回复日期 with 改日期;
+// outside a view, it shows only for that date.
 func (r *reader) viewBand(c *ui.Context) {
 	w := r.why
-	if !w.Member {
-		return
-	}
 	var icon, text string
+	waiting := false
 	switch {
-	case w.Status == core.ReplyStatusUnreplied && w.NewReply:
-		icon, text = "reply", i18n.T("view.band.new_reply")
-	case w.Status == core.ReplyStatusUnreplied:
-		icon, text = "reply", i18n.T("view.band.unreplied")
-		if m, ok := r.last(); ok {
-			if n := viewDaysAgo(r.p.a.clock.Now(), m.Date); n > 1 {
-				text = i18n.Tf("view.band.unreplied.days", n)
-			}
-		}
-	case w.Status == core.ReplyStatusWaiting:
-		icon, text = "time", i18n.Tf("view.band.waiting", w.Days)
+	case w.Member && w.Status == core.ReplyStatusUnreplied && r.todoShown():
+		return // the 等你处理 line says it, in the summary's place
+	case w.Member && w.Status == core.ReplyStatusUnreplied:
+		icon, text = "reply", r.unrepliedText()
+	case w.Member && w.Status == core.ReplyStatusWaiting:
+		icon, text, waiting = "time", i18n.Tf("view.band.waiting", w.Days), true
+	case r.dateInBand(): // outside a view, or in one not about 回复状态: for the date's sake
+		icon, text, waiting = "time", i18n.Tf("view.band.waiting", r.waitDays), true
 	default:
 		return
 	}
@@ -624,8 +647,16 @@ func (r *reader) viewBand(c *ui.Context) {
 	r.column(c).Children(func() {
 		kit.Block(c, ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(th.Space(2)).Padding(th.Space(4), th.Space(6)), kit.ToneTint).Children(func() {
 			ui.Icon(c, icons.Get(icon)).Size(theme.Icon, theme.Icon).Shrink(0).TextColor(t.Muted)
-			kit.Text(c, text, t.Text.Sm).Grow(1).Shrink(1)
-			if w.Status == core.ReplyStatusWaiting {
+			ui.Column(c).Grow(1).Shrink(1).Gap(th.Space(1)).Children(func() {
+				kit.Text(c, text, t.Text.Sm)
+				if r.dateInBand() {
+					ui.Row(c).FillWidth().Gap(th.Space(3)).AlignItems(ui.Start).Children(func() {
+						ui.Column(c).Grow(1).Shrink(1).Children(func() { r.deadlineLine(c, "") })
+						r.dateMenuButton(c)
+					})
+				}
+			})
+			if waiting {
 				kit.Button(c, i18n.T("view.follow_up"), kit.ButtonOpts{Variant: kit.Outline, Size: kit.SizeSm}).Shrink(0).OnClick(func() { r.draft("reply") })
 			}
 		})

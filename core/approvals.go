@@ -80,10 +80,12 @@ var ErrNotGrantable = errors.New("this tool cannot be allowed for the whole conv
 
 // sessionTools are the tools 本次对话都允许 can grant: built-in ones that
 // write only locally, with no destinations. Never an external (plugin or
-// MCP) tool, and never a send: no tool sends. A grant is keyed by
+// MCP) tool, and never a send: no tool sends. create_draft saves a draft the
+// user sends themselves; set_reply_deadline writes a 期限 on this device,
+// below the user's own (it cannot replace or clear one). A grant is keyed by
 // conversation, tool and extension binding (empty for built-ins), not by
 // model: it still holds after the conversation switches models.
-var sessionTools = []string{"create_draft"}
+var sessionTools = []string{"create_draft", "set_reply_deadline"}
 
 // decisionSession is the audit decision of a call a session grant approved.
 const decisionSession = "auto:session"
@@ -526,6 +528,9 @@ func (s *Service) execute(ctx context.Context, a approvalRow, ex *executor, args
 			return errors.Join(err, finish("failed", msgUncertain, nil, "uncertain"))
 		}
 		return errors.Join(err, finish("failed", msgNotSaved, nil, "failed"))
+	}
+	if a.Tool == "set_reply_deadline" {
+		s.publishView() // views reread, as after commitDeadline
 	}
 	if a.Tool == "delete_draft" {
 		// After the commit: a crash before this leaves files the next start removes.

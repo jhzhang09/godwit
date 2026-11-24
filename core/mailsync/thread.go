@@ -24,7 +24,8 @@ type threadPlan struct {
 	moved  []int64 // messages moved from others to target
 }
 
-func planThread(ctx context.Context, db *store.DB, acc *account, p *mail.Parsed) (threadPlan, error) {
+// core (nil: none) picks the 期限 a merge keeps.
+func planThread(ctx context.Context, db *store.DB, acc *account, p *mail.Parsed, core Core) (threadPlan, error) {
 	ids, key := mail.ThreadKeys(p)
 	tids, err := refThreads(ctx, db, acc.id, ids)
 	if err != nil {
@@ -55,12 +56,18 @@ func planThread(ctx context.Context, db *store.DB, acc *account, p *mail.Parsed)
 		if plan.moved, _, err = doomed(ctx, db, "thread_id IN "+in, others...); err != nil {
 			return threadPlan{}, err
 		}
+		keep := target // shortcut: with no core (mailsync's own tests, which write no 期限), target's is kept
+		if core != nil {
+			if keep, err = core.MergedReplyDate(ctx, tids); err != nil {
+				return threadPlan{}, err
+			}
+		}
 		args := append([]any{target}, others...)
 		plan.pre = []sqlite.Statement{
 			{SQL: "UPDATE messages SET thread_id = ? WHERE thread_id IN " + in, Args: args},
 			{SQL: "UPDATE thread_refs SET thread_id = ? WHERE thread_id IN " + in, Args: args},
 		}
-		plan.pre = append(append(plan.pre, mergeViewState(target, others)...),
+		plan.pre = append(append(plan.pre, mergeViewState(target, others, keep)...),
 			sqlite.Statement{SQL: "DELETE FROM threads WHERE id IN " + in, Args: others}) // after the updates: it cascades
 	}
 	return plan, nil
@@ -68,8 +75,8 @@ func planThread(ctx context.Context, db *store.DB, acc *account, p *mail.Parsed)
 
 // mergeViewState moves what is kept per conversation for 视图 to target:
 // an exception (removed wins over added), the archive mark of the latest
-// archive, and the replies.
-func mergeViewState(target int64, others []any) []sqlite.Statement {
+// archive, the replies, and the 期限 of thread keep (Core.MergedReplyDate).
+func mergeViewState(target int64, others []any, keep int64) []sqlite.Statement {
 	all := append([]any{target}, others...)
 	in, inAll := "("+marks(len(others))+")", "("+marks(len(all))+")"
 	args := append([]any{target}, others...)
@@ -77,10 +84,16 @@ func mergeViewState(target int64, others []any) []sqlite.Statement {
 		{SQL: `DELETE FROM saved_view_exceptions WHERE kind = 'added' AND thread_id IN ` + inAll + ` AND view_id IN
 			(SELECT view_id FROM saved_view_exceptions WHERE kind = 'removed' AND thread_id IN ` + inAll + `)`, Args: append(slices.Clone(all), all...)},
 		{SQL: "UPDATE OR IGNORE saved_view_exceptions SET thread_id = ? WHERE thread_id IN " + in, Args: args},
+		// The kept mark's mail is the newest archived, its archive the latest: a manual 期限 set between two stays ended.
+		{SQL: `UPDATE archive_marks SET archived_version = (SELECT max(archived_version) FROM archive_marks WHERE thread_id IN ` + inAll + `),
+			archived_at = (SELECT max(archived_at) FROM archive_marks WHERE thread_id IN ` + inAll + `) WHERE thread_id IN ` + inAll,
+			Args: append(append(slices.Clone(all), all...), all...)},
 		{SQL: `DELETE FROM archive_marks WHERE thread_id IN ` + inAll + ` AND thread_id != (SELECT thread_id FROM archive_marks
 			WHERE thread_id IN ` + inAll + ` ORDER BY date DESC, thread_id LIMIT 1)`, Args: append(slices.Clone(all), all...)},
 		{SQL: "UPDATE archive_marks SET thread_id = ? WHERE thread_id IN " + in, Args: args},
 		{SQL: "UPDATE reply_records SET thread_id = ? WHERE thread_id IN " + in, Args: args},
+		{SQL: "DELETE FROM thread_deadlines WHERE thread_id IN " + inAll + " AND thread_id != ?", Args: append(slices.Clone(all), keep)},
+		{SQL: "UPDATE thread_deadlines SET thread_id = ? WHERE thread_id IN " + in, Args: args},
 	}
 }
 

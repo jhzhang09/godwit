@@ -6,7 +6,9 @@ CachedAttachments
 CachedImage
 CachedImageDims
 CancelTrayQuit
+ConfirmSummaryService
 ContactAvatar
+CountUnrepliedToSummarize
 DevPreviewSignInCode
 DownloadRecognitionModelStream
 DraftSMIMEStatus
@@ -28,6 +30,7 @@ PreviewAccountImportFile
 RawMessageFile
 RecentLog
 RecordSMIMESignerCert
+RemoveAppAndWitDeadlines
 RemoveContactCertificate
 ReplaceUIBackend
 SelectContactCertificate
@@ -42,5 +45,10 @@ SetUIForeground
 SetUIReady
 StopUIBackend
 StoreLatestVersion
+SummarizeUnreplied
+SummaryArrivalState
 SystemTranslatorLanguages
+ThreadDeadline
 TrayShown
+UndoRemoveAppAndWitDeadlines
+UndoSetThreadDeadline

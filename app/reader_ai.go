@@ -92,7 +92,7 @@ func fetchInto[T any](r *reader, f *fetch[T], force bool, get func(context.Conte
 // msgAI is the AI state of one message.
 type msgAI struct {
 	summary     *aiRun
-	sumShown    *bool // the Summary action's choice; nil follows Settings.Summary
+	sumShown    *bool // the Summary action's choice; nil follows Settings.SummaryMode
 	translation *aiRun
 	showTr      bool // the translation was asked to show
 	result      *aiResult
@@ -161,7 +161,7 @@ func shortLang(tag string) string {
 }
 
 // summaryShown reports whether a message's summary shows: with a model,
-// as the Summary action chose, else as Settings.Summary says.
+// as the Summary action chose, else as Settings.SummaryMode says.
 func (r *reader) summaryShown(st *msgAI) bool {
 	if !r.taskReady("summarize") {
 		return false
@@ -169,7 +169,12 @@ func (r *reader) summaryShown(st *msgAI) bool {
 	if st.sumShown != nil {
 		return *st.sumShown
 	}
-	return r.p.a.settings.Summary
+	return summaryOnOpen(r.p.a.settings)
+}
+
+// summaryOnOpen is whether 邮件总结 summarizes mail as it opens: any level but 关.
+func summaryOnOpen(st core.Settings) bool {
+	return st.SummaryMode == core.SummaryOpen || st.SummaryMode == core.SummaryArrive
 }
 
 // trShown reports whether a message shows its translation: asked for, and
@@ -209,11 +214,11 @@ func (r *reader) stopAI() {
 }
 
 // startFor starts what an expanded message shows by itself: its summary
-// (Settings.Summary with a model; the newest only, the one a thread shows)
+// (Settings.SummaryMode with a model; the newest only, the one a thread shows)
 // and its plugin cards. Each runs once.
 func (r *reader) startFor(id int64) {
 	st := r.state(id)
-	if last, _ := r.last(); id == last.ID && r.taskReady("summarize") && r.p.a.settings.Summary && st.summary == nil && !r.needsSMIMEDecrypt(id) {
+	if last, _ := r.last(); id == last.ID && r.taskReady("summarize") && summaryOnOpen(r.p.a.settings) && st.summary == nil && !r.needsSMIMEDecrypt(id) {
 		st.summary = r.summarize(id)
 	}
 	r.loadCards(id, false)
@@ -248,10 +253,10 @@ func (r *reader) reloadPluginParts() {
 }
 
 // gist is a folded message's one-line gist, asked for as its row shows (the
-// small model, under Settings.Summary): "" until it comes, and when it
+// small model, under Settings.SummaryMode): "" until it comes, and when it
 // fails or there is no model, so the row keeps the start of its text.
 func (r *reader) gist(id int64) string {
-	if !r.taskReady("") || !r.p.a.settings.Summary || r.needsSMIMEDecrypt(id) {
+	if !r.taskReady("") || !summaryOnOpen(r.p.a.settings) || r.needsSMIMEDecrypt(id) {
 		return ""
 	}
 	st, get := r.state(id), r.gistFn
@@ -572,6 +577,11 @@ func (r *reader) aiArea(c *ui.Context, m core.MessageSummary) {
 	}
 }
 
+// summaryOn reports whether a message's summary panel shows.
+func (r *reader) summaryOn(st *msgAI) bool {
+	return st != nil && st.summary != nil && r.summaryShown(st)
+}
+
 // summaryPanel is m's summary while shown: under the sender of a message
 // read alone, under the subject of a thread (which summarizes its newest).
 func (r *reader) summaryPanel(c *ui.Context, m core.MessageSummary) {
@@ -579,7 +589,7 @@ func (r *reader) summaryPanel(c *ui.Context, m core.MessageSummary) {
 	if st == nil {
 		return
 	}
-	if sum := st.summary; sum != nil && r.summaryShown(st) {
+	if sum := st.summary; r.summaryOn(st) {
 		t, th := theme.Of(c), c.Theme()
 		meta := sum.model
 		if len(r.msgs) > 1 {
@@ -598,17 +608,22 @@ func (r *reader) summaryPanel(c *ui.Context, m core.MessageSummary) {
 				}
 			})
 			ui.Column(c).FillWidth().Gap(th.Space(2)).Children(func() {
+				digested := false // a digest carries the 回复日期 in its own 等你处理 line
 				switch {
 				case len(r.msgs) < 2:
 					r.output(c, sum)
 				case sum.done: // a digest, else (unreadable) its text as written
-					if d, ok := core.ParseThreadDigest(sum.text, r.threadIDs); ok {
+					var d core.ThreadDigest
+					if d, digested = core.ParseThreadDigest(sum.text, r.threadIDs); digested {
 						r.digest(c, d)
 					} else {
 						r.output(c, sum)
 					}
 				}
 				r.aiBodyState(c, sum, hasContent, func() { st.summary = r.summarize(m.ID) })
+				if r.todoShown() && !digested {
+					r.todoRow(c, true, func() { r.replyDate(c, false) })
+				}
 			})
 		})
 	}
@@ -629,17 +644,31 @@ func (r *reader) digest(c *ui.Context, d core.ThreadDigest) {
 			}
 		})
 	}
-	if d.Todo != nil {
-		row := ui.Row(c).FillWidth().Gap(th.Space(2.5)).AlignItems(ui.Start)
-		if len(d.Progress) > 0 {
-			row.Margin(th.Space(0.5), 0, 0, 0).Padding(th.Space(2.5), 0, 0, 0).
-				BorderWidth(theme.Hairline, 0, 0, 0).BorderColor(t.Border)
-		}
-		row.Children(func() {
-			kit.Badge(c, i18n.T("reader.ai.todo")).Shrink(0).Margin(th.Space(0.5), 0, 0, 0)
-			r.digestLine(c, d.Todo)
+	if d.Todo != nil || r.todoShown() {
+		todo := d.Todo != nil && !r.dated() // a 回复日期 says what waits in the to-do's place
+		r.todoRow(c, len(d.Progress) > 0, func() {
+			if todo {
+				r.digestLine(c, d.Todo)
+			}
+			r.replyDate(c, todo)
 		})
 	}
+}
+
+// todoRow is the 等你处理 line: what waits on the user, under a hairline when
+// rule (something is above it), and at its right end the dateButton.
+func (r *reader) todoRow(c *ui.Context, rule bool, body func()) {
+	t, th := theme.Of(c), c.Theme()
+	row := ui.Row(c).FillWidth().Gap(th.Space(3)).AlignItems(ui.Start)
+	if rule {
+		row.Margin(th.Space(0.5), 0, 0, 0).Padding(th.Space(3), 0, 0, 0).
+			BorderWidth(theme.Hairline, 0, 0, 0).BorderColor(t.Border)
+	}
+	row.Children(func() {
+		kit.Badge(c, i18n.T("reader.ai.todo")).Shrink(0).Margin(th.Space(0.5), 0, 0, 0)
+		ui.Column(c).Grow(1).Shrink(1).Gap(th.Space(1)).Children(body)
+		r.dateButton(c)
+	})
 }
 
 // digestLine is a line of a digest, its cites inline as Wit's answers show

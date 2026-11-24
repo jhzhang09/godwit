@@ -50,6 +50,9 @@ type Options struct {
 	// SecurityMail runs the single background security worker. The apps enable
 	// it; deterministic tests may drive scanSecurityBatch explicitly.
 	SecurityMail bool
+	// SummarizeMail runs 收到就总结's summarizer in the background (the apps
+	// set it; tests call summarizeBatch by hand).
+	SummarizeMail bool
 	// SystemLanguage is the operating system language (BCP 47) the GUI passes in; empty means "en".
 	SystemLanguage string
 	// Keyring 存储凭据；进程内首次设置的非 nil 实现由所有 Service 共用。
@@ -231,6 +234,7 @@ type Service struct {
 	labelsMu          sync.Mutex                 // label writes: a name is checked and saved under it
 	sigMu             sync.Mutex                 // signature writes (read, images stored, HTML saved, unused images cleaned), and a draft taking a signature; before editMu
 	labelWake         chan struct{}              // wakes the label classifier
+	summaryWake       chan struct{}              // wakes 收到就总结's summarizer
 	securityMu        sync.Mutex                 // scan admission and progress scope
 	securityRunning   bool
 	securitySyncs     int
@@ -243,6 +247,7 @@ type Service struct {
 	smimeTablesOnce   sync.Once
 	smimeTablesErr    error
 	labelJudge        func(context.Context) (ai.Judge, error)
+	summaryBare       bool // summarize without replyByFormat: the reply-date eval's baseline
 	securityJudge     func(context.Context) (ai.Judge, error)
 	securityRaw       func(context.Context, int64) ([]byte, error)
 	securityLookupTXT func(context.Context, string) ([]string, error)
@@ -311,7 +316,7 @@ func New(ctx context.Context, opts Options) (*Service, error) {
 		return nil, err
 	}
 	s := &Service{db: db, bus: events.New(), dataDir: opts.DataDir, opts: opts, installID: install, streamsEnd: make(chan struct{}),
-		clock: testClock, hookClock: testHookClock, pluginClock: testPluginClock, labelWake: make(chan struct{}, 1), securityWake: make(chan struct{}, 1), reclaimWake: make(chan struct{}, 1), abWake: make(chan struct{}, 1)}
+		clock: testClock, hookClock: testHookClock, pluginClock: testPluginClock, labelWake: make(chan struct{}, 1), summaryWake: make(chan struct{}, 1), securityWake: make(chan struct{}, 1), reclaimWake: make(chan struct{}, 1), abWake: make(chan struct{}, 1)}
 	s.ledger = &runLedger{db: db, host: s}
 	if err := s.recoverOutbox(ctx); err != nil {
 		db.Close()
@@ -430,6 +435,9 @@ func New(ctx context.Context, opts Options) (*Service, error) {
 	}
 	if opts.LabelMail {
 		s.startLabeler()
+	}
+	if opts.SummarizeMail {
+		s.startSummarizer()
 	}
 	if opts.SecurityMail {
 		s.startSecurityScanner()
@@ -933,6 +941,7 @@ func (s *Service) syncAccount(ctx context.Context, accountID int64, explicit boo
 		slog.Warn("keyword labels not imported", "account", accountID, "err", ierr)
 	}
 	s.wakeLabeler()
+	s.wakeSummarizer()
 	if more {
 		if only == nil {
 			s.workersMu.Lock()

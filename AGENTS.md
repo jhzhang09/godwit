@@ -2,7 +2,7 @@
 
 ### Issue tracker
 
-Issues live in GitHub Issues for `godwit-email/godwit`, managed with the `gh` CLI. See `docs/agents/issue-tracker.md`.
+Issues live in GitHub Issues for `godwit-email/godwit`, managed with the `gh` CLI. Read one with `gh issue view <n> --json title,body,comments`: `--comments` prints nothing to an agent. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 
@@ -19,6 +19,14 @@ Before reviewing code changes or re-reviewing fixes, read [docs/agents/code-revi
 ### Upstream sync
 
 When merging upstream `godwit-email/godwit:main` into `smime`, follow [docs/fork-sync.md](docs/fork-sync.md) (especially keeping `core/store/schema.go` `Migrations` aligned 1:1 with upstream and putting Fork-only schema changes in `DB.ensureForkSchema`).
+
+### Build and checks
+
+A fresh worktree has no generated code (`undefined: Catalog`, missing `@/mygo`): run `mise run generate` before Go commands. Go and Bun come from mise; see README's Development section. Before pushing, run `mise run check`, which does what CI does; `mise run go:check` is the quick subset. Fake mail servers for tests (IMAP, SMTP, JMAP, Graph, EWS, POP3, Gmail, CardDAV) live in `core/internal/testmail`.
+
+### Pull requests
+
+Review the change against `docs/agents/code-review.md` before opening its PR. A PR merges only when its checks pass and every review conversation is resolved, so call it ready only when `gh pr view <n> --json mergeStateStatus` says `CLEAN`. "开启 auto-fix" means: watch the PR, fix failing checks and act on review comments, until checks are green and no conversation is open. The merge stays with the user.
 
 ## Model-facing interfaces
 

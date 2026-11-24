@@ -34,6 +34,12 @@ const (
 	FieldStarred = "starred" // is RuleYes or RuleNo
 	FieldWrote   = "wrote"   // is RuleYes: a sender the user has written to, or their own mail; RuleNo: only others
 
+	// FieldDeadline is the 期限 in effect: is RuleYes, RuleNo,
+	// ViewDeadlineOverdue, or a number of days it is due within, today
+	// included and overdue not. Never in rules: a date a program, Wit or the
+	// summary wrote must not set off a rule's actions.
+	FieldDeadline = "deadline"
+
 	ViewDateToday     = "today"
 	ViewDateYesterday = "yesterday"
 	ViewDateThisWeek  = "this_week"
@@ -44,6 +50,8 @@ const (
 	ViewReplyUnreplied = "unreplied"
 	ViewReadUnread     = "unread"
 	ViewReadRead       = "read"
+
+	ViewDeadlineOverdue = "overdue"
 
 	// Exceptions: a conversation added to or removed from a view by hand.
 	ViewExceptionAdded   = "added"
@@ -92,14 +100,17 @@ type SavedView struct {
 }
 
 // ViewRow is a conversation in a view: Status is ReplyStatusUnreplied,
-// ReplyStatusWaiting or none, WaitingDays since the user's last mail, NewReply
-// that it is newer than its last archive, and Manual that it was added by hand.
+// ReplyStatusWaiting or none (none too beside a Deadline where the view's
+// conditions don't ask for 回复状态), WaitingDays since the user's last mail, NewReply
+// that it is newer than its last archive, Manual that it was added by hand,
+// and Deadline its 期限 in effect (nil: none).
 type ViewRow struct {
 	ThreadSummary
 	Status      string
 	NewReply    bool
 	WaitingDays int
 	Manual      bool
+	Deadline    *Deadline
 }
 
 // ViewGroupPage is one page of a group or of 其他; Total counts all of it.
@@ -224,6 +235,17 @@ func (s *Service) validViewConditions(ctx context.Context, match string, conds [
 			} else if !slices.Contains(viewDates, c.Value) {
 				return invalidView("date %q", c.Value)
 			}
+		case FieldDeadline:
+			if c.Op != OpIs {
+				return invalidView("deadline op %q", c.Op)
+			}
+			if n, err := strconv.Atoi(c.Value); err == nil {
+				if n < 1 || n > MaxViewDateDays {
+					return invalidView("deadline days %q", c.Value)
+				}
+			} else if c.Value != RuleYes && c.Value != RuleNo && c.Value != ViewDeadlineOverdue {
+				return invalidView("deadline %q", c.Value)
+			}
 		case FieldStarred, FieldWrote:
 			if c.Op != OpIs || c.Value != RuleYes && c.Value != RuleNo {
 				return invalidView("%s %s %q", c.Field, c.Op, c.Value)
@@ -245,13 +267,16 @@ func (s *Service) validViewConditions(ctx context.Context, match string, conds [
 
 // viewEval is what compiling and placing share: the state read once per call.
 type viewEval struct {
-	now      int64
-	statuses map[int64]replyStatus
-	notIn    string // the condition on messages m that they count in a conversation
-	unread   string // the condition on messages m that they are unread: your own sent mail never is
-	wrote    string // the condition on messages m that they are the user's, or from who they wrote to
-	wroteTo  string // its argument
-	today    time.Time
+	now        int64
+	statuses   map[int64]replyStatus
+	notIn      string // the condition on messages m that they count in a conversation
+	unread     string // the condition on messages m that they are unread: your own sent mail never is
+	wrote      string // the condition on messages m that they are the user's, or from who they wrote to
+	wroteTo    string // its argument
+	today      time.Time
+	replyDates string // the 期限's version (meta reply_dates_version), bumped by every write
+	// deadlines is the 期限 in effect by conversation, removal markers included.
+	deadlines map[int64]Deadline
 }
 
 func (s *Service) newViewEval(ctx context.Context) (*viewEval, error) {
@@ -298,7 +323,27 @@ func (s *Service) newViewEval(ctx context.Context) (*viewEval, error) {
 	const bare = `CASE WHEN instr(m.from_addr, '<') > 0 AND instr(m.from_addr, '>') > instr(m.from_addr, '<')
 		THEN substr(m.from_addr, instr(m.from_addr, '<') + 1, instr(m.from_addr, '>') - instr(m.from_addr, '<') - 1) ELSE trim(m.from_addr) END`
 	wrote := "(lower(" + bare + ") IN (SELECT value FROM json_each(?)) OR " + shownIn("("+inSent+")") + ")"
-	return &viewEval{now: now, statuses: statuses, notIn: notIn, unread: unread, wrote: wrote, wroteTo: string(list), today: s.clk().Now()}, nil
+	version, err := s.db.Query(ctx, "SELECT value FROM meta WHERE key = 'reply_dates_version'")
+	if err != nil {
+		return nil, err
+	}
+	replyDates := "0"
+	if len(version.Values) > 0 {
+		replyDates = store.Str(version.Values[0][0])
+	}
+	e := &viewEval{now: now, statuses: statuses, notIn: notIn, unread: unread, wrote: wrote, wroteTo: string(list), today: s.userNow(ctx), replyDates: replyDates}
+	rows, err := s.db.Query(ctx, "SELECT thread_id FROM thread_deadlines")
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]int64, len(rows.Values))
+	for i, r := range rows.Values {
+		ids[i] = store.Int(r[0])
+	}
+	if e.deadlines, err = s.deadlinesIn(ctx, e.today, statuses, ids); err != nil {
+		return nil, err
+	}
+	return e, nil
 }
 
 // inThread is the condition on threads t that a message of it meets cond,
@@ -337,6 +382,22 @@ func (e *viewEval) stateSQL(c RuleCondition) (string, []any) {
 	}
 	var ids []int64
 	days, _ := strconv.Atoi(c.Value)
+	if c.Field == FieldDeadline {
+		today, end := e.today.Format(time.DateOnly), e.today.AddDate(0, 0, days).Format(time.DateOnly)
+		for id, d := range e.deadlines {
+			switch {
+			case d.Date == "":
+			case c.Value == RuleYes, c.Value == RuleNo,
+				c.Value == ViewDeadlineOverdue && d.Overdue,
+				days > 0 && !d.Overdue && d.Date >= today && d.Date < end:
+				ids = append(ids, id)
+			}
+		}
+		if c.Value == RuleNo {
+			return "t.id NOT IN (SELECT value FROM json_each(?))", []any{intList(ids)}
+		}
+		return "t.id IN (SELECT value FROM json_each(?))", []any{intList(ids)}
+	}
 	for id, st := range e.statuses {
 		switch {
 		case c.Op == OpIs && st.Kind == ReplyStatusUnreplied,
@@ -374,7 +435,7 @@ func (e *viewEval) treeSQL(match string, conds []RuleCondition) (string, []any, 
 			var on bool
 			sql, a, on = e.treeSQL(c.Match, c.Group)
 			perMessage = perMessage || on
-		case c.Field == FieldReply || c.Field == FieldRead:
+		case c.Field == FieldReply || c.Field == FieldRead || c.Field == FieldDeadline:
 			sql, a = e.stateSQL(c)
 		case c.Field == FieldDate, c.Field == FieldStarred, c.Field == FieldWrote:
 			var yes bool
@@ -447,9 +508,23 @@ type placedThread struct {
 	group    int
 	unread   bool
 	manual   bool
+	deadline *Deadline // its 期限 while lifted: in effect, dated, at most 7 days overdue
+	due      int64     // when deadline passes, 0 without one
 }
 
-// placed lists the conversations of d, newest first, each in the first group
+// viewOrder is the order of every group, 其他 too: a conversation with a 期限
+// first, soonest (so overdue) first, then the rest newest first.
+func viewOrder(a, b placedThread) int {
+	if (a.due == 0) != (b.due == 0) {
+		if a.due != 0 {
+			return -1
+		}
+		return 1
+	}
+	return cmp.Or(cmp.Compare(a.due, b.due), cmp.Compare(b.date, a.date), cmp.Compare(b.id, a.id))
+}
+
+// placed lists the conversations of d in viewOrder, each in the first group
 // it meets: membership and placement come before any paging, so a group is
 // never empty because its rows are on a later page.
 // shortcut: reads every member on each call; page in SQL by group if large views get slow.
@@ -506,6 +581,14 @@ func (s *Service) placed(ctx context.Context, e *viewEval, viewID int64, d Saved
 	for i, r := range rows.Values {
 		out[i] = placedThread{id: store.Int(r[0]), date: store.Int(r[1]), group: int(store.Int(r[2])), unread: store.Int(r[3]) != 0, manual: store.Int(r[4]) != 0}
 	}
+	y, m, day := e.today.Date()
+	cut := time.Date(y, m, day-7, 0, 0, 0, 0, e.today.Location()).Format(time.DateOnly) // more than 7 days overdue is no longer lifted
+	for i, p := range out {
+		if d, ok := e.deadlines[p.id]; ok && d.Date >= cut {
+			out[i].deadline, out[i].due = &d, deadlineEnd(d, e.today.Location()).Unix()
+		}
+	}
+	slices.SortFunc(out, viewOrder)
 	return out, nil
 }
 
@@ -529,6 +612,11 @@ func usesWaiting(conds []RuleCondition) bool {
 	return slices.ContainsFunc(RuleDoc{Conditions: conds}.Rows(), func(c RuleCondition) bool { return c.Field == FieldReply && c.Op == OpOlderThan })
 }
 
+// usesReply is whether conds ask for a 回复状态.
+func usesReply(conds []RuleCondition) bool {
+	return slices.ContainsFunc(RuleDoc{Conditions: conds}.Rows(), func(c RuleCondition) bool { return c.Field == FieldReply })
+}
+
 // row completes a placed conversation's status, in a view or group whose
 // conditions may ask how long it has waited.
 func (e *viewEval) row(p placedThread, waiting bool) ViewRow {
@@ -548,11 +636,11 @@ func (e *viewEval) row(p placedThread, waiting bool) ViewRow {
 // document it was read from, so one from before an edit starts over.
 func (s *Service) groupPage(ctx context.Context, e *viewEval, d SavedViewDoc, all []placedThread, index int, rev int64, cursor string, limit int) (ViewGroupPage, error) {
 	page := ViewGroupPage{ID: ViewGroupOther}
-	waiting := usesWaiting(d.Conditions)
+	waiting, reply := usesWaiting(d.Conditions), usesReply(d.Conditions)
 	if index >= 0 {
 		g := d.Groups[index]
 		page.ID, page.Name = g.ID, g.Name
-		waiting = waiting || usesWaiting(g.Conditions)
+		waiting, reply = waiting || usesWaiting(g.Conditions), reply || usesReply(g.Conditions)
 	}
 	var rows []placedThread
 	for _, p := range all {
@@ -561,17 +649,19 @@ func (s *Service) groupPage(ctx context.Context, e *viewEval, d SavedViewDoc, al
 		}
 	}
 	page.Total = len(rows)
-	if c, ok := strings.CutPrefix(cursor, strconv.FormatInt(rev, 10)+"."); ok {
-		date, id, err := decodeCursor(c)
+	// A cursor holds the document's revision and the 期限's version: an edit to
+	// either reorders, so a cursor from before one starts over.
+	prefix := strconv.FormatInt(rev, 10) + "." + e.replyDates + "."
+	if c, ok := strings.CutPrefix(cursor, prefix); ok {
+		after, err := decodeViewCursor(c)
 		if err != nil {
 			return ViewGroupPage{}, err
 		}
-		rows = slices.DeleteFunc(rows, func(p placedThread) bool { return p.date > date || p.date == date && p.id >= id })
+		rows = slices.DeleteFunc(rows, func(p placedThread) bool { return viewOrder(p, after) <= 0 })
 	}
 	limit = clampLimit(limit)
 	if len(rows) > limit {
-		last := rows[limit-1]
-		page.NextCursor = strconv.FormatInt(rev, 10) + "." + encodeCursor(last.date, last.id)
+		page.NextCursor = prefix + encodeViewCursor(rows[limit-1])
 		rows = rows[:limit]
 	}
 	items := make([]ThreadSummary, len(rows))
@@ -593,6 +683,9 @@ func (s *Service) groupPage(ctx context.Context, e *viewEval, d SavedViewDoc, al
 		r := e.row(p, waiting)
 		r.ThreadSummary = items[i]
 		r.Subject = subjects[p.id]
+		if r.Deadline = p.deadline; r.Deadline != nil && !reply {
+			r.Status, r.NewReply = "", false // the date alone, where 回复状态 isn't what the view is about
+		}
 		page.Items[i] = r
 	}
 	return page, nil
@@ -1019,10 +1112,12 @@ type ArchiveUndo struct {
 
 // ArchiveMarkBefore is a conversation's archive mark before an archive (Had false: none).
 type ArchiveMarkBefore struct {
-	ThreadID int64
-	Had      bool
-	MID      string
-	Date     int64
+	ThreadID        int64
+	Had             bool
+	MID             string
+	Date            int64
+	ArchivedAt      int64
+	ArchivedVersion int64
 }
 
 // newestCounted is each conversation's newest counted message: its mark, and
@@ -1052,23 +1147,36 @@ func (s *Service) newestCounted(ctx context.Context, threads []any) (map[int64]a
 
 // markArchived records the marks and returns the ones they replace.
 func (s *Service) markArchived(ctx context.Context, marks map[int64]archiveMark) ([]ArchiveMarkBefore, error) {
-	if len(marks) == 0 {
-		return nil, nil
-	}
-	had, err := s.archiveMarks(ctx)
-	if err != nil {
+	stmts, before, err := s.archiveMarkWrites(ctx, marks)
+	if err != nil || len(stmts) == 0 {
 		return nil, err
-	}
-	var stmts []sqlite.Statement
-	var before []ArchiveMarkBefore
-	for tid, m := range marks {
-		h := had[tid]
-		before = append(before, ArchiveMarkBefore{ThreadID: tid, Had: h.has, MID: h.mid, Date: h.date})
-		stmts = append(stmts, sqlite.Statement{SQL: `INSERT INTO archive_marks(thread_id, message_id_hdr, date) VALUES (?, ?, ?)
-			ON CONFLICT(thread_id) DO UPDATE SET message_id_hdr = excluded.message_id_hdr, date = excluded.date`, Args: []any{tid, m.mid, m.date}})
 	}
 	_, err = s.db.Transaction(ctx, stmts)
 	return before, err
+}
+
+// archiveMarkWrites are the statements that record the marks, and the marks
+// they replace.
+func (s *Service) archiveMarkWrites(ctx context.Context, marks map[int64]archiveMark) ([]sqlite.Statement, []ArchiveMarkBefore, error) {
+	if len(marks) == 0 {
+		return nil, nil, nil
+	}
+	had, err := s.archiveMarks(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	stmts := []sqlite.Statement{bumpDeadlineVersion} // orders the archive against 期限 writes within a second
+	var before []ArchiveMarkBefore
+	now := s.clk().Now().Unix()
+	for tid, m := range marks {
+		h := had[tid]
+		before = append(before, ArchiveMarkBefore{ThreadID: tid, Had: h.has, MID: h.mid, Date: h.date, ArchivedAt: h.at, ArchivedVersion: h.ver})
+		stmts = append(stmts, sqlite.Statement{SQL: `INSERT INTO archive_marks(thread_id, message_id_hdr, date, archived_at, archived_version) VALUES (?, ?, ?, ?, ` + deadlineVersionSQL + `)
+			ON CONFLICT(thread_id) DO UPDATE SET message_id_hdr = excluded.message_id_hdr, date = excluded.date, archived_at = excluded.archived_at,
+			archived_version = excluded.archived_version`,
+			Args: []any{tid, m.mid, m.date, now}})
+	}
+	return stmts, before, nil
 }
 
 // ArchiveMessages moves the messages to folderID, the archive folder of their
@@ -1099,6 +1207,33 @@ func (s *Service) ArchiveMessages(ctx context.Context, ids []int64, folderID int
 		return ArchiveUndo{}, err
 	}
 	var undo ArchiveUndo
+	for _, t := range moving {
+		if t.folder != folderID {
+			undo.Moved = append(undo.Moved, ArchivedMessage{ID: t.id, From: t.folder, To: folderID})
+		}
+	}
+	if undo.Marks, err = s.markNewestArchived(ctx, ts); err != nil {
+		return ArchiveUndo{}, err
+	}
+	if err := s.move(ctx, acc, moving, 0, folderID); err != nil {
+		return ArchiveUndo{}, err
+	}
+	return undo, nil
+}
+
+// markNewestArchived marks the conversations whose newest counted message is
+// among ts, archived, and returns the marks it replaced.
+func (s *Service) markNewestArchived(ctx context.Context, ts []target) ([]ArchiveMarkBefore, error) {
+	marks, err := s.newestArchived(ctx, ts)
+	if err != nil {
+		return nil, err
+	}
+	return s.markArchived(ctx, marks)
+}
+
+// newestArchived are the marks of the conversations whose newest counted
+// message is among ts.
+func (s *Service) newestArchived(ctx context.Context, ts []target) (map[int64]archiveMark, error) {
 	threads := map[int64]bool{}
 	inIDs := map[int64]bool{}
 	for _, t := range ts {
@@ -1107,31 +1242,20 @@ func (s *Service) ArchiveMessages(ctx context.Context, ids []int64, folderID int
 			threads[t.thread] = true
 		}
 	}
-	for _, t := range moving {
-		if t.folder != folderID {
-			undo.Moved = append(undo.Moved, ArchivedMessage{ID: t.id, From: t.folder, To: folderID})
-		}
-	}
 	var list []any
 	for t := range threads {
 		list = append(list, t)
 	}
 	marks, copies, err := s.newestCounted(ctx, list)
 	if err != nil {
-		return ArchiveUndo{}, err
+		return nil, err
 	}
 	for t, c := range copies {
 		if !slices.ContainsFunc(c, func(id int64) bool { return inIDs[id] }) {
 			delete(marks, t) // an older message of it: its newest still counts
 		}
 	}
-	if undo.Marks, err = s.markArchived(ctx, marks); err != nil {
-		return ArchiveUndo{}, err
-	}
-	if err := s.move(ctx, acc, moving, 0, folderID); err != nil {
-		return ArchiveUndo{}, err
-	}
-	return undo, nil
+	return marks, nil
 }
 
 // ArchiveThreads archives whole conversations, as a view does: copies
@@ -1206,28 +1330,34 @@ func (s *Service) UndoArchiveThreads(ctx context.Context, u ArchiveUndo) error {
 		return err
 	}
 	defer end()
-	var stmts []sqlite.Statement
-	var threads []int64
-	for _, m := range u.Marks {
-		threads = append(threads, m.ThreadID)
+	if err := s.UndoArchive(ctx, SenderArchive{Moved: u.Moved, Marks: u.Marks}); err != nil {
+		return err
+	}
+	if len(u.Moved) == 0 {
+		var threads []int64
+		for _, m := range u.Marks {
+			threads = append(threads, m.ThreadID)
+		}
+		s.bus.Publish(events.Event{Type: events.MessagesChanged, ThreadIDs: threads})
+	}
+	return nil
+}
+
+// archiveMarkRestores put back the marks an archive replaced.
+func archiveMarkRestores(marks []ArchiveMarkBefore) []sqlite.Statement {
+	if len(marks) == 0 {
+		return nil
+	}
+	stmts := []sqlite.Statement{bumpDeadlineVersion} // a 期限 in effect changes with the mark
+	for _, m := range marks {
 		if m.Had {
-			stmts = append(stmts, sqlite.Statement{SQL: "UPDATE archive_marks SET message_id_hdr = ?, date = ? WHERE thread_id = ?", Args: []any{m.MID, m.Date, m.ThreadID}})
+			stmts = append(stmts, sqlite.Statement{SQL: "UPDATE archive_marks SET message_id_hdr = ?, date = ?, archived_at = ?, archived_version = ? WHERE thread_id = ?",
+				Args: []any{m.MID, m.Date, m.ArchivedAt, m.ArchivedVersion, m.ThreadID}})
 		} else {
 			stmts = append(stmts, sqlite.Statement{SQL: "DELETE FROM archive_marks WHERE thread_id = ?", Args: []any{m.ThreadID}})
 		}
 	}
-	if len(stmts) > 0 {
-		if _, err := s.db.Transaction(ctx, stmts); err != nil {
-			return err
-		}
-	}
-	if err := s.UndoArchive(ctx, SenderArchive{Moved: u.Moved}); err != nil {
-		return err
-	}
-	if len(u.Moved) == 0 {
-		s.bus.Publish(events.Event{Type: events.MessagesChanged, ThreadIDs: threads})
-	}
-	return nil
+	return stmts
 }
 
 // ViewTemplate is a view to start from.

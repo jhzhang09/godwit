@@ -52,6 +52,7 @@ type mailItem struct {
 	NewReply    bool
 	WaitingDays int
 	Manual      bool
+	Deadline    *core.Deadline
 }
 
 func threadItem(t core.ThreadSummary) mailItem {
@@ -176,6 +177,14 @@ func (l *listSel) reset() { *l = listSel{list: &ui.ListState{}, cur: -1} }
 
 // key is the row's identity in the list and its choice: thread and message
 // IDs are separate sequences.
+// threadID is the conversation of the row.
+func (it mailItem) threadID() int64 {
+	if it.Thread {
+		return it.ID
+	}
+	return it.Msg.ThreadID
+}
+
 func (it mailItem) key() string {
 	if it.Thread {
 		return "t:" + strconv.FormatInt(it.ID, 10)
@@ -648,6 +657,50 @@ func (p *mailPage) inboxUnread() int {
 	return n
 }
 
+// viewUnread is the unread mail a view counts: what 全部已读 would mark read.
+// ok is false for a view that does not count mail that way: the outbox, a
+// saved view or label no longer there, and a folder of drafts, sent mail, junk
+// or trash, whose sidebar menus offer no 全部已读 either.
+func (p *mailPage) viewUnread(v core.View) (n int, ok bool) {
+	if id, saved := savedViewOf(v); saved {
+		b, found := p.savedView(id)
+		return b.Unread, found
+	}
+	if v.LabelID != 0 {
+		if v.AccountID != 0 {
+			return p.accountLabelUnread(v.AccountID, v.LabelID), true
+		}
+		l, found := p.a.label(v.LabelID)
+		return l.Unread, found
+	}
+	if acc, ok := starredOf(v); ok {
+		return p.starredUnread[acc], true
+	}
+	switch {
+	case v.Unified == "inbox":
+		return p.inboxUnread(), true
+	case v.Unified == "starred":
+		return p.starredUnreadTotal, true
+	case v.Unified == "" && v.FolderID != 0:
+		if f, found := p.folder(v.FolderID); found && !slices.Contains([]string{"drafts", "sent", "junk", "trash"}, f.Role) {
+			return f.Unread, true
+		}
+	}
+	return 0, false
+}
+
+// viewReadMenu is the view's 全部已读 entry, in the menu of the space that is
+// no mail row: the list's own, and the day's heading above the rows.
+func (p *mailPage) viewReadMenu(m *ui.Menu) {
+	n, ok := p.viewUnread(p.view)
+	if !ok {
+		return
+	}
+	if m.Item(i18n.T("mail.mark_all_read")).Icon(menuIcon("check")).Disabled(n == 0).Chosen() {
+		p.markViewAsRead(p.view)
+	}
+}
+
 func unreadSub(n int) string {
 	if n == 0 {
 		return ""
@@ -809,7 +862,7 @@ func (p *mailPage) listHeader(c *ui.Context, head string) {
 		}
 		ui.Row(c).AlignItems(ui.Center).Padding(th.Space(3), th.Space(4), th.Space(2), th.Space(4)).Children(func() {
 			kit.Text(c, head, t.Text.Xs).FontWeight(500).TextColor(t.Muted)
-		})
+		}).ContextMenu(p.viewReadMenu) // the day's heading, as below
 		return
 	}
 	if saved && head == "" && !p.a.sidebarHidden { // its groups' headings are the list's
@@ -825,7 +878,7 @@ func (p *mailPage) listHeader(c *ui.Context, head string) {
 			kit.IconButton(c, "search", i18n.T("mail.search"), kit.ButtonOpts{Variant: kit.Ghost, Size: kit.SizeSm}).
 				OnClick(p.a.openPalette)
 		}
-	})
+	}).ContextMenu(p.viewReadMenu) // the day's heading: the list's space above its rows
 }
 
 func (p *mailPage) isDraftsView() bool {
@@ -1007,7 +1060,8 @@ func (p *mailPage) listView(c *ui.Context) {
 			return
 		}
 		it := rows[es[i].row]
-		p.item(c, it).ContextMenu(func(m *ui.Menu) {
+		row := p.item(c, it)
+		row.ContextMenu(func(m *ui.Menu) {
 			on := []mailItem{it}
 			if ls.sel.Has(it.key()) {
 				on = p.chosen(rows)
@@ -1032,6 +1086,14 @@ func (p *mailPage) listView(c *ui.Context) {
 				why := p.cannot(on, k)
 				if m.Item(i18n.T("mail.action." + k)).Icon(menuIcon(mailActionIcons[k])).Disabled(why != "").Subtitle(why).Chosen() {
 					act, target = k, on
+				}
+			}
+			if len(on) == 1 && on[0].threadID() != 0 {
+				if m.Item(i18n.T("mail.menu.set_deadline")).Icon(menuIcon("calendar")).Chosen() {
+					p.a.pickReplyDate(on[0].threadID(), on[0].Deadline)
+				}
+				if on[0].Deadline != nil && m.Item(i18n.T("mail.menu.remove_deadline")).Icon(menuIcon("calendar-close")).Chosen() {
+					p.a.setReplyDate(on[0].threadID(), core.Deadline{})
 				}
 			}
 			m.Separator()
@@ -1091,6 +1153,11 @@ func (p *mailPage) listView(c *ui.Context) {
 			}
 		})
 	}).Grow(1).Padding(0, padR, 0, th.Space(2)).Gap(theme.Stroke) // rows a hairline apart: two chosen ones stay two
+	// The list's own space, past its rows, and its date headings, which have no
+	// menu of their own: the action the sidebar gives the view too.
+	if !p.searched {
+		l.ContextMenu(p.viewReadMenu)
+	}
 	if p.devPath != "" { // written off the UI thread; the clipboard needs a frame
 		c.WriteClipboard(p.devPath)
 		p.a.toast(p.devPath)
@@ -1614,10 +1681,24 @@ func (p *mailPage) row(c *ui.Context, it mailItem, toggleStar func()) ui.Element
 			} else {
 				ui.Text(c, subject).TextColor(ink).SingleLine()
 			}
-			if icon, line := p.viewLine(it); line != "" {
+			icon, line, due, overdue := rowStatus(p.a.clock.Now(), it)
+			if line != "" || due != "" {
 				ui.Row(c).Gap(th.Space(1)).AlignItems(ui.Center).TextColor(t.Muted).Children(func() {
-					ui.Icon(c, icons.Get(icon)).Size(theme.IconXs, theme.IconXs).Shrink(0)
-					kit.Text(c, line, t.Text.Xs).SingleLine()
+					if icon != "" {
+						ui.Icon(c, icons.Get(icon)).Size(theme.IconXs, theme.IconXs).Shrink(0)
+					}
+					if line != "" {
+						kit.Text(c, line, t.Text.Xs).SingleLine().Shrink(1)
+					}
+					if due != "" {
+						if line != "" {
+							kit.Text(c, "·", t.Text.Xs).Shrink(0)
+						}
+						date := kit.Text(c, due, t.Text.Xs).SingleLine().Shrink(0)
+						if overdue {
+							date.TextColor(t.DangerText)
+						}
+					}
 				})
 			} else if it.Snippet != "" {
 				kit.Text(c, it.Snippet, t.Text.Xs).TextColor(t.Muted).SingleLine()

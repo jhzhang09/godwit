@@ -866,6 +866,42 @@ var Migrations = [][]string{{
 	// Taking back a scheduled message copies send_at (Unix milliseconds) to
 	// its draft. Queuing the draft again clears it.
 	`ALTER TABLE drafts ADD COLUMN scheduled_for INTEGER`,
+}, {
+	// 期限 (GLOSSARY): the date the sender wants the user's reply by, one per
+	// conversation, read as in effect or not like 回复状态 and never cleaned
+	// up. due_date is a local calendar day, NULL for a user's "removed" marker;
+	// due_time '' is the end of that day. Local only: no IMAP keyword, no
+	// cross-device sync, no events_log row.
+	`CREATE TABLE thread_deadlines (
+		thread_id INTEGER PRIMARY KEY REFERENCES threads(id) ON DELETE CASCADE,
+		due_date TEXT,
+		due_time TEXT NOT NULL DEFAULT '',
+		source TEXT NOT NULL,
+		message_id INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+		quote TEXT NOT NULL DEFAULT '',
+		set_at INTEGER NOT NULL)`,
+}, {
+	// When a conversation was archived in Godwit: it ends a 期限 the user set
+	// before then. Older marks read 0, as archived before any.
+	`ALTER TABLE archive_marks ADD COLUMN archived_at INTEGER NOT NULL DEFAULT 0`,
+}, {
+	// 收到就总结 summarizes a conversation once per newest message: a row says
+	// that message was done (outcome done, blocked by 脱敏, or failed for good)
+	// or, queued, that the user asked for it among the last 30 days' mail.
+	`CREATE TABLE summary_checks (
+		message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+		at INTEGER NOT NULL,
+		outcome TEXT NOT NULL)`,
+}, {
+	// Queued also holds mail received while 收到就总结 is chosen; attempts
+	// counts the tries that failed in a way that may pass, up to 3.
+	`ALTER TABLE summary_checks ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0`,
+}, {
+	// The meta reply_dates_version a 期限 write or an archive in Godwit moved
+	// to: their order, which Unix seconds lose within a second. 0 on rows from
+	// before, which compare by set_at and archived_at.
+	`ALTER TABLE thread_deadlines ADD COLUMN set_version INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE archive_marks ADD COLUMN archived_version INTEGER NOT NULL DEFAULT 0`,
 }}
 
 // HistoryRowsVersion is the schema version that keeps a conversation's

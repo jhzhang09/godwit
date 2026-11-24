@@ -195,6 +195,23 @@ func encodeCursor(date, id int64) string {
 	return base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf("%d:%d", date, id)))
 }
 
+// encodeViewCursor is a view page's cursor after p, by viewOrder's key.
+func encodeViewCursor(p placedThread) string {
+	return base64.RawURLEncoding.EncodeToString(fmt.Appendf(nil, "%d:%d:%d", p.due, p.date, p.id))
+}
+
+func decodeViewCursor(c string) (placedThread, error) {
+	var p placedThread
+	b, err := base64.RawURLEncoding.DecodeString(c)
+	if err == nil {
+		_, err = fmt.Sscanf(string(b), "%d:%d:%d", &p.due, &p.date, &p.id)
+	}
+	if err != nil {
+		return p, fmt.Errorf("invalid cursor: %w", err)
+	}
+	return p, nil
+}
+
 func decodeCursor(c string) (date, id int64, err error) {
 	b, err := base64.RawURLEncoding.DecodeString(c)
 	if err == nil {
@@ -1308,7 +1325,8 @@ func (e *ErrNoRoleFolder) Error() string { return "the account has no " + e.Role
 
 // MoveToRole moves the messages to their account's folder of role (inbox,
 // trash, junk or archive), as Move; ones already there stay. Archiving a
-// message in the inbox takes it out of the inbox only.
+// message in the inbox takes it out of the inbox only, and marks the
+// conversations as ArchiveMessages does.
 func (s *Service) MoveToRole(ctx context.Context, ids []int64, role string) error {
 	if role != "trash" && role != "junk" && role != "archive" && role != "inbox" {
 		return fmt.Errorf("invalid role %q", role)
@@ -1320,15 +1338,19 @@ func (s *Service) MoveToRole(ctx context.Context, ids []int64, role string) erro
 		return err
 	}
 	var folder int64
+	moving := ts
 	if role == "archive" {
-		ts, folder, err = s.archiveTargets(ctx, acc, ts, 0)
+		moving, folder, err = s.archiveTargets(ctx, acc, ts, 0)
+		if err == nil {
+			_, err = s.markNewestArchived(ctx, ts) // as ArchiveMessages; no undo to return them to
+		}
 	} else {
 		folder, err = s.roleFolder(ctx, acc, role)
 	}
 	if err != nil {
 		return err
 	}
-	return s.move(ctx, acc, ts, 0, folder)
+	return s.move(ctx, acc, moving, 0, folder)
 }
 
 // archiveTargets gives every archive entry point Gmail's remove-INBOX intent.

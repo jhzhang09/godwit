@@ -112,6 +112,11 @@ var table = []Error{
 	{Code: "signature_name", Err: core.ErrSignatureName},
 	{Code: "invalid_rule", Err: core.ErrInvalidRule},
 	{Code: "invalid_view", Err: core.ErrInvalidView},
+	{Code: "deadline_invalid", Err: core.ErrDeadlineInvalid},
+	{Code: "deadline_message", Err: core.ErrDeadlineMessage},
+	{Code: "deadline_not_waiting", Err: core.ErrDeadlineNotWaiting},
+	{Code: "deadline_quote", Err: core.ErrDeadlineQuote},
+	{Code: "deadline_outranked", Err: core.ErrDeadlineOutranked},
 	{Code: "recipient_unconfirmed", Err: core.ErrRecipientUnconfirmed},
 	{Code: "account_icon", Err: core.ErrAccountIcon},
 	{Code: "not_grantable", Err: core.ErrNotGrantable},
@@ -294,6 +299,17 @@ var uiOnly = map[string]bool{
 	// 批准并发送 on a program's draft (ADR 0043): the approval stands for the user's click,
 	// so no program may give it. It sends nothing SendRevision could not.
 	"ApproveDraft": true,
+	// Settings' 全部去掉 for other apps' and Wit's reply dates, the user's way out when an agent
+	// wrote many: no program wipes them in bulk, and the undo writes rows past setDeadline's checks.
+	"RemoveAppAndWitDeadlines": true, "UndoRemoveAppAndWitDeadlines": true,
+	// The reader's 回复日期 line; programs read the date with list_view_threads or ViewContents.
+	"ThreadDeadline": true,
+	// 撤销 after the user sets, changes or removes a 回复日期: it writes any source's row past setDeadline's checks.
+	"UndoSetThreadDeadline": true,
+	// 收到就总结's controls on AI 功能: going on with a new model service and summarizing the
+	// last 30 days' unreplied mail send mail to a model unattended, so only the user's click
+	// gives them; the two reads only feed those controls.
+	"SummaryArrivalState": true, "ConfirmSummaryService": true, "CountUnrepliedToSummarize": true, "SummarizeUnreplied": true,
 }
 
 // Expose picks the *core.Service methods callable by the full role: every
