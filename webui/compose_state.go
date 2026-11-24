@@ -10,14 +10,16 @@ type Account struct {
 // ComposeSMIMECertChainNode summarizes one certificate in a resolved X.509 trust chain,
 // ordered top-down from root/highest CA to leaf.
 type ComposeSMIMECertChainNode struct {
-	Subject       string `json:"subject"`
-	Issuer        string `json:"issuer"`
-	PublicKeyAlgo string `json:"publicKeyAlgo,omitempty"`
-	NotBefore     int64  `json:"notBefore"`
-	NotAfter      int64  `json:"notAfter"`
-	SHA256        string `json:"sha256"`
-	Role          string `json:"role"`
-	SelfSigned    bool   `json:"selfSigned"`
+	Subject       string   `json:"subject"`
+	Issuer        string   `json:"issuer"`
+	PublicKeyAlgo string   `json:"publicKeyAlgo,omitempty"`
+	NotBefore     int64    `json:"notBefore"`
+	NotAfter      int64    `json:"notAfter"`
+	SHA256        string   `json:"sha256"`
+	Role          string   `json:"role"`
+	SelfSigned    bool     `json:"selfSigned"`
+	Status        string   `json:"status,omitempty"`
+	Issues        []string `json:"issues,omitempty"`
 }
 
 // ComposeSMIMEIdentity describes one personal S/MIME certificate for the sender account.

@@ -1,4 +1,10 @@
-import { RiAlertLine, RiCheckboxCircleLine, RiCheckLine, RiFileCopyLine } from "@remixicon/react";
+import {
+  RiAlertLine,
+  RiCheckboxCircleLine,
+  RiCheckLine,
+  RiCloseCircleLine,
+  RiFileCopyLine,
+} from "@remixicon/react";
 import { useEffect, useState } from "react";
 import { Button } from "@/components/button";
 import {
@@ -270,39 +276,94 @@ export function SmimeCertDialog({
             <div className="flex flex-col gap-2 rounded-lg border border-border/70 bg-background/60 p-3">
               <div className="text-[11px] text-muted-foreground">{t("smime.cert.chain")}</div>
               <div className="flex flex-col gap-2">
-                {chain.map((node, i) => (
-                  <div
-                    key={node.sha256 || `${node.role}:${node.subject}:${node.issuer}`}
-                    style={{ paddingLeft: `${i * 12}px` }}
-                    className="flex flex-col gap-0.5"
-                  >
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      <span className="text-xs font-medium select-text">
-                        {i > 0 ? "└─ " : ""}
-                        {node.subject || node.issuer}
-                      </span>
-                      <Badge
-                        variant="outline"
-                        className="h-4 px-1.5 text-[10px] text-muted-foreground"
-                      >
-                        {roleLabel(node.role)}
-                      </Badge>
-                      {i === 0 && node.role === "root" && cert.trusted && (
+                {chain.map((node, i) => {
+                  const status = node.status || (cert.trusted ? "trusted" : "untrusted");
+                  const issues = node.issues ?? [];
+                  const statusBadge = (() => {
+                    if (status === "trusted") {
+                      const labelKey =
+                        node.role === "root"
+                          ? "smime.cert.root_trusted"
+                          : node.role === "intermediate"
+                            ? "smime.cert.chain_trusted"
+                            : "smime.cert.leaf_trusted";
+                      return (
                         <Badge
                           variant="secondary"
                           className="h-4 border border-emerald-500/30 bg-emerald-500/10 px-1.5 text-[10px] text-emerald-700 dark:text-emerald-300"
                         >
-                          {t("smime.cert.root_trusted")}
+                          {t(labelKey)}
                         </Badge>
+                      );
+                    }
+                    if (status === "failed") {
+                      const labelKey =
+                        node.role === "root" && issues.includes("untrusted_root")
+                          ? "smime.cert.root_untrusted"
+                          : "smime.cert.node_failed";
+                      return (
+                        <Badge variant="destructive" className="h-4 px-1.5 text-[10px]">
+                          {t(labelKey)}
+                        </Badge>
+                      );
+                    }
+                    const labelKey =
+                      i === 0 && node.role !== "root"
+                        ? "smime.cert.chain_missing_root"
+                        : "smime.cert.node_untrusted";
+                    return (
+                      <Badge
+                        variant="secondary"
+                        className="h-4 border border-amber-500/30 bg-amber-500/10 px-1.5 text-[10px] text-amber-800 dark:text-amber-300"
+                      >
+                        {t(labelKey)}
+                      </Badge>
+                    );
+                  })();
+
+                  return (
+                    <div
+                      key={node.sha256 || `${node.role}:${node.subject}:${node.issuer}`}
+                      style={{ paddingLeft: `${i * 12}px` }}
+                      className="flex flex-col gap-0.5"
+                    >
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        {i > 0 && <span className="text-xs text-muted-foreground">└─</span>}
+                        {status === "trusted" ? (
+                          <RiCheckboxCircleLine className="size-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
+                        ) : status === "failed" ? (
+                          <RiCloseCircleLine className="size-3.5 shrink-0 text-destructive" />
+                        ) : (
+                          <RiAlertLine className="size-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
+                        )}
+                        <span className="text-xs font-medium select-text">
+                          {node.subject || node.issuer}
+                        </span>
+                        <Badge
+                          variant="outline"
+                          className="h-4 px-1.5 text-[10px] text-muted-foreground"
+                        >
+                          {roleLabel(node.role)}
+                        </Badge>
+                        {statusBadge}
+                      </div>
+                      {node.publicKeyAlgo && (
+                        <div className={`text-[11px] text-muted-foreground ${i > 0 ? "pl-4" : ""}`}>
+                          {node.publicKeyAlgo}
+                        </div>
+                      )}
+                      {issues.length > 0 && (
+                        <div
+                          className={`text-[11px] text-destructive select-text ${i > 0 ? "pl-4" : ""}`}
+                        >
+                          {issues
+                            .map((code) => t(`smime.issue.${code}`))
+                            .join(t("smime.issue.sep"))}
+                        </div>
                       )}
                     </div>
-                    {node.publicKeyAlgo && (
-                      <div className={`text-[11px] text-muted-foreground ${i > 0 ? "pl-4" : ""}`}>
-                        {node.publicKeyAlgo}
-                      </div>
-                    )}
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           )}

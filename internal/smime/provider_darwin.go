@@ -793,27 +793,31 @@ type darwinTrustDetails struct {
 	hasKeySizeFail   bool
 	hasWeakKeyFail   bool
 	allKeySizeCompat bool
-	otherFailureKey  string
+	otherFailureKeys []string
+	perCertKeys      [][]string
+	perCertKeySize   []bool
 	otherStatusCode  bool
 	firstKeySizeFail *WeakKeySizeError
 }
 
-func darwinTrustFailureError(key string) error {
+func darwinTrustIssueCode(key string) string {
 	switch key {
-	case "AnchorTrusted", "ValidRoot", "MissingIntermediate":
-		return errors.New("certificate is not trusted")
+	case "AnchorTrusted", "ValidRoot":
+		return CertIssueUntrustedRoot
+	case "MissingIntermediate":
+		return CertIssueMissingIssuer
 	case "TemporalValidity", "NotValidBefore":
-		return errors.New("certificate has expired or is not yet valid")
+		return CertIssueExpired
 	case "Email":
-		return errors.New("signer certificate email does not match sender")
+		return CertIssueEmailMismatch
 	case "KeyUsage", "ExtendedKeyUsage":
-		return errors.New("certificate key usage is not permitted")
+		return CertIssueKeyUsage
 	case "SignatureHashAlgorithms", "WeakSignature":
-		return errors.New("certificate uses an unsupported signature hash algorithm")
+		return CertIssueWeakSignature
 	case "Revocation", "RevocationResponseRequired":
-		return errors.New("certificate has been revoked")
+		return CertIssueRevoked
 	default:
-		return errors.New("certificate is not trusted")
+		return CertIssueUntrusted
 	}
 }
 
@@ -851,6 +855,21 @@ func (d *darwinAPI) inspectTrustResult(trustResult, chain uintptr) darwinTrustDe
 	if chain != 0 && d.cfGetTypeID(chain) == d.cfArrayGetTypeID() {
 		chainLen = d.cfArrayGetCount(chain)
 	}
+	info.perCertKeys = make([][]string, max(n, chainLen))
+	info.perCertKeySize = make([]bool, max(n, chainLen))
+	seenOther := map[string]bool{}
+	recordOther := func(certIdx int, code string) {
+		if code == "" {
+			return
+		}
+		if certIdx >= 0 && certIdx < len(info.perCertKeys) {
+			info.perCertKeys[certIdx] = append(info.perCertKeys[certIdx], code)
+		}
+		if !seenOther[code] {
+			seenOther[code] = true
+			info.otherFailureKeys = append(info.otherFailureKeys, code)
+		}
+	}
 
 	dictTypeID := d.cfDictionaryGetTypeID()
 	strTypeID := d.cfStringGetTypeID()
@@ -861,9 +880,7 @@ func (d *darwinAPI) inspectTrustResult(trustResult, chain uintptr) darwinTrustDe
 	for i := range n {
 		elem := d.cfArrayGetValueAtIndex(detailsArr, i)
 		if elem == 0 || d.cfGetTypeID(elem) != dictTypeID {
-			if info.otherFailureKey == "" {
-				info.otherFailureKey = "unknown"
-			}
+			recordOther(i, CertIssueUntrusted)
 			info.allKeySizeCompat = false
 			continue
 		}
@@ -878,9 +895,7 @@ func (d *darwinAPI) inspectTrustResult(trustResult, chain uintptr) darwinTrustDe
 		for j := range cnt {
 			kRef, v := keys[j], vals[j]
 			if kRef == 0 || d.cfGetTypeID(kRef) != strTypeID {
-				if info.otherFailureKey == "" {
-					info.otherFailureKey = "unknown"
-				}
+				recordOther(i, CertIssueUntrusted)
 				continue
 			}
 			k := d.goString(kRef)
@@ -890,15 +905,17 @@ func (d *darwinAPI) inspectTrustResult(trustResult, chain uintptr) darwinTrustDe
 					if !d.cfBooleanGetValue(v) {
 						certHasKeySize = true
 						info.hasKeySizeFail = true
+						info.perCertKeySize[i] = true
 					}
-				} else if info.otherFailureKey == "" {
-					info.otherFailureKey = k
+				} else {
+					recordOther(i, CertIssueUntrusted)
 				}
 			case "WeakKeySize":
 				certHasKeySize = true
 				info.hasKeySizeFail = true
 				info.hasWeakKeyFail = true
 				info.allKeySizeCompat = false
+				info.perCertKeySize[i] = true
 			case "StatusCodes":
 				if v == 0 || d.cfGetTypeID(v) != arrTypeID {
 					info.otherStatusCode = true
@@ -917,9 +934,10 @@ func (d *darwinAPI) inspectTrustResult(trustResult, chain uintptr) darwinTrustDe
 					}
 				}
 			default:
-				if info.otherFailureKey == "" {
-					info.otherFailureKey = k
+				if v != 0 && d.cfGetTypeID(v) == boolTypeID && d.cfBooleanGetValue(v) {
+					continue
 				}
+				recordOther(i, darwinTrustIssueCode(k))
 			}
 		}
 		if certHasKeySize {
@@ -957,14 +975,16 @@ func (d *darwinAPI) inspectTrustResult(trustResult, chain uintptr) darwinTrustDe
 			}
 		}
 	}
+	info.otherFailureKeys = sortCertIssues(info.otherFailureKeys)
 	return info
 }
 
-func (d *darwinAPI) evaluateTrust(trust uintptr, allowWeakRSA bool) error {
+func (d *darwinAPI) evaluateTrust(trust uintptr, allowWeakRSA bool) ([][]byte, []CertChainNode, error) {
 	var cfErr uintptr
 	if d.secTrustEvaluateWithError(trust, &cfErr) {
 		d.release(cfErr)
-		return nil
+		chainDER := d.copyChainDER(trust)
+		return chainDER, BuildCertChainWithIssues(chainDER, nil, true), nil
 	}
 	code, origErr := d.cfErr(cfErr, "certificate is not trusted")
 	d.release(cfErr)
@@ -974,32 +994,45 @@ func (d *darwinAPI) evaluateTrust(trust uintptr, allowWeakRSA bool) error {
 	chain := d.secTrustCopyCertificateChain(trust)
 	defer d.release(chain)
 
+	chainDER := d.copyChainDERFromArray(chain)
 	info := d.inspectTrustResult(trustResult, chain)
 	if allowWeakRSA && info.hasDetails && info.resultValue == kSecTrustResultRecoverableTrustFailure &&
-		info.hasKeySizeFail && !info.hasWeakKeyFail && info.otherFailureKey == "" && !info.otherStatusCode && info.allKeySizeCompat {
-		return nil
+		info.hasKeySizeFail && !info.hasWeakKeyFail && len(info.otherFailureKeys) == 0 && !info.otherStatusCode && info.allKeySizeCompat {
+		return chainDER, BuildCertChainWithIssues(chainDER, nil, true), nil
 	}
+	perCert := make([][]string, len(chainDER))
+	for i := range perCert {
+		if i < len(info.perCertKeys) {
+			perCert[i] = append(perCert[i], info.perCertKeys[i]...)
+		}
+		if !(allowWeakRSA && info.allKeySizeCompat) && i < len(info.perCertKeySize) && info.perCertKeySize[i] {
+			perCert[i] = append(perCert[i], CertIssueWeakKey)
+		}
+	}
+	chainNodes := BuildCertChainWithIssues(chainDER, perCert, false)
+
 	if allowWeakRSA && code == errSecUnsupportedKeySize && info.allKeySizeCompat {
-		return darwinTrustFailureError(info.otherFailureKey)
+		if len(info.otherFailureKeys) > 0 {
+			return chainDER, chainNodes, &TrustError{Issues: info.otherFailureKeys}
+		}
+		return chainDER, chainNodes, errors.New("certificate is not trusted")
 	}
 	if code == errSecUnsupportedKeySize || (info.hasKeySizeFail && (!allowWeakRSA || !info.allKeySizeCompat)) {
 		if info.firstKeySizeFail != nil {
-			return info.firstKeySizeFail
+			return chainDER, chainNodes, info.firstKeySizeFail
 		}
-		return &WeakKeySizeError{}
+		return chainDER, chainNodes, &WeakKeySizeError{}
 	}
-	return origErr
+	if len(info.otherFailureKeys) > 0 {
+		return chainDER, chainNodes, &TrustError{Issues: info.otherFailureKeys}
+	}
+	return chainDER, chainNodes, origErr
 }
 
-func (d *darwinAPI) copyChainDER(trust uintptr) [][]byte {
-	if trust == 0 {
-		return nil
-	}
-	chain := d.secTrustCopyCertificateChain(trust)
+func (d *darwinAPI) copyChainDERFromArray(chain uintptr) [][]byte {
 	if chain == 0 {
 		return nil
 	}
-	defer d.release(chain)
 	if d.cfGetTypeID(chain) != d.cfArrayGetTypeID() {
 		return nil
 	}
@@ -1022,18 +1055,30 @@ func (d *darwinAPI) copyChainDER(trust uintptr) [][]byte {
 	return out
 }
 
+func (d *darwinAPI) copyChainDER(trust uintptr) [][]byte {
+	if trust == 0 {
+		return nil
+	}
+	chain := d.secTrustCopyCertificateChain(trust)
+	if chain == 0 {
+		return nil
+	}
+	defer d.release(chain)
+	return d.copyChainDERFromArray(chain)
+}
+
 func (p *darwinProvider) VerifyTrust(ctx context.Context, usage, email string, certsDER [][]byte) error {
-	_, err := p.VerifyTrustWithChain(ctx, usage, email, certsDER)
+	_, _, err := p.VerifyTrustWithChain(ctx, usage, email, certsDER)
 	return err
 }
 
-func (p *darwinProvider) VerifyTrustWithChain(ctx context.Context, usage, email string, certsDER [][]byte) ([][]byte, error) {
+func (p *darwinProvider) VerifyTrustWithChain(ctx context.Context, usage, email string, certsDER [][]byte) ([][]byte, []CertChainNode, error) {
 	d, err := loadDarwinAPI()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if email == "" || len(certsDER) == 0 {
-		return nil, errors.New("missing S/MIME certificate or email address")
+		return nil, nil, errors.New("missing S/MIME certificate or email address")
 	}
 	var usageKey uintptr
 	switch usage {
@@ -1042,11 +1087,11 @@ func (p *darwinProvider) VerifyTrustWithChain(ctx context.Context, usage, email 
 	case "encrypt":
 		usageKey = d.kSecPolicyKUKeyEncipherment
 	default:
-		return nil, errors.New("unknown certificate usage")
+		return nil, nil, errors.New("unknown certificate usage")
 	}
 	cfEmail := d.cfString(email)
 	if cfEmail == 0 {
-		return nil, errors.New("unable to create email string")
+		return nil, nil, errors.New("unable to create email string")
 	}
 	defer d.release(cfEmail)
 
@@ -1061,25 +1106,25 @@ func (p *darwinProvider) VerifyTrustWithChain(ctx context.Context, usage, email 
 		cert := d.secCertificateCreateWithData(0, data)
 		d.release(data)
 		if cert == 0 {
-			return nil, errors.New("invalid X.509 certificate")
+			return nil, nil, errors.New("invalid X.509 certificate")
 		}
 		certs = append(certs, cert)
 	}
 	cfCerts := d.cfArrayCreate(0, unsafe.Pointer(&certs[0]), len(certs), d.kCFTypeArrayCB)
 	if cfCerts == 0 {
-		return nil, errors.New("unable to build certificate list")
+		return nil, nil, errors.New("unable to build certificate list")
 	}
 	defer d.release(cfCerts)
 
 	props := d.cfDict([]uintptr{d.kSecPolicyName, usageKey}, []uintptr{cfEmail, d.kCFBooleanTrue})
 	if props == 0 {
-		return nil, errors.New("unable to create S/MIME trust policy")
+		return nil, nil, errors.New("unable to create S/MIME trust policy")
 	}
 	defer d.release(props)
 
 	policy := d.secPolicyCreateWithProperties(d.kSecPolicyAppleSMIME, props)
 	if policy == 0 {
-		return nil, errors.New("unable to create S/MIME trust policy")
+		return nil, nil, errors.New("unable to create S/MIME trust policy")
 	}
 	defer d.release(policy)
 
@@ -1087,17 +1132,16 @@ func (p *darwinProvider) VerifyTrustWithChain(ctx context.Context, usage, email 
 	if st := d.secTrustCreateWithCertificates(cfCerts, policy, &trust); st != errSecSuccess || trust == 0 {
 		d.release(trust)
 		if st != errSecSuccess {
-			return nil, d.secErr(st)
+			return nil, nil, d.secErr(st)
 		}
-		return nil, errors.New("unable to evaluate certificate trust")
+		return nil, nil, errors.New("unable to evaluate certificate trust")
 	}
 	defer d.release(trust)
 
 	if st := d.secTrustSetNetworkFetchAllowed(trust, false); st != errSecSuccess {
-		return nil, d.secErr(st)
+		return nil, nil, d.secErr(st)
 	}
-	evalErr := d.evaluateTrust(trust, AllowWeakKeySize(ctx))
-	return d.copyChainDER(trust), evalErr
+	return d.evaluateTrust(trust, AllowWeakKeySize(ctx))
 }
 
 func (p *darwinProvider) VerifyCMS(ctx context.Context, email string, cmsDER, detached []byte) (cmsVerifyResult, error) {
@@ -1177,6 +1221,7 @@ func (p *darwinProvider) VerifyCMS(ctx context.Context, email string, cmsDER, de
 	}
 
 	var chainDER [][]byte
+	var chainNodes []CertChainNode
 	var cryptOK, trustOK bool
 	verifyErr := signerErr
 	if verifyErr == nil && email == "" {
@@ -1214,8 +1259,8 @@ func (p *darwinProvider) VerifyCMS(ctx context.Context, email string, cmsDER, de
 				verifyErr = d.secErr(st)
 			} else {
 				cryptOK = true
-				evalErr := d.evaluateTrust(trust, AllowWeakKeySize(ctx))
-				chainDER = d.copyChainDER(trust)
+				var evalErr error
+				chainDER, chainNodes, evalErr = d.evaluateTrust(trust, AllowWeakKeySize(ctx))
 				if evalErr != nil {
 					verifyErr = evalErr
 				} else {
@@ -1256,7 +1301,13 @@ func (p *darwinProvider) VerifyCMS(ctx context.Context, email string, cmsDER, de
 								}
 							}
 							if !matched {
-								verifyErr = errors.New("signer certificate email does not match sender")
+								verifyErr = &TrustError{Issues: []string{CertIssueEmailMismatch}}
+								trustOK = false
+								if len(chainNodes) > 0 {
+									leaf := &chainNodes[len(chainNodes)-1]
+									leaf.Status = CertChainStatusFailed
+									leaf.Issues = []string{CertIssueEmailMismatch}
+								}
 							}
 						}
 					}
@@ -1264,7 +1315,7 @@ func (p *darwinProvider) VerifyCMS(ctx context.Context, email string, cmsDER, de
 			}
 		}
 	}
-	return cmsVerifyResult{content: contentBytes, signerDER: signerDER, chainDER: chainDER, cryptOK: cryptOK, trustOK: trustOK, verifyErr: verifyErr}, nil
+	return cmsVerifyResult{content: contentBytes, signerDER: signerDER, chainDER: chainDER, chainNodes: chainNodes, cryptOK: cryptOK, trustOK: trustOK, verifyErr: verifyErr}, nil
 }
 
 func (p *darwinProvider) Retry(context.Context) error {

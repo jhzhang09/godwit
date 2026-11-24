@@ -329,6 +329,11 @@ func TestSMIMECopyAndStandardWorkflows(t *testing.T) {
 		"smime.allow_weak_key", "smime.allow_weak_key.help", "smime.err.weak_key_size_generic",
 		"smime.cert", "smime.cert.help", "smime.cert.view", "smime.cert.detail_title",
 		"smime.cert.chain", "smime.cert.role_root", "smime.cert.role_intermediate", "smime.cert.role_leaf", "smime.cert.root_trusted",
+		"smime.cert.root_untrusted", "smime.cert.chain_trusted", "smime.cert.leaf_trusted",
+		"smime.cert.node_failed", "smime.cert.node_untrusted", "smime.cert.chain_missing_root",
+		"smime.issue.revoked", "smime.issue.untrusted_root", "smime.issue.missing_issuer",
+		"smime.issue.expired", "smime.issue.email_mismatch", "smime.issue.weak_signature",
+		"smime.issue.key_usage", "smime.issue.weak_key", "smime.issue.untrusted", "smime.issue.sep",
 		"smime.contacts.title", "smime.contacts.empty", "smime.compose.sign", "smime.compose.encrypt",
 	}
 	forbidden := []string{"邮箱名片", "旧卡", "舊卡", "硬件 Key", "硬體金鑰", "hardware key"}

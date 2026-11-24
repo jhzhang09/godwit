@@ -26,6 +26,148 @@ import (
 // ErrWeakKeySize reports that a certificate uses a key length below OS minimum security requirements.
 var ErrWeakKeySize = errors.New("certificate key size below system security requirement")
 
+// Canonical certificate chain node status and trust/policy issue codes.
+const (
+	CertChainStatusTrusted   = "trusted"
+	CertChainStatusUntrusted = "untrusted"
+	CertChainStatusFailed    = "failed"
+
+	CertIssueRevoked       = "revoked"
+	CertIssueUntrustedRoot = "untrusted_root"
+	CertIssueMissingIssuer = "missing_issuer"
+	CertIssueExpired       = "expired"
+	CertIssueEmailMismatch = "email_mismatch"
+	CertIssueWeakSignature = "weak_signature"
+	CertIssueKeyUsage      = "key_usage"
+	CertIssueWeakKey       = "weak_key"
+	CertIssueUntrusted     = "untrusted"
+)
+
+// TrustError describes one or more structured OS certificate trust/policy failures
+// in deterministic priority order.
+type TrustError struct {
+	Issues []string
+}
+
+// Error returns a human-readable summary of all recorded trust issues.
+func (e *TrustError) Error() string {
+	if e == nil || len(e.Issues) == 0 {
+		return "certificate is not trusted"
+	}
+	msgs := make([]string, 0, len(e.Issues))
+	for _, code := range e.Issues {
+		msgs = append(msgs, CertIssueMessage(code))
+	}
+	return strings.Join(msgs, "; ")
+}
+
+// CertIssueMessage returns the default English description for a canonical CertIssue* code.
+func CertIssueMessage(code string) string {
+	switch code {
+	case CertIssueRevoked:
+		return "certificate has been revoked"
+	case CertIssueUntrustedRoot:
+		return "root certificate is not trusted"
+	case CertIssueMissingIssuer:
+		return "missing issuer certificate"
+	case CertIssueExpired:
+		return "certificate has expired or is not yet valid"
+	case CertIssueEmailMismatch:
+		return "signer certificate email does not match sender"
+	case CertIssueWeakSignature:
+		return "certificate uses an unsupported signature hash algorithm"
+	case CertIssueKeyUsage:
+		return "certificate key usage is not permitted"
+	case CertIssueWeakKey:
+		return ErrWeakKeySize.Error()
+	default:
+		return "certificate is not trusted"
+	}
+}
+
+func certIssuePriority(code string) int {
+	switch code {
+	case CertIssueRevoked:
+		return 1
+	case CertIssueUntrustedRoot:
+		return 2
+	case CertIssueMissingIssuer:
+		return 3
+	case CertIssueExpired:
+		return 4
+	case CertIssueEmailMismatch:
+		return 5
+	case CertIssueWeakSignature:
+		return 6
+	case CertIssueKeyUsage:
+		return 7
+	case CertIssueWeakKey:
+		return 8
+	case CertIssueUntrusted:
+		return 9
+	default:
+		return 10
+	}
+}
+
+func sortCertIssues(issues []string) []string {
+	if len(issues) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(issues))
+	out := make([]string, 0, len(issues))
+	for _, code := range issues {
+		if code != "" && !seen[code] {
+			seen[code] = true
+			out = append(out, code)
+		}
+	}
+	slices.SortFunc(out, func(a, b string) int {
+		pa, pb := certIssuePriority(a), certIssuePriority(b)
+		if pa != pb {
+			return pa - pb
+		}
+		return strings.Compare(a, b)
+	})
+	return out
+}
+
+func hasControlChar(s string) bool {
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
+func formatCertDisplayString(s string) string {
+	if !hasControlChar(s) {
+		return strings.TrimSpace(s)
+	}
+	var sb strings.Builder
+	runes := []rune(s)
+	for i := 0; i < len(runes); {
+		r := runes[i]
+		if r < 0x20 || r == 0x7f {
+			j := i + 1
+			for j < len(runes) && runes[j] == r {
+				j++
+			}
+			if j-i > 1 {
+				fmt.Fprintf(&sb, "[\\x%02X×%d]", r, j-i)
+			} else {
+				fmt.Fprintf(&sb, "[\\x%02X]", r)
+			}
+			i = j
+			continue
+		}
+		sb.WriteRune(r)
+		i++
+	}
+	return sb.String()
+}
+
 // WeakKeySizeError describes a certificate rejected due to an insufficient cryptographic key length.
 type WeakKeySizeError struct {
 	Subject string
@@ -178,28 +320,52 @@ type CertChainNode struct {
 	SHA256        string
 	Role          string // "root", "intermediate", or "leaf"
 	SelfSigned    bool
+	Status        string   // "trusted", "untrusted", "failed", or ""
+	Issues        []string // canonical CertIssue* codes on this node
 }
 
 // BuildCertChain converts an OS-ordered certificate chain (leaf first, root last)
 // into a top-down display slice (root/highest CA first, leaf last).
 func BuildCertChain(ders [][]byte) []CertChainNode {
+	return BuildCertChainWithIssues(ders, nil, false)
+}
+
+// BuildCertChainWithTrust converts an OS-ordered certificate chain (leaf first, root last)
+// into a top-down display slice and marks all nodes trusted when trusted is true.
+func BuildCertChainWithTrust(ders [][]byte, trusted bool) []CertChainNode {
+	return BuildCertChainWithIssues(ders, nil, trusted)
+}
+
+// BuildCertChainWithIssues converts an OS-ordered certificate chain (leaf first, root last)
+// into a top-down display slice and computes per-node trust status and failure issues.
+func BuildCertChainWithIssues(ders [][]byte, perCertIssues [][]string, chainTrusted bool) []CertChainNode {
 	if len(ders) == 0 {
 		return nil
 	}
-	parsed := make([]*smx509.Certificate, 0, len(ders))
-	for _, der := range ders {
+	type parsedItem struct {
+		cert   *smx509.Certificate
+		issues []string
+	}
+	parsed := make([]parsedItem, 0, len(ders))
+	for i, der := range ders {
 		if len(der) == 0 {
 			continue
 		}
 		if c, err := ParseCertificate(der); err == nil {
-			parsed = append(parsed, c)
+			var issues []string
+			if i < len(perCertIssues) {
+				issues = perCertIssues[i]
+			}
+			parsed = append(parsed, parsedItem{cert: c, issues: issues})
 		}
 	}
 	if len(parsed) == 0 {
 		return nil
 	}
 	out := make([]CertChainNode, len(parsed))
-	for i, c := range parsed {
+	nodeRawIssues := make([][]string, len(parsed))
+	for i, item := range parsed {
+		c := item.cert
 		d := InspectCertificate(c)
 		selfSigned := len(c.RawIssuer) > 0 && bytes.Equal(c.RawIssuer, c.RawSubject)
 		role := "intermediate"
@@ -210,7 +376,8 @@ func BuildCertChain(ders [][]byte) []CertChainNode {
 			role = "root"
 		}
 		// Reverse order so index 0 is root / highest CA and last is leaf.
-		out[len(parsed)-1-i] = CertChainNode{
+		revIdx := len(parsed) - 1 - i
+		out[revIdx] = CertChainNode{
 			Subject:       d.Subject,
 			Issuer:        d.Issuer,
 			PublicKeyAlgo: d.PublicKeyAlgo,
@@ -219,6 +386,46 @@ func BuildCertChain(ders [][]byte) []CertChainNode {
 			SHA256:        d.SHA256,
 			Role:          role,
 			SelfSigned:    selfSigned,
+		}
+		nodeRawIssues[revIdx] = item.issues
+	}
+	if chainTrusted {
+		for i := range out {
+			out[i].Status = CertChainStatusTrusted
+		}
+		return out
+	}
+	if perCertIssues != nil {
+		parentTrusted := false
+		for i := range out {
+			issues := sortCertIssues(nodeRawIssues[i])
+			if i == 0 {
+				if len(issues) > 0 {
+					out[0].Status = CertChainStatusFailed
+					out[0].Issues = issues
+					parentTrusted = false
+				} else if out[0].Role == "root" {
+					out[0].Status = CertChainStatusTrusted
+					parentTrusted = true
+				} else {
+					out[0].Status = CertChainStatusUntrusted
+					parentTrusted = false
+				}
+				continue
+			}
+			if len(issues) > 0 {
+				out[i].Status = CertChainStatusFailed
+				out[i].Issues = issues
+				parentTrusted = false
+			} else if parentTrusted {
+				out[i].Status = CertChainStatusTrusted
+			} else {
+				out[i].Status = CertChainStatusUntrusted
+			}
+		}
+		if len(out) > 0 && out[len(out)-1].Status == CertChainStatusTrusted {
+			out[len(out)-1].Status = CertChainStatusFailed
+			out[len(out)-1].Issues = []string{CertIssueUntrusted}
 		}
 	}
 	return out
@@ -229,12 +436,12 @@ func InspectCertificate(cert *smx509.Certificate) CertDetails {
 	if cert == nil {
 		return CertDetails{}
 	}
-	issuer := strings.TrimSpace(cert.Issuer.CommonName)
+	issuer := formatCertDisplayString(cert.Issuer.CommonName)
 	if issuer == "" && len(cert.Issuer.Organization) > 0 {
-		issuer = strings.TrimSpace(cert.Issuer.Organization[0])
+		issuer = formatCertDisplayString(cert.Issuer.Organization[0])
 	}
 	if issuer == "" {
-		issuer = strings.TrimSpace(cert.Issuer.String())
+		issuer = formatCertDisplayString(cert.Issuer.String())
 	}
 
 	var keyAlgo string
@@ -310,10 +517,10 @@ func InspectCertificate(cert *smx509.Certificate) CertDetails {
 
 	return CertDetails{
 		Subject:       CertDisplaySubject(cert),
-		SubjectDN:     strings.TrimSpace(cert.Subject.String()),
+		SubjectDN:     formatCertDisplayString(cert.Subject.String()),
 		Issuer:        issuer,
-		IssuerDN:      strings.TrimSpace(cert.Issuer.String()),
-		Emails:        CertEmails(cert),
+		IssuerDN:      formatCertDisplayString(cert.Issuer.String()),
+		Emails:        CertDisplayEmails(cert),
 		SerialNumber:  formatSerialHex(cert.SerialNumber),
 		NotBefore:     cert.NotBefore,
 		NotAfter:      cert.NotAfter,
@@ -376,23 +583,61 @@ func CertDisplaySubject(cert *smx509.Certificate) string {
 	if cert == nil {
 		return ""
 	}
-	if cn := strings.TrimSpace(cert.Subject.CommonName); cn != "" {
+	if cn := formatCertDisplayString(cert.Subject.CommonName); cn != "" {
 		return cn
 	}
-	if emails := CertEmails(cert); len(emails) > 0 {
+	if emails := CertDisplayEmails(cert); len(emails) > 0 {
 		return emails[0]
 	}
-	return strings.TrimSpace(cert.Subject.String())
+	return formatCertDisplayString(cert.Subject.String())
 }
 
-// CertEmails extracts lowercase normalized mailbox addresses from cert's SAN and Subject.
+// CertEmails extracts lowercase normalized, valid indexable mailbox addresses from cert's SAN and Subject.
+// Values containing ASCII control characters or whitespace are excluded.
 func CertEmails(cert *smx509.Certificate) []string {
 	if cert == nil {
 		return nil
 	}
 	var out []string
-	add := func(s string) {
-		s = strings.ToLower(strings.TrimSpace(s))
+	add := func(raw string) {
+		if hasControlChar(raw) {
+			return
+		}
+		s := strings.ToLower(strings.TrimSpace(raw))
+		if s == "" || strings.ContainsAny(s, " \t") {
+			return
+		}
+		if !slices.Contains(out, s) {
+			out = append(out, s)
+		}
+	}
+	for _, a := range cert.EmailAddresses {
+		add(a)
+	}
+	for _, attr := range cert.Subject.Names {
+		if attr.Type.String() == "1.2.840.113549.1.9.1" {
+			if addr, ok := attr.Value.(string); ok {
+				add(addr)
+			}
+		}
+	}
+	return out
+}
+
+// CertDisplayEmails extracts mailbox addresses from cert's SAN and Subject for UI display,
+// rendering embedded control characters visibly rather than hiding or stripping them.
+func CertDisplayEmails(cert *smx509.Certificate) []string {
+	if cert == nil {
+		return nil
+	}
+	var out []string
+	add := func(raw string) {
+		var s string
+		if hasControlChar(raw) {
+			s = formatCertDisplayString(raw)
+		} else {
+			s = strings.ToLower(strings.TrimSpace(raw))
+		}
 		if s != "" && !slices.Contains(out, s) {
 			out = append(out, s)
 		}

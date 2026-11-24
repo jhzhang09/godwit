@@ -27,6 +27,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1033,4 +1034,40 @@ func (s *Service) fetchSMIMEPartForDedupTest(ctx context.Context, attID, accID i
 	s.smime.returnConn(accID, false, c)
 	p, err := s.saveAttachmentChecked(ctx, a, data)
 	return p, true, false, err
+}
+
+func TestFormatSMIMETrustErrorAndNULAddrCleanup(t *testing.T) {
+	prevLang := i18n.Language()
+	t.Cleanup(func() { i18n.SetLanguage(prevLang) })
+
+	te := &smime.TrustError{Issues: []string{smime.CertIssueExpired, smime.CertIssueEmailMismatch, smime.CertIssueWeakSignature}}
+	i18n.SetLanguage("zh-Hans")
+	require.Equal(t, "证书已过期或尚未生效；证书邮箱与发件人不匹配；证书使用不受支持的签名哈希算法", FormatSMIMEError(te))
+	i18n.SetLanguage("en")
+	require.Equal(t, "Certificate has expired or is not yet valid; Certificate email does not match address; Certificate uses an unsupported signature hash algorithm", FormatSMIMEError(te))
+
+	require.Empty(t, normalizeCertAddr("brhuo@tendyron.com\x00\x00"))
+	require.Empty(t, normalizeCertAddr("brhuo@tendyron.com\n"))
+	require.Equal(t, "brhuo@tendyron.com", normalizeCertAddr("  BRHUO@tendyron.com  "))
+
+	e := newSendEnv(t, false)
+	ctx := t.Context()
+	require.NoError(t, e.s.ensureSMIMETables(ctx))
+
+	// Simulate a pre-existing NUL-padded row in smime_certificates and verify startup cleanup removes it.
+	require.NoError(t, e.s.exec(ctx, sqlite.Statement{
+		SQL:  `INSERT INTO smime_certificates (sha256, addr_key, source, subject, issuer, not_before, not_after, der, added_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		Args: []any{"deadbeef", "bad@example.com\x00\x00", CertSourceCardDAV, "bad", "ca", 1, 2, []byte{1, 2, 3}, 1},
+	}))
+	require.NoError(t, e.s.exec(ctx, sqlite.Statement{
+		SQL:  `INSERT INTO smime_certificates (sha256, addr_key, source, subject, issuer, not_before, not_after, der, added_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		Args: []any{"cafebabe", "good@example.com", CertSourceCardDAV, "good", "ca", 1, 2, []byte{1, 2, 3}, 1},
+	}))
+	e.s.smimeTablesOnce = sync.Once{}
+	require.NoError(t, e.s.ensureSMIMETables(ctx))
+
+	rows, err := e.s.db.Query(ctx, `SELECT addr_key FROM smime_certificates ORDER BY addr_key`)
+	require.NoError(t, err)
+	require.Len(t, rows.Values, 1)
+	require.Equal(t, "good@example.com", store.Str(rows.Values[0][0]))
 }

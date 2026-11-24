@@ -524,8 +524,10 @@ func (r *reader) openSMIME(id int64, b *msgBody, retry bool) {
 				result.signerCert = &details
 			}
 		}
-		if len(opened.SignerChain) > 0 {
-			result.signerChain = smime.BuildCertChain(opened.SignerChain)
+		if len(opened.SignerChainNodes) > 0 {
+			result.signerChain = opened.SignerChainNodes
+		} else if len(opened.SignerChain) > 0 {
+			result.signerChain = smime.BuildCertChainWithTrust(opened.SignerChain, opened.VerifyErr == "" && opened.Signer != "")
 		}
 		if opened.VerifyErr == "" && len(opened.SignerCert) > 0 && opened.Signer != "" {
 			_ = a.svc.RecordSMIMESignerCert(ctx, opened.Signer, opened.SignerCert)

@@ -178,7 +178,8 @@ func TestDarwinVerifyTrustWeakKeyCompat(t *testing.T) {
 
 		require.Equal(t, errSecSuccess, d.secTrustSetAnchorCertificates(trust, cfAnchors))
 		require.Equal(t, errSecSuccess, d.secTrustSetNetworkFetchAllowed(trust, false))
-		return d.evaluateTrust(trust, allowWeak)
+		_, _, evalErr := d.evaluateTrust(trust, allowWeak)
+		return evalErr
 	}
 
 	now := time.Now()
@@ -309,4 +310,72 @@ func TestDarwinVerifyTrustWeakKeyCompat(t *testing.T) {
 
 	err = evalChain("sign", "yczhang@tendyron.com", [][]byte{leaf224}, [][]byte{leaf224}, true)
 	require.NoError(t, err)
+
+	// 10. Multi-failure anchored 1024-bit RSA leaf (expired + wrong email + SHA-1) with compat ON
+	// reports all issues in deterministic priority order and marks only the leaf node failed.
+	evalChainWithNodes := func(email string, chainDER, anchorDER [][]byte, allowWeak bool) ([]CertChainNode, error) {
+		cfEmail := d.cfString(email)
+		defer d.release(cfEmail)
+		certs := make([]uintptr, 0, len(chainDER))
+		defer func() {
+			for _, c := range certs {
+				d.release(c)
+			}
+		}()
+		for _, der := range chainDER {
+			data := d.cfData(der)
+			cert := d.secCertificateCreateWithData(0, data)
+			d.release(data)
+			certs = append(certs, cert)
+		}
+		cfCerts := d.cfArrayCreate(0, unsafe.Pointer(&certs[0]), len(certs), d.kCFTypeArrayCB)
+		defer d.release(cfCerts)
+		props := d.cfDict([]uintptr{d.kSecPolicyName, d.kSecPolicyKUDigitalSig}, []uintptr{cfEmail, d.kCFBooleanTrue})
+		defer d.release(props)
+		policy := d.secPolicyCreateWithProperties(d.kSecPolicyAppleSMIME, props)
+		defer d.release(policy)
+		var trust uintptr
+		require.Equal(t, errSecSuccess, d.secTrustCreateWithCertificates(cfCerts, policy, &trust))
+		defer d.release(trust)
+		anchors := make([]uintptr, 0, len(anchorDER))
+		defer func() {
+			for _, a := range anchors {
+				d.release(a)
+			}
+		}()
+		for _, der := range anchorDER {
+			data := d.cfData(der)
+			cert := d.secCertificateCreateWithData(0, data)
+			d.release(data)
+			anchors = append(anchors, cert)
+		}
+		var ancPtr unsafe.Pointer
+		if len(anchors) > 0 {
+			ancPtr = unsafe.Pointer(&anchors[0])
+		}
+		cfAnchors := d.cfArrayCreate(0, ancPtr, len(anchors), d.kCFTypeArrayCB)
+		defer d.release(cfAnchors)
+		require.Equal(t, errSecSuccess, d.secTrustSetAnchorCertificates(trust, cfAnchors))
+		require.Equal(t, errSecSuccess, d.secTrustSetNetworkFetchAllowed(trust, false))
+		_, nodes, evalErr := d.evaluateTrust(trust, allowWeak)
+		return nodes, evalErr
+	}
+
+	leafMultiFail := mkLeaf(17, "yczhang-multi", "yczhang@tendyron.com", now.Add(-48*time.Hour), now.Add(-time.Hour), x509.KeyUsageDigitalSignature, x509.SHA1WithRSA, ca2kCert, ca2kKey, &key1k.PublicKey)
+	nodes, err := evalChainWithNodes("other@tendyron.com", [][]byte{leafMultiFail, ca2kDER}, [][]byte{ca2kDER}, true)
+	var te *TrustError
+	require.ErrorAs(t, err, &te)
+	require.Equal(t, []string{CertIssueExpired, CertIssueEmailMismatch, CertIssueWeakSignature}, te.Issues)
+	require.Len(t, nodes, 2)
+	require.Equal(t, CertChainStatusTrusted, nodes[0].Status)
+	require.Equal(t, CertChainStatusFailed, nodes[1].Status)
+	require.Equal(t, []string{CertIssueExpired, CertIssueEmailMismatch, CertIssueWeakSignature}, nodes[1].Issues)
+
+	// 11. Untrusted root marks root failed with untrusted_root and leaf untrusted.
+	nodes, err = evalChainWithNodes("yczhang@tendyron.com", [][]byte{leafUnder2k, ca2kDER}, nil, true)
+	require.Error(t, err)
+	require.Len(t, nodes, 2)
+	require.Equal(t, CertChainStatusFailed, nodes[0].Status)
+	require.Contains(t, nodes[0].Issues, CertIssueUntrustedRoot)
+	require.Equal(t, CertChainStatusUntrusted, nodes[1].Status)
 }

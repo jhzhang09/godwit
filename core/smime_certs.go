@@ -41,6 +41,8 @@ type SMIMECertChainNode struct {
 	SHA256        string
 	Role          string
 	SelfSigned    bool
+	Status        string
+	Issues        []string
 }
 
 func toCoreChainNodes(nodes []smime.CertChainNode) []SMIMECertChainNode {
@@ -58,6 +60,8 @@ func toCoreChainNodes(nodes []smime.CertChainNode) []SMIMECertChainNode {
 			SHA256:        n.SHA256,
 			Role:          n.Role,
 			SelfSigned:    n.SelfSigned,
+			Status:        n.Status,
+			Issues:        slices.Clone(n.Issues),
 		}
 	}
 	return out
@@ -164,6 +168,7 @@ func (s *Service) ensureSMIMETables(ctx context.Context) error {
 				part_key   TEXT PRIMARY KEY,
 				scanned_at INTEGER NOT NULL
 			)`},
+			{SQL: `DELETE FROM smime_certificates WHERE instr(addr_key, char(0)) > 0 OR instr(addr_key, char(10)) > 0 OR instr(addr_key, char(13)) > 0`},
 		})
 		s.smimeTablesErr = err
 	})
@@ -171,6 +176,11 @@ func (s *Service) ensureSMIMETables(ctx context.Context) error {
 }
 
 func normalizeCertAddr(raw string) string {
+	for _, r := range raw {
+		if r < 0x20 || r == 0x7f {
+			return ""
+		}
+	}
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return ""

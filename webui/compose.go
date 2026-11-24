@@ -680,6 +680,8 @@ func toComposeChainNodes(nodes []core.SMIMECertChainNode) []ComposeSMIMECertChai
 			SHA256:        n.SHA256,
 			Role:          n.Role,
 			SelfSigned:    n.SelfSigned,
+			Status:        n.Status,
+			Issues:        n.Issues,
 		}
 	}
 	return out

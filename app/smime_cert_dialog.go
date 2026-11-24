@@ -2,6 +2,7 @@ package app
 
 import (
 	"cmp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -109,6 +110,8 @@ func smimeChainFromCore(nodes []core.SMIMECertChainNode) []smime.CertChainNode {
 			SHA256:        n.SHA256,
 			Role:          n.Role,
 			SelfSigned:    n.SelfSigned,
+			Status:        n.Status,
+			Issues:        slices.Clone(n.Issues),
 		}
 	}
 	return out
@@ -314,6 +317,50 @@ func (a *App) smimeCertDialog(c *ui.Context) {
 					kit.Text(c, i18n.T("smime.cert.chain"), t.Text.Xs).TextColor(t.Muted)
 					for i, node := range v.Chain {
 						indent := float32(i) * th.Space(3)
+						nodeStatus := node.Status
+						if nodeStatus == "" {
+							if v.Verified || v.Trusted {
+								nodeStatus = smime.CertChainStatusTrusted
+							} else {
+								nodeStatus = smime.CertChainStatusUntrusted
+							}
+						}
+						var statusIcon string
+						var statusIconColor ui.Color
+						var statusTone kit.BadgeTone
+						var statusBadgeKey string
+						switch nodeStatus {
+						case smime.CertChainStatusTrusted:
+							statusIcon = "circle-check"
+							statusIconColor = t.SuccessText
+							statusTone = kit.BadgeSuccess
+							switch node.Role {
+							case "root":
+								statusBadgeKey = "smime.cert.root_trusted"
+							case "intermediate":
+								statusBadgeKey = "smime.cert.chain_trusted"
+							default:
+								statusBadgeKey = "smime.cert.leaf_trusted"
+							}
+						case smime.CertChainStatusFailed:
+							statusIcon = "circle-x"
+							statusIconColor = t.DangerText
+							statusTone = kit.BadgeDanger
+							if node.Role == "root" && slices.Contains(node.Issues, smime.CertIssueUntrustedRoot) {
+								statusBadgeKey = "smime.cert.root_untrusted"
+							} else {
+								statusBadgeKey = "smime.cert.node_failed"
+							}
+						default:
+							statusIcon = "triangle-alert"
+							statusIconColor = t.WarningText
+							statusTone = kit.BadgeWarning
+							if i == 0 && node.Role != "root" {
+								statusBadgeKey = "smime.cert.chain_missing_root"
+							} else {
+								statusBadgeKey = "smime.cert.node_untrusted"
+							}
+						}
 						ui.Column(c).FillWidth().Padding(0, 0, 0, indent).Gap(th.Space(0.5)).Children(func() {
 							ui.Row(c).FillWidth().Wrap().Gap(th.Space(1.5)).AlignItems(ui.Center).Children(func() {
 								prefix := ""
@@ -321,18 +368,23 @@ func (a *App) smimeCertDialog(c *ui.Context) {
 									prefix = "└─ "
 								}
 								name := cmp.Or(node.Subject, node.Issuer)
-								kit.Text(c, prefix+name, t.Text.Xs).FontWeight(500).Selectable()
+								if prefix != "" {
+									kit.Text(c, prefix, t.Text.Xs).TextColor(t.Muted)
+								}
+								ui.Icon(c, icons.Get(statusIcon)).Size(theme.IconXs, theme.IconXs).TextColor(statusIconColor)
+								kit.Text(c, name, t.Text.Xs).FontWeight(500).Selectable()
 								kit.BadgeWith(c, certChainRoleLabel(node.Role), kit.BadgeOpts{Tone: kit.BadgeOutline, Muted: true})
-								if i == 0 && node.Role == "root" && (v.Verified || v.Trusted) {
-									kit.BadgeWith(c, i18n.T("smime.cert.root_trusted"), kit.BadgeOpts{Tone: kit.BadgeSuccess})
-								}
+								kit.BadgeWith(c, i18n.T(statusBadgeKey), kit.BadgeOpts{Tone: statusTone})
 							})
+							subPad := float32(0)
+							if i > 0 {
+								subPad = th.Space(3)
+							}
 							if node.PublicKeyAlgo != "" {
-								subPad := float32(0)
-								if i > 0 {
-									subPad = th.Space(3)
-								}
 								kit.Text(c, node.PublicKeyAlgo, t.Text.Xs).TextColor(t.Muted).Padding(0, 0, 0, subPad)
+							}
+							if len(node.Issues) > 0 {
+								kit.Text(c, core.FormatTrustIssues(node.Issues), t.Text.Xs).TextColor(t.DangerText).Padding(0, 0, 0, subPad).Selectable()
 							}
 						})
 					}

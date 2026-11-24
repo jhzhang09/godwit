@@ -38,16 +38,17 @@ type RawIdentity struct {
 }
 
 type cmsVerifyResult struct {
-	content   []byte
-	signerDER []byte
-	chainDER  [][]byte
-	cryptOK   bool
-	trustOK   bool
-	verifyErr error
+	content    []byte
+	signerDER  []byte
+	chainDER   [][]byte
+	chainNodes []CertChainNode
+	cryptOK    bool
+	trustOK    bool
+	verifyErr  error
 }
 
 type chainVerifier interface {
-	VerifyTrustWithChain(ctx context.Context, usage, email string, certsDER [][]byte) ([][]byte, error)
+	VerifyTrustWithChain(ctx context.Context, usage, email string, certsDER [][]byte) ([][]byte, []CertChainNode, error)
 }
 
 type provider interface {

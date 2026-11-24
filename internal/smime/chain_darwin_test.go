@@ -106,12 +106,10 @@ func TestDarwinChainTrustPropagation(t *testing.T) {
 	require.Zero(t, d.secTrustSetAnchorCertificates(trust, anchorArr))
 	_ = d.secTrustSetNetworkFetchAllowed(trust, false)
 
-	require.NoError(t, d.evaluateTrust(trust, false))
-
-	chainDER := d.copyChainDER(trust)
+	chainDER, nodes, evalErr := d.evaluateTrust(trust, false)
+	require.NoError(t, evalErr)
 	require.Len(t, chainDER, 3)
 
-	nodes := BuildCertChain(chainDER)
 	require.Len(t, nodes, 3)
 
 	require.Equal(t, "Tendyron Root CA", nodes[0].Subject)

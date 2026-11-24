@@ -88,6 +88,27 @@ func FormatWeakKeySizeError(wk *smime.WeakKeySizeError) string {
 	return i18n.T("smime.err.weak_key_size_generic")
 }
 
+// FormatTrustIssues formats canonical S/MIME trust issue codes in the active UI language.
+func FormatTrustIssues(issues []string) string {
+	if len(issues) == 0 {
+		return ""
+	}
+	sep := i18n.T("smime.issue.sep")
+	if sep == "" || sep == "smime.issue.sep" {
+		sep = "; "
+	}
+	parts := make([]string, 0, len(issues))
+	for _, code := range issues {
+		key := "smime.issue." + code
+		txt := i18n.T(key)
+		if txt == "" || txt == key {
+			txt = smime.CertIssueMessage(code)
+		}
+		parts = append(parts, txt)
+	}
+	return strings.Join(parts, sep)
+}
+
 // FormatSMIMEError formats err for display, translating typed S/MIME errors into localized messages.
 func FormatSMIMEError(err error) string {
 	if err == nil {
@@ -96,6 +117,10 @@ func FormatSMIMEError(err error) string {
 	var wk *smime.WeakKeySizeError
 	if errors.As(err, &wk) {
 		return FormatWeakKeySizeError(wk)
+	}
+	var te *smime.TrustError
+	if errors.As(err, &te) && len(te.Issues) > 0 {
+		return FormatTrustIssues(te.Issues)
 	}
 	return err.Error()
 }
