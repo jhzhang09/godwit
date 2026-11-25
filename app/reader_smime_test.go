@@ -331,6 +331,7 @@ func TestSMIMECopyAndStandardWorkflows(t *testing.T) {
 		"smime.cert.chain", "smime.cert.role_root", "smime.cert.role_intermediate", "smime.cert.role_leaf", "smime.cert.root_trusted",
 		"smime.cert.root_untrusted", "smime.cert.chain_trusted", "smime.cert.leaf_trusted",
 		"smime.cert.node_failed", "smime.cert.node_untrusted", "smime.cert.chain_missing_root",
+		"smime.cert.valid_at_signing", "smime.cert.invalid_at_signing",
 		"smime.issue.revoked", "smime.issue.untrusted_root", "smime.issue.missing_issuer",
 		"smime.issue.expired", "smime.issue.email_mismatch", "smime.issue.weak_signature",
 		"smime.issue.key_usage", "smime.issue.weak_key", "smime.issue.untrusted", "smime.issue.sep",

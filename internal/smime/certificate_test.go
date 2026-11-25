@@ -125,3 +125,45 @@ func TestBuildCertChainWithIssues(t *testing.T) {
 	require.Equal(t, []string{CertIssueMissingIssuer}, nodes[0].Issues)
 	require.Equal(t, CertChainStatusUntrusted, nodes[1].Status)
 }
+
+func TestInspectCertificateDNAttrsAndOIDTranslation(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	now := time.Now().UTC()
+	paddedEmail := "brhuo@tendyron.com" + strings.Repeat("\x00", 46)
+	tpl := &x509.Certificate{
+		SerialNumber: big.NewInt(77),
+		Subject: pkix.Name{
+			ExtraNames: []pkix.AttributeTypeAndValue{
+				{Type: asn1.ObjectIdentifier{2, 5, 4, 6}, Value: "CN"},
+				{Type: asn1.ObjectIdentifier{2, 5, 4, 8}, Value: "BJ"},
+				{Type: asn1.ObjectIdentifier{2, 5, 4, 7}, Value: "BEIJING"},
+				{Type: asn1.ObjectIdentifier{2, 5, 4, 7}, Value: "BEIJING"},
+				{Type: asn1.ObjectIdentifier{2, 5, 4, 10}, Value: "TENDYRON"},
+				{Type: asn1.ObjectIdentifier{2, 5, 4, 11}, Value: "技术管理部"},
+				{Type: asn1.ObjectIdentifier{2, 5, 4, 3}, Value: "brhuo@tendyron.com\x00"},
+				{Type: asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 9, 1}, Value: paddedEmail},
+			},
+		},
+		NotBefore: now.Add(-time.Hour),
+		NotAfter:  now.Add(time.Hour),
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tpl, tpl, &key.PublicKey, key)
+	require.NoError(t, err)
+	cert, err := ParseCertificate(der)
+	require.NoError(t, err)
+
+	d := InspectCertificate(cert)
+	require.NotContains(t, d.SubjectDN, "1.2.840.113549.1.9.1")
+	require.Contains(t, d.SubjectDN, `emailAddress=brhuo@tendyron.com[\x00×46]`)
+	require.Equal(t, []CertDNAttr{
+		{Key: "CN", Value: `brhuo@tendyron.com[\x00]`},
+		{Key: "emailAddress", Value: `brhuo@tendyron.com[\x00×46]`},
+		{Key: "OU", Value: "技术管理部"},
+		{Key: "O", Value: "TENDYRON"},
+		{Key: "L", Value: "BEIJING"},
+		{Key: "L", Value: "BEIJING"},
+		{Key: "ST", Value: "BJ"},
+		{Key: "C", Value: "CN"},
+	}, d.SubjectAttrs)
+}

@@ -4347,6 +4347,22 @@
   "smime_cert_status_trusted": "Trusted S/MIME certificate",
   "smime_cert_status_untrusted": "Not trusted by system",
   "smime_cert_status_expired": "Expired",
+  "smime_cert_valid_at_signing": "Valid at signing time ({arg1})",
+  "@smime_cert_valid_at_signing": {
+    "placeholders": {
+      "arg1": {
+        "type": "String"
+      }
+    }
+  },
+  "smime_cert_invalid_at_signing": "Outside validity period at signing time ({arg1})",
+  "@smime_cert_invalid_at_signing": {
+    "placeholders": {
+      "arg1": {
+        "type": "String"
+      }
+    }
+  },
   "smime_cert_chain": "Certificate chain",
   "smime_cert_role_root": "Root CA",
   "smime_cert_role_intermediate": "Intermediate CA",

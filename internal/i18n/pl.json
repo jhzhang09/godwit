@@ -2495,6 +2495,8 @@
   "smime_cert_status_trusted": "Zaufany certyfikat S/MIME",
   "smime_cert_status_untrusted": "Niezaufany przez system",
   "smime_cert_status_expired": "Wygasł",
+  "smime_cert_valid_at_signing": "Ważny w chwili podpisania ({arg1})",
+  "smime_cert_invalid_at_signing": "Poza okresem ważności w chwili podpisania ({arg1})",
   "smime_cert_chain": "Łańcuch certyfikatów",
   "smime_cert_role_root": "Główny urząd CA",
   "smime_cert_role_intermediate": "Pośredni urząd CA",

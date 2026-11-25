@@ -2495,6 +2495,8 @@
   "smime_cert_status_trusted": "Chứng thư S/MIME đáng tin cậy",
   "smime_cert_status_untrusted": "Không được hệ thống tin cậy",
   "smime_cert_status_expired": "Đã hết hạn",
+  "smime_cert_valid_at_signing": "Hợp lệ tại thời điểm ký ({arg1})",
+  "smime_cert_invalid_at_signing": "Ngoài thời hạn hiệu lực tại thời điểm ký ({arg1})",
   "smime_cert_chain": "Chuỗi chứng chỉ",
   "smime_cert_role_root": "CA gốc",
   "smime_cert_role_intermediate": "CA trung gian",

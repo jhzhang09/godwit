@@ -2495,6 +2495,8 @@
   "smime_cert_status_trusted": "Certificat S/MIME approuvé",
   "smime_cert_status_untrusted": "Non approuvé par le système",
   "smime_cert_status_expired": "Expiré",
+  "smime_cert_valid_at_signing": "Valide au moment de la signature ({arg1})",
+  "smime_cert_invalid_at_signing": "Hors période de validité lors de la signature ({arg1})",
   "smime_cert_chain": "Chaîne de certification",
   "smime_cert_role_root": "AC racine",
   "smime_cert_role_intermediate": "AC intermédiaire",

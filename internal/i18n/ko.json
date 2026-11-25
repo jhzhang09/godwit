@@ -2495,6 +2495,8 @@
   "smime_cert_status_trusted": "신뢰할 수 있는 S/MIME 인증서",
   "smime_cert_status_untrusted": "시스템에서 신뢰하지 않음",
   "smime_cert_status_expired": "만료됨",
+  "smime_cert_valid_at_signing": "서명 당시 유효 기간 내 ({arg1})",
+  "smime_cert_invalid_at_signing": "서명 당시 유효 기간 초과 ({arg1})",
   "smime_cert_chain": "인증서 체인",
   "smime_cert_role_root": "루트 CA",
   "smime_cert_role_intermediate": "중간 CA",

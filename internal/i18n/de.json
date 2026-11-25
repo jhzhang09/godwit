@@ -2495,6 +2495,8 @@
   "smime_cert_status_trusted": "Vertrauenswürdiges S/MIME-Zertifikat",
   "smime_cert_status_untrusted": "Vom System nicht als vertrauenswürdig eingestuft",
   "smime_cert_status_expired": "Abgelaufen",
+  "smime_cert_valid_at_signing": "Zum Signaturzeitpunkt gültig ({arg1})",
+  "smime_cert_invalid_at_signing": "Zum Signaturzeitpunkt außerhalb der Gültigkeitsdauer ({arg1})",
   "smime_cert_chain": "Zertifikatskette",
   "smime_cert_role_root": "Stammzertifikat",
   "smime_cert_role_intermediate": "Zwischenzertifikat",

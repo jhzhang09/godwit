@@ -75,8 +75,10 @@ type IdentityInfo struct {
 	SHA256        string
 	Subject       string
 	SubjectDN     string
+	SubjectAttrs  []CertDNAttr
 	Issuer        string
 	IssuerDN      string
+	IssuerAttrs   []CertDNAttr
 	Emails        []string
 	SerialNumber  string
 	NotBefore     time.Time
@@ -200,8 +202,10 @@ func ListIdentities(ctx context.Context, email string) ([]IdentityInfo, error) {
 			SHA256:        it.sha256,
 			Subject:       meta.Subject,
 			SubjectDN:     meta.SubjectDN,
+			SubjectAttrs:  meta.SubjectAttrs,
 			Issuer:        meta.Issuer,
 			IssuerDN:      meta.IssuerDN,
+			IssuerAttrs:   meta.IssuerAttrs,
 			Emails:        meta.Emails,
 			SerialNumber:  meta.SerialNumber,
 			NotBefore:     meta.NotBefore,

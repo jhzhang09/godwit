@@ -2495,6 +2495,8 @@
   "smime_cert_status_trusted": "Доверенный сертификат S/MIME",
   "smime_cert_status_untrusted": "Не прошёл проверку доверия системы",
   "smime_cert_status_expired": "Истёк",
+  "smime_cert_valid_at_signing": "Действителен на момент подписания ({arg1})",
+  "smime_cert_invalid_at_signing": "Срок действия не охватывает момент подписания ({arg1})",
   "smime_cert_chain": "Цепочка сертификатов",
   "smime_cert_role_root": "Корневой УЦ",
   "smime_cert_role_intermediate": "Промежуточный УЦ",

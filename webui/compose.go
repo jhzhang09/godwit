@@ -687,6 +687,17 @@ func toComposeChainNodes(nodes []core.SMIMECertChainNode) []ComposeSMIMECertChai
 	return out
 }
 
+func toComposeDNAttrs(attrs []core.SMIMECertDNAttr) []ComposeSMIMECertDNAttr {
+	if len(attrs) == 0 {
+		return nil
+	}
+	out := make([]ComposeSMIMECertDNAttr, len(attrs))
+	for i, a := range attrs {
+		out[i] = ComposeSMIMECertDNAttr{Key: a.Key, Value: a.Value}
+	}
+	return out
+}
+
 func toComposeSMIME(st core.DraftSMIMEStatus) ComposeSMIME {
 	own := make([]ComposeSMIMEIdentity, 0, len(st.OwnCerts))
 	for _, id := range st.OwnCerts {
@@ -694,8 +705,10 @@ func toComposeSMIME(st core.DraftSMIMEStatus) ComposeSMIME {
 			SHA256:        id.SHA256,
 			Subject:       id.Subject,
 			SubjectDN:     id.SubjectDN,
+			SubjectAttrs:  toComposeDNAttrs(id.SubjectAttrs),
 			Issuer:        id.Issuer,
 			IssuerDN:      id.IssuerDN,
+			IssuerAttrs:   toComposeDNAttrs(id.IssuerAttrs),
 			Emails:        nz(id.Emails),
 			SerialNumber:  id.SerialNumber,
 			NotBefore:     id.NotBefore.UnixMilli(),
@@ -721,8 +734,10 @@ func toComposeSMIME(st core.DraftSMIMEStatus) ComposeSMIME {
 				Source:        c.Source,
 				Subject:       c.Subject,
 				SubjectDN:     c.SubjectDN,
+				SubjectAttrs:  toComposeDNAttrs(c.SubjectAttrs),
 				Issuer:        c.Issuer,
 				IssuerDN:      c.IssuerDN,
+				IssuerAttrs:   toComposeDNAttrs(c.IssuerAttrs),
 				Emails:        nz(c.Emails),
 				SerialNumber:  c.SerialNumber,
 				NotBefore:     c.NotBefore.UnixMilli(),

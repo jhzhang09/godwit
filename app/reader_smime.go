@@ -287,7 +287,11 @@ func (r *reader) smimeNotice(c *ui.Context, id int64, b *msgBody) {
 								chain := result.signerChain
 								verifyErr := result.verifyErr
 								if kit.Button(c, i18n.T("smime.cert.view"), kit.ButtonOpts{Variant: kit.Outline, Size: kit.SizeSm}).Clicked() {
-									r.p.a.openSMIMECertDialog(certViewFromDetails(cert, false, false, "", verifyErr, chain))
+									cv := certViewFromDetails(cert, false, false, "", verifyErr, chain)
+									if result.signature != nil {
+										cv.SigningTime = result.signature.SigningTime
+									}
+									r.p.a.openSMIMECertDialog(cv)
 								}
 							}
 						})
@@ -313,7 +317,11 @@ func (r *reader) smimeNotice(c *ui.Context, id int64, b *msgBody) {
 					cert := *result.signerCert
 					chain := result.signerChain
 					openCert := func() {
-						r.p.a.openSMIMECertDialog(certViewFromDetails(cert, true, true, "", "", chain))
+						cv := certViewFromDetails(cert, true, true, "", "", chain)
+						if result.signature != nil {
+							cv.SigningTime = result.signature.SigningTime
+						}
+						r.p.a.openSMIMECertDialog(cv)
 					}
 					kit.Button(c, i18n.T("smime.cert.view"), kit.ButtonOpts{Variant: kit.Link, Size: kit.SizeXs}).OnClick(openCert)
 				}

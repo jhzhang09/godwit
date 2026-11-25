@@ -2495,6 +2495,8 @@
   "smime_cert_status_trusted": "Vertrouwd S/MIME-certificaat",
   "smime_cert_status_untrusted": "Niet vertrouwd door het systeem",
   "smime_cert_status_expired": "Verlopen",
+  "smime_cert_valid_at_signing": "Geldig op moment van ondertekening ({arg1})",
+  "smime_cert_invalid_at_signing": "Buiten geldigheidsduur op moment van ondertekening ({arg1})",
   "smime_cert_chain": "Certificaatketen",
   "smime_cert_role_root": "Basiscertificaat (Root CA)",
   "smime_cert_role_intermediate": "Tussencertificaat",

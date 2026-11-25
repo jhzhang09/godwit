@@ -6,6 +6,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/asn1"
 	"fmt"
 	"math/big"
 	"testing"
@@ -141,6 +142,74 @@ func TestReaderSMIMECertChainDialogFailedLeaf(t *testing.T) {
 	h.see("信任已传递")
 	h.see("校验未通过")
 	h.see("证书已过期或尚未生效；证书邮箱与发件人不匹配")
+	h.see("CN")
+	h.see("O")
+}
+
+func TestReaderSMIMECertChainDialogExpiredNowValidAtSigning(t *testing.T) {
+	if !smime.Supported() {
+		t.Skip("S/MIME not supported on this platform")
+	}
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	tpl := &x509.Certificate{
+		SerialNumber: big.NewInt(99),
+		Subject: pkix.Name{
+			CommonName:   "Old Cert",
+			Organization: []string{"TENDYRON"},
+			ExtraNames: []pkix.AttributeTypeAndValue{
+				{Type: asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 9, 1}, Value: "old@example.com"},
+			},
+		},
+		EmailAddresses: []string{"old@example.com"},
+		NotBefore:      now.Add(-72 * time.Hour),
+		NotAfter:       now.Add(-24 * time.Hour),
+		KeyUsage:       x509.KeyUsageDigitalSignature,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tpl, tpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sigTime := now.Add(-48 * time.Hour)
+
+	h, accs := mailHarness(t, nil, "alice-old@example.com")
+	h.app.cards = smime.NewSession(h.app.ctx)
+	h.app.mail.reader.openCMSFull = func(ctx context.Context, fromHeader string, d []byte) (smime.Opened, error) {
+		return smime.Opened{
+			Entity:         []byte("Content-Type: text/html; charset=utf-8\r\n\r\n<p>Old signed</p>"),
+			UnverifiedCert: der,
+			Signature: &smime.SignatureInfo{
+				Format:      "opaque",
+				SigningTime: sigTime,
+				ClaimedFrom: "old@example.com",
+				CryptOK:     true,
+			},
+			VerifyErr:      "certificate uses an unsupported signature hash algorithm",
+			VerifyErrCause: &smime.TrustError{Issues: []string{smime.CertIssueWeakSignature}},
+		}, nil
+	}
+
+	msg := h.deliverOne(accs[0], makeRawSMIME("Old <old@example.com>", accs[0].Email, "old-sig@x", "Old Signed", "opaque-cms"))
+	h.openThread(msg.ThreadID)
+	h.until("unverified banner rendered", func() bool {
+		return h.tt.HasText("显示详细信息")
+	})
+	h.click("显示详细信息")
+	h.until("detail panel open", func() bool {
+		return h.tt.HasText("查看证书")
+	})
+	h.click("查看证书")
+	h.until("cert dialog open", func() bool {
+		return h.tt.HasText("证书详情") && h.tt.HasText("Old Cert")
+	})
+
+	h.see("已过期")
+	h.see("签名时在有效期内（" + sigTime.Local().Format("2006-01-02 15:04") + "）")
+	h.see("emailAddress")
+	h.see("old@example.com")
 }
 
 func TestReaderSMIMECertChainDialogUntrustedRoot(t *testing.T) {

@@ -2495,6 +2495,8 @@
   "smime_cert_status_trusted": "Güvenilen S/MIME sertifikası",
   "smime_cert_status_untrusted": "Sistem tarafından güvenilmiyor",
   "smime_cert_status_expired": "Süresi dolmuş",
+  "smime_cert_valid_at_signing": "İmzalama zamanında geçerliydi ({arg1})",
+  "smime_cert_invalid_at_signing": "İmzalama zamanında geçerlilik süresi dışındaydı ({arg1})",
   "smime_cert_chain": "Sertifika zinciri",
   "smime_cert_role_root": "Kök CA",
   "smime_cert_role_intermediate": "Ara CA",

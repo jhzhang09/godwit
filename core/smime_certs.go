@@ -67,13 +67,32 @@ func toCoreChainNodes(nodes []smime.CertChainNode) []SMIMECertChainNode {
 	return out
 }
 
+// SMIMECertDNAttr represents one attribute (RDN entry) of an X.509 Distinguished Name.
+type SMIMECertDNAttr struct {
+	Key   string
+	Value string
+}
+
+func toCoreDNAttrs(attrs []smime.CertDNAttr) []SMIMECertDNAttr {
+	if len(attrs) == 0 {
+		return nil
+	}
+	out := make([]SMIMECertDNAttr, len(attrs))
+	for i, a := range attrs {
+		out[i] = SMIMECertDNAttr{Key: a.Key, Value: a.Value}
+	}
+	return out
+}
+
 // SMIMEIdentity describes one personal S/MIME certificate from the local OS store or security key.
 type SMIMEIdentity struct {
 	SHA256        string
 	Subject       string
 	SubjectDN     string
+	SubjectAttrs  []SMIMECertDNAttr
 	Issuer        string
 	IssuerDN      string
+	IssuerAttrs   []SMIMECertDNAttr
 	Emails        []string
 	SerialNumber  string
 	NotBefore     time.Time
@@ -96,8 +115,10 @@ type SMIMECertificate struct {
 	Source        string
 	Subject       string
 	SubjectDN     string
+	SubjectAttrs  []SMIMECertDNAttr
 	Issuer        string
 	IssuerDN      string
+	IssuerAttrs   []SMIMECertDNAttr
 	Emails        []string
 	SerialNumber  string
 	NotBefore     time.Time
@@ -214,8 +235,10 @@ func buildSMIMECertificate(sha, addr, source string, cert *smx509.Certificate, t
 		Source:        source,
 		Subject:       meta.Subject,
 		SubjectDN:     meta.SubjectDN,
+		SubjectAttrs:  toCoreDNAttrs(meta.SubjectAttrs),
 		Issuer:        meta.Issuer,
 		IssuerDN:      meta.IssuerDN,
+		IssuerAttrs:   toCoreDNAttrs(meta.IssuerAttrs),
 		Emails:        meta.Emails,
 		SerialNumber:  meta.SerialNumber,
 		NotBefore:     meta.NotBefore,
@@ -859,8 +882,10 @@ func (s *Service) ListOwnSMIMECertificates(ctx context.Context, email string) ([
 			SHA256:        it.SHA256,
 			Subject:       it.Subject,
 			SubjectDN:     it.SubjectDN,
+			SubjectAttrs:  toCoreDNAttrs(it.SubjectAttrs),
 			Issuer:        it.Issuer,
 			IssuerDN:      it.IssuerDN,
+			IssuerAttrs:   toCoreDNAttrs(it.IssuerAttrs),
 			Emails:        it.Emails,
 			SerialNumber:  it.SerialNumber,
 			NotBefore:     it.NotBefore,

@@ -2495,6 +2495,8 @@
   "smime_cert_status_trusted": "信頼された S/MIME 証明書",
   "smime_cert_status_untrusted": "システムによって信頼されていません",
   "smime_cert_status_expired": "期限切れ",
+  "smime_cert_valid_at_signing": "署名時は有効期間内（{arg1}）",
+  "smime_cert_invalid_at_signing": "署名時に有効期間外（{arg1}）",
   "smime_cert_chain": "証明書チェーン",
   "smime_cert_role_root": "ルート CA",
   "smime_cert_role_intermediate": "中間 CA",

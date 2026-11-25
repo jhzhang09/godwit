@@ -22,13 +22,21 @@ type ComposeSMIMECertChainNode struct {
 	Issues        []string `json:"issues,omitempty"`
 }
 
+// ComposeSMIMECertDNAttr represents one attribute (RDN entry) of an X.509 Distinguished Name.
+type ComposeSMIMECertDNAttr struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
 // ComposeSMIMEIdentity describes one personal S/MIME certificate for the sender account.
 type ComposeSMIMEIdentity struct {
 	SHA256        string                      `json:"sha256"`
 	Subject       string                      `json:"subject"`
 	SubjectDN     string                      `json:"subjectDn,omitempty"`
+	SubjectAttrs  []ComposeSMIMECertDNAttr    `json:"subjectAttrs,omitempty"`
 	Issuer        string                      `json:"issuer"`
 	IssuerDN      string                      `json:"issuerDn,omitempty"`
+	IssuerAttrs   []ComposeSMIMECertDNAttr    `json:"issuerAttrs,omitempty"`
 	Emails        []string                    `json:"emails"`
 	SerialNumber  string                      `json:"serialNumber,omitempty"`
 	NotBefore     int64                       `json:"notBefore"`
@@ -51,8 +59,10 @@ type ComposeSMIMECert struct {
 	Source        string                      `json:"source"`
 	Subject       string                      `json:"subject"`
 	SubjectDN     string                      `json:"subjectDn,omitempty"`
+	SubjectAttrs  []ComposeSMIMECertDNAttr    `json:"subjectAttrs,omitempty"`
 	Issuer        string                      `json:"issuer"`
 	IssuerDN      string                      `json:"issuerDn,omitempty"`
+	IssuerAttrs   []ComposeSMIMECertDNAttr    `json:"issuerAttrs,omitempty"`
 	Emails        []string                    `json:"emails"`
 	SerialNumber  string                      `json:"serialNumber,omitempty"`
 	NotBefore     int64                       `json:"notBefore"`

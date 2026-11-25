@@ -23,6 +23,7 @@ type smimeCertView struct {
 	Verified    bool
 	Trusted     bool
 	StatusError string
+	SigningTime time.Time
 }
 
 type smimeEncryptView struct {
@@ -130,6 +131,17 @@ func certChainRoleLabel(role string) string {
 	}
 }
 
+func smimeDNFromCore(attrs []core.SMIMECertDNAttr) []smime.CertDNAttr {
+	if len(attrs) == 0 {
+		return nil
+	}
+	out := make([]smime.CertDNAttr, len(attrs))
+	for i, a := range attrs {
+		out[i] = smime.CertDNAttr{Key: a.Key, Value: a.Value}
+	}
+	return out
+}
+
 func certViewFromDetails(d smime.CertDetails, verified, trusted bool, source, statusErr string, chain []smime.CertChainNode) smimeCertView {
 	return smimeCertView{
 		CertDetails: d,
@@ -145,8 +157,10 @@ func certViewFromCoreCert(c core.SMIMECertificate) smimeCertView {
 	return certViewFromDetails(smime.CertDetails{
 		Subject:       c.Subject,
 		SubjectDN:     c.SubjectDN,
+		SubjectAttrs:  smimeDNFromCore(c.SubjectAttrs),
 		Issuer:        c.Issuer,
 		IssuerDN:      c.IssuerDN,
+		IssuerAttrs:   smimeDNFromCore(c.IssuerAttrs),
 		Emails:        c.Emails,
 		SerialNumber:  c.SerialNumber,
 		NotBefore:     c.NotBefore,
@@ -169,8 +183,10 @@ func certViewFromIdentity(id core.SMIMEIdentity) smimeCertView {
 		CertDetails: smime.CertDetails{
 			Subject:       id.Subject,
 			SubjectDN:     id.SubjectDN,
+			SubjectAttrs:  smimeDNFromCore(id.SubjectAttrs),
 			Issuer:        id.Issuer,
 			IssuerDN:      id.IssuerDN,
+			IssuerAttrs:   smimeDNFromCore(id.IssuerAttrs),
 			Emails:        id.Emails,
 			SerialNumber:  id.SerialNumber,
 			NotBefore:     id.NotBefore,
@@ -260,6 +276,31 @@ func formatCertValidity(notBefore, notAfter time.Time) string {
 	return ""
 }
 
+func certDNDetailRow(c *ui.Context, label, primary string, attrs []smime.CertDNAttr, fallbackDN string) {
+	if primary == "" && len(attrs) == 0 && fallbackDN == "" {
+		return
+	}
+	t, th := theme.Of(c), c.Theme()
+	ui.Column(c).FillWidth().Gap(th.Space(0.75)).Children(func() {
+		kit.Text(c, label, t.Text.Xs).TextColor(t.Muted)
+		if primary != "" {
+			kit.Text(c, primary, t.Text.Xs).FontWeight(500).Selectable()
+		}
+		if len(attrs) > 0 {
+			ui.Column(c).FillWidth().Gap(th.Space(0.5)).Children(func() {
+				for _, attr := range attrs {
+					ui.Row(c).FillWidth().Gap(th.Space(2)).AlignItems(ui.Start).Children(func() {
+						kit.Text(c, attr.Key, t.Text.Xs).Font(theme.Mono).TextColor(t.Muted).MinWidth(92).Shrink(0)
+						kit.Text(c, attr.Value, t.Text.Xs).TextColor(t.Muted).Grow(1).Shrink(1).Selectable()
+					})
+				}
+			})
+		} else if fallbackDN != "" && fallbackDN != primary {
+			kit.Text(c, fallbackDN, t.Text.Xs).TextColor(t.Muted).Selectable()
+		}
+	})
+}
+
 func (a *App) smimeCertDialog(c *ui.Context) {
 	if !a.smimeCertOpen {
 		return
@@ -285,14 +326,17 @@ func (a *App) smimeCertDialog(c *ui.Context) {
 				tone, icon, statusColor, statusKey = kit.ToneSuccess, "circle-check", t.SuccessText, "smime.cert.status_trusted"
 			}
 			expired := !v.NotAfter.IsZero() && time.Now().After(v.NotAfter)
+			hasSigTime := !v.SigningTime.IsZero()
+			validAtSig := true
+			if hasSigTime {
+				validAtSig = (v.NotBefore.IsZero() || !v.SigningTime.Before(v.NotBefore)) &&
+					(v.NotAfter.IsZero() || !v.SigningTime.After(v.NotAfter))
+			}
 
 			kit.Block(c, ui.Column(c), tone).FillWidth().Padding(th.Space(2.5), th.Space(3)).Gap(th.Space(1)).Children(func() {
 				ui.Row(c).FillWidth().Gap(th.Space(2)).AlignItems(ui.Center).Children(func() {
 					ui.Icon(c, icons.Get(icon)).Size(theme.IconSm, theme.IconSm).TextColor(statusColor)
 					kit.Text(c, i18n.T(statusKey), t.Text.Sm).FontWeight(500).TextColor(statusColor).Grow(1).Shrink(1)
-					if expired {
-						kit.BadgeWith(c, i18n.T("smime.cert.status_expired"), kit.BadgeOpts{Tone: kit.BadgeDanger})
-					}
 				})
 				if (v.Verified || v.Trusted) && len(v.Chain) > 1 && v.Chain[0].Role == "root" {
 					kit.Text(c, i18n.Tf("smime.cert.trusted_via_root", cmp.Or(v.Chain[0].Subject, v.Chain[0].Issuer)), t.Text.Xs).TextColor(statusColor).Selectable()
@@ -303,12 +347,34 @@ func (a *App) smimeCertDialog(c *ui.Context) {
 			})
 
 			kit.Block(c, ui.Column(c), kit.ToneOutline).FillWidth().Padding(th.Space(2.5), th.Space(3)).Gap(th.Space(2.5)).Children(func() {
-				certDetailRow(c, i18n.T("smime.cert.field_subject"), cmp.Or(v.Subject, firstEmail), v.SubjectDN, false)
+				certDNDetailRow(c, i18n.T("smime.cert.field_subject"), cmp.Or(v.Subject, firstEmail), v.SubjectAttrs, v.SubjectDN)
 				if len(v.Emails) > 0 {
 					certDetailRow(c, i18n.T("smime.cert.field_email"), strings.Join(v.Emails, ", "), "", false)
 				}
-				certDetailRow(c, i18n.T("smime.cert.field_issuer"), v.Issuer, v.IssuerDN, false)
-				certDetailRow(c, i18n.T("smime.cert.field_validity"), formatCertValidity(v.NotBefore, v.NotAfter), "", false)
+				certDNDetailRow(c, i18n.T("smime.cert.field_issuer"), v.Issuer, v.IssuerAttrs, v.IssuerDN)
+				if validity := formatCertValidity(v.NotBefore, v.NotAfter); validity != "" {
+					ui.Column(c).FillWidth().Gap(th.Space(0.5)).Children(func() {
+						kit.Text(c, i18n.T("smime.cert.field_validity"), t.Text.Xs).TextColor(t.Muted)
+						ui.Row(c).FillWidth().Wrap().Gap(th.Space(1.5)).AlignItems(ui.Center).Children(func() {
+							kit.Text(c, validity, t.Text.Xs).FontWeight(500).Selectable()
+							if expired {
+								badgeTone := kit.BadgeDanger
+								if hasSigTime && validAtSig {
+									badgeTone = kit.BadgeWarning
+								}
+								kit.BadgeWith(c, i18n.T("smime.cert.status_expired"), kit.BadgeOpts{Tone: badgeTone})
+							}
+						})
+						if hasSigTime {
+							sigTimeStr := v.SigningTime.Local().Format("2006-01-02 15:04")
+							if !validAtSig {
+								kit.Text(c, i18n.Tf("smime.cert.invalid_at_signing", sigTimeStr), t.Text.Xs).TextColor(t.DangerText).Selectable()
+							} else if expired {
+								kit.Text(c, i18n.Tf("smime.cert.valid_at_signing", sigTimeStr), t.Text.Xs).TextColor(t.Muted).Selectable()
+							}
+						}
+					})
+				}
 				certDetailRow(c, i18n.T("smime.cert.field_source"), v.SourceLabel, "", false)
 			})
 
@@ -611,7 +677,9 @@ func (a *App) smimeSigDialog(c *ui.Context) {
 		if v.SignerCert != nil {
 			cert := *v.SignerCert
 			if kit.Button(c, i18n.T("smime.cert.view"), kit.ButtonOpts{Variant: kit.Outline}).Clicked() {
-				a.openSMIMECertDialog(certViewFromDetails(cert, v.Verified, v.Verified, "", v.StatusError, v.Chain))
+				cv := certViewFromDetails(cert, v.Verified, v.Verified, "", v.StatusError, v.Chain)
+				cv.SigningTime = v.SigningTime
+				a.openSMIMECertDialog(cv)
 			}
 		}
 		if kit.Button(c, i18n.T("common.close"), kit.ButtonOpts{}).AutoFocus().Clicked() {

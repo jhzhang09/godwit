@@ -17,14 +17,21 @@ import {
   DialogTitle,
 } from "@/components/dialog";
 import { Badge } from "@/components/ui/badge";
-import type { ComposeSMIMECert, ComposeSMIMECertChainNode, ComposeSMIMEIdentity } from "@/mygo";
+import type {
+  ComposeSMIMECert,
+  ComposeSMIMECertChainNode,
+  ComposeSMIMECertDNAttr,
+  ComposeSMIMEIdentity,
+} from "@/mygo";
 import type { T } from "@/shared/i18n";
 
 export interface SmimeCertView {
   subject: string;
   subjectDn?: string;
+  subjectAttrs?: ComposeSMIMECertDNAttr[];
   issuer: string;
   issuerDn?: string;
+  issuerAttrs?: ComposeSMIMECertDNAttr[];
   emails: string[];
   serialNumber?: string;
   notBefore: number;
@@ -75,8 +82,10 @@ export function certViewFromRecipientCert(c: ComposeSMIMECert, t: T): SmimeCertV
   return {
     subject: c.subject || c.address,
     subjectDn: c.subjectDn,
+    subjectAttrs: c.subjectAttrs,
     issuer: c.issuer,
     issuerDn: c.issuerDn,
+    issuerAttrs: c.issuerAttrs,
     emails: c.emails?.length ? c.emails : c.address ? [c.address] : [],
     serialNumber: c.serialNumber,
     notBefore: c.notBefore,
@@ -103,8 +112,10 @@ export function certViewFromOwnIdentity(
   return {
     subject: id.subject || from,
     subjectDn: id.subjectDn,
+    subjectAttrs: id.subjectAttrs,
     issuer: id.issuer,
     issuerDn: id.issuerDn,
+    issuerAttrs: id.issuerAttrs,
     emails: id.emails?.length ? id.emails : from ? [from] : [],
     serialNumber: id.serialNumber,
     notBefore: id.notBefore,
@@ -120,6 +131,53 @@ export function certViewFromOwnIdentity(
     trustErr: ownErr,
     chain: id.chain,
   };
+}
+
+function DNDetailRow({
+  label,
+  value,
+  attrs,
+  fallbackDn,
+}: {
+  label: string;
+  value?: string;
+  attrs?: ComposeSMIMECertDNAttr[];
+  fallbackDn?: string;
+}) {
+  if (!value && !attrs?.length && !fallbackDn) return null;
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="text-[11px] text-muted-foreground">{label}</div>
+      {value && <div className="break-all text-xs font-medium select-text">{value}</div>}
+      {attrs && attrs.length > 0 ? (
+        <div className="flex flex-col gap-0.5">
+          {(() => {
+            const seen = new Map<string, number>();
+            return attrs.map((attr) => {
+              const base = `${attr.key}=${attr.value}`;
+              const count = (seen.get(base) ?? 0) + 1;
+              seen.set(base, count);
+              return (
+                <div key={`${base}#${count}`} className="flex items-start gap-2 text-[11px]">
+                  <span className="min-w-24 shrink-0 font-mono text-muted-foreground select-text">
+                    {attr.key}
+                  </span>
+                  <span className="break-all text-muted-foreground select-text">{attr.value}</span>
+                </div>
+              );
+            });
+          })()}
+        </div>
+      ) : (
+        fallbackDn &&
+        fallbackDn !== value && (
+          <div className="break-all text-[11px] text-muted-foreground select-text">
+            {fallbackDn}
+          </div>
+        )
+      )}
+    </div>
+  );
 }
 
 function DetailRow({
@@ -235,11 +293,6 @@ export function SmimeCertDialog({
               <span className="flex-1 font-medium">
                 {t(cert.trusted ? "smime.cert.status_trusted" : "smime.cert.status_untrusted")}
               </span>
-              {expired && (
-                <Badge variant="destructive" className="h-4 px-1.5 text-[10px]">
-                  {t("smime.cert.status_expired")}
-                </Badge>
-              )}
             </div>
             {rootTrustedNode && (
               <div className="text-[11px] opacity-90 select-text">
@@ -255,20 +308,36 @@ export function SmimeCertDialog({
           </div>
 
           <div className="flex flex-col gap-2.5 rounded-lg border border-border/70 bg-background/60 p-3">
-            <DetailRow
+            <DNDetailRow
               label={t("smime.cert.field_subject")}
               value={cert.subject || cert.emails[0]}
-              sub={cert.subjectDn}
+              attrs={cert.subjectAttrs}
+              fallbackDn={cert.subjectDn}
             />
             {cert.emails.length > 0 && (
               <DetailRow label={t("smime.cert.field_email")} value={cert.emails.join(", ")} />
             )}
-            <DetailRow
+            <DNDetailRow
               label={t("smime.cert.field_issuer")}
               value={cert.issuer}
-              sub={cert.issuerDn}
+              attrs={cert.issuerAttrs}
+              fallbackDn={cert.issuerDn}
             />
-            <DetailRow label={t("smime.cert.field_validity")} value={validity} />
+            {validity && (
+              <div className="flex flex-col gap-0.5">
+                <div className="text-[11px] text-muted-foreground">
+                  {t("smime.cert.field_validity")}
+                </div>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="break-all text-xs font-medium select-text">{validity}</span>
+                  {expired && (
+                    <Badge variant="destructive" className="h-4 px-1.5 text-[10px]">
+                      {t("smime.cert.status_expired")}
+                    </Badge>
+                  )}
+                </div>
+              </div>
+            )}
             <DetailRow label={t("smime.cert.field_source")} value={cert.sourceLabel} />
           </div>
 

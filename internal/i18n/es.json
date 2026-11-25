@@ -2495,6 +2495,8 @@
   "smime_cert_status_trusted": "Certificado S/MIME de confianza",
   "smime_cert_status_untrusted": "El sistema no confía en este certificado",
   "smime_cert_status_expired": "Caducado",
+  "smime_cert_valid_at_signing": "Válido en el momento de la firma ({arg1})",
+  "smime_cert_invalid_at_signing": "Fuera del período de validez al firmar ({arg1})",
   "smime_cert_chain": "Cadena de certificados",
   "smime_cert_role_root": "CA raíz",
   "smime_cert_role_intermediate": "CA intermedia",

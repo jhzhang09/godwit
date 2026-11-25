@@ -291,12 +291,136 @@ func ParseCertificate(der []byte) (*smx509.Certificate, error) {
 	return c, nil
 }
 
+// CertDNAttr represents one attribute (RDN entry) of an X.509 Distinguished Name.
+type CertDNAttr struct {
+	Key   string // RFC 4514 / RFC 4519 / RFC 2985 short name, or dotted OID if unknown
+	Value string // display-safe value (control characters explicitly formatted)
+}
+
+func dnOIDName(oid asn1.ObjectIdentifier) string {
+	switch oid.String() {
+	case "2.5.4.3":
+		return "CN"
+	case "1.2.840.113549.1.9.1":
+		return "emailAddress"
+	case "2.5.4.11":
+		return "OU"
+	case "2.5.4.10":
+		return "O"
+	case "2.5.4.7":
+		return "L"
+	case "2.5.4.8":
+		return "ST"
+	case "2.5.4.6":
+		return "C"
+	case "2.5.4.9":
+		return "STREET"
+	case "2.5.4.17":
+		return "POSTALCODE"
+	case "2.5.4.5":
+		return "SERIALNUMBER"
+	case "2.5.4.12":
+		return "TITLE"
+	case "2.5.4.4":
+		return "SN"
+	case "2.5.4.42":
+		return "GN"
+	case "2.5.4.97":
+		return "organizationIdentifier"
+	case "0.9.2342.19200300.100.1.25":
+		return "DC"
+	case "0.9.2342.19200300.100.1.1":
+		return "UID"
+	default:
+		return oid.String()
+	}
+}
+
+func dnAttrPriority(key string) int {
+	switch key {
+	case "CN":
+		return 1
+	case "emailAddress":
+		return 2
+	case "OU":
+		return 3
+	case "O":
+		return 4
+	case "TITLE":
+		return 5
+	case "STREET":
+		return 6
+	case "L":
+		return 7
+	case "ST":
+		return 8
+	case "POSTALCODE":
+		return 9
+	case "C":
+		return 10
+	case "DC":
+		return 11
+	case "UID":
+		return 12
+	case "SERIALNUMBER":
+		return 13
+	case "SN":
+		return 14
+	case "GN":
+		return 15
+	case "organizationIdentifier":
+		return 16
+	default:
+		return 100
+	}
+}
+
+func extractDNAttrs(name pkix.Name) []CertDNAttr {
+	raw := name.Names
+	if len(raw) == 0 {
+		for _, rdn := range name.ToRDNSequence() {
+			raw = append(raw, rdn...)
+		}
+	}
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make([]CertDNAttr, 0, len(raw))
+	for _, atv := range raw {
+		val := formatCertDisplayString(fmt.Sprint(atv.Value))
+		if val == "" {
+			continue
+		}
+		out = append(out, CertDNAttr{
+			Key:   dnOIDName(atv.Type),
+			Value: val,
+		})
+	}
+	slices.SortStableFunc(out, func(a, b CertDNAttr) int {
+		return dnAttrPriority(a.Key) - dnAttrPriority(b.Key)
+	})
+	return out
+}
+
+func formatDNFromAttrs(attrs []CertDNAttr, fallback string) string {
+	if len(attrs) == 0 {
+		return formatCertDisplayString(fallback)
+	}
+	parts := make([]string, len(attrs))
+	for i, a := range attrs {
+		parts[i] = a.Key + "=" + a.Value
+	}
+	return strings.Join(parts, ", ")
+}
+
 // CertDetails summarizes user-inspectable metadata extracted from an X.509 certificate.
 type CertDetails struct {
 	Subject       string
 	SubjectDN     string
+	SubjectAttrs  []CertDNAttr
 	Issuer        string
 	IssuerDN      string
+	IssuerAttrs   []CertDNAttr
 	Emails        []string
 	SerialNumber  string
 	NotBefore     time.Time
@@ -515,11 +639,15 @@ func InspectCertificate(cert *smx509.Certificate) CertDetails {
 		sha1Hex = hex.EncodeToString(s1[:])
 	}
 
+	subjectAttrs := extractDNAttrs(cert.Subject)
+	issuerAttrs := extractDNAttrs(cert.Issuer)
 	return CertDetails{
 		Subject:       CertDisplaySubject(cert),
-		SubjectDN:     formatCertDisplayString(cert.Subject.String()),
+		SubjectDN:     formatDNFromAttrs(subjectAttrs, cert.Subject.String()),
+		SubjectAttrs:  subjectAttrs,
 		Issuer:        issuer,
-		IssuerDN:      formatCertDisplayString(cert.Issuer.String()),
+		IssuerDN:      formatDNFromAttrs(issuerAttrs, cert.Issuer.String()),
+		IssuerAttrs:   issuerAttrs,
 		Emails:        CertDisplayEmails(cert),
 		SerialNumber:  formatSerialHex(cert.SerialNumber),
 		NotBefore:     cert.NotBefore,

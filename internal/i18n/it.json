@@ -2495,6 +2495,8 @@
   "smime_cert_status_trusted": "Certificato S/MIME attendibile",
   "smime_cert_status_untrusted": "Non considerato attendibile dal sistema",
   "smime_cert_status_expired": "Scaduto",
+  "smime_cert_valid_at_signing": "Valido al momento della firma ({arg1})",
+  "smime_cert_invalid_at_signing": "Fuori dal periodo di validità alla firma ({arg1})",
   "smime_cert_chain": "Catena di certificati",
   "smime_cert_role_root": "CA radice",
   "smime_cert_role_intermediate": "CA intermedia",

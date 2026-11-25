@@ -2523,6 +2523,8 @@
   "smime_cert_status_trusted": "受信任的 S/MIME 证书",
   "smime_cert_status_untrusted": "未通过系统信任验证",
   "smime_cert_status_expired": "已过期",
+  "smime_cert_valid_at_signing": "签名时在有效期内（{arg1}）",
+  "smime_cert_invalid_at_signing": "签名时已超出有效期（{arg1}）",
   "smime_cert_chain": "证书链",
   "smime_cert_role_root": "根证书",
   "smime_cert_role_intermediate": "中间证书",
