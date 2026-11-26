@@ -2679,5 +2679,9 @@
   "smime_sig_detail_field_digest": "摘要算法",
   "smime_sig_detail_field_sigalg": "签名算法",
   "smime_sig_detail_field_time": "签名时间",
-  "smime_sig_detail_view": "查看验签详情"
+  "smime_sig_detail_view": "查看验签详情",
+  "settings_quote_style": "回复引用样式",
+  "settings_quote_style_help": "回复和转发时如何排版原邮件内容",
+  "settings_quote_style_indented": "竖线缩进",
+  "settings_quote_style_outlook": "顶部叠加 (Outlook)"
 }

@@ -2679,5 +2679,9 @@
   "smime_sig_detail_field_digest": "摘要演算法",
   "smime_sig_detail_field_sigalg": "簽章演算法",
   "smime_sig_detail_field_time": "簽章時間",
-  "smime_sig_detail_view": "檢視驗章詳情"
+  "smime_sig_detail_view": "檢視驗章詳情",
+  "settings_quote_style": "回覆引用樣式",
+  "settings_quote_style_help": "回覆和轉寄時如何排版原郵件內容",
+  "settings_quote_style_indented": "豎線縮排",
+  "settings_quote_style_outlook": "頂部疊加 (Outlook)"
 }

@@ -440,7 +440,7 @@ function RichEditor(props: {
                 editor.tf.insertText("\n");
               }
             }}
-            className="min-h-full px-4 py-2.5 text-sm leading-[1.5] text-foreground outline-none [&_a]:text-primary [&_a]:underline"
+            className="min-h-full px-4 py-2.5 text-sm leading-[1.5] text-foreground outline-none [&_a]:text-[#0b57d0] dark:[&_a]:text-[#8ab4f8] [&_a]:underline"
           />
         </div>
       </div>

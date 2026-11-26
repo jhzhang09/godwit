@@ -2679,5 +2679,9 @@
   "compose_image_remove": "Remove image",
   "compose_image_too_large": "Image exceeds 5 MB limit or is unsupported: {arg1}",
   "reader_attachments_preview": "Preview",
-  "reader_attachments_open": "Open"
+  "reader_attachments_open": "Open",
+  "settings_quote_style": "Estilo de cita al responder",
+  "settings_quote_style_help": "Cómo se da formato al mensaje original en respuestas y reenvíos",
+  "settings_quote_style_indented": "Cita con sangría",
+  "settings_quote_style_outlook": "Encabezado apilado (Outlook)"
 }

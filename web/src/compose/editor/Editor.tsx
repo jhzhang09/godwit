@@ -372,7 +372,7 @@ export function Editor(props: {
               const v = editor.children;
               onCmdK({ text: toText(v), start: offsetOf(v, a), end: offsetOf(v, b) });
             }}
-            className="text-sm leading-[1.75] outline-none [&>*+*]:mt-3 [&_a]:text-primary [&_a]:underline [&_blockquote]:border-l-2 [&_blockquote]:pl-3 [&_blockquote]:text-muted-foreground [&_ol]:list-decimal [&_ol]:pl-6 [&_ul]:list-disc [&_ul]:pl-6"
+            className="text-sm leading-[1.75] outline-none [&>*+*]:mt-3 [&_a]:text-[#0b57d0] dark:[&_a]:text-[#8ab4f8] [&_a]:underline [&_blockquote]:border-l-2 [&_blockquote]:pl-3 [&_blockquote]:text-muted-foreground [&_ol]:list-decimal [&_ol]:pl-6 [&_ul]:list-disc [&_ul]:pl-6"
           />
         </div>
         {popover && slot && createPortal(popover, slot)}

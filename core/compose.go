@@ -217,8 +217,8 @@ func (s *Service) prepareDraftSource(ctx context.Context, accountID int64, mode 
 		src.subject = mail.ReplySubject(orig.Subject)
 	}
 	src.subject = defuseRefs(src.subject) // a reference planted in the mail would block sending the reply
-	// The marker blockquote only marks the quote (attribution line included)
-	// as read-only for Wit; it is styled away so the quote is not indented twice.
+	// The marker wraps the quote (attribution/header included) as read-only for
+	// Wit; indented mode styles away the outer blockquote so it does not indent twice.
 	lang := cmp.Or(st.ReadingLanguage, st.UILanguage, s.opts.SystemLanguage)
 	var q string
 	if withImages {
@@ -226,11 +226,15 @@ func (s *Service) prepareDraftSource(ctx context.Context, accountID int64, mode 
 		if err != nil {
 			return draftSource{}, err
 		}
-		q, src.images = mail.QuoteHTMLWith(orig, lang, inlineMap)
+		q, src.images = mail.QuoteHTMLWithStyle(orig, lang, st.QuoteStyle, inlineMap)
 	} else {
-		q = mail.QuoteHTMLIn(orig, lang)
+		q = mail.QuoteHTMLInStyle(orig, lang, st.QuoteStyle)
 	}
-	src.quoteBlock = `<p></p><blockquote data-godwit="quote" style="margin:0;padding:0;border:0">` + defuseRefs(q) + "</blockquote>"
+	if st.QuoteStyle == QuoteStyleOutlook {
+		src.quoteBlock = `<p></p><div data-godwit="quote">` + defuseRefs(q) + "</div>"
+	} else {
+		src.quoteBlock = `<p></p><blockquote data-godwit="quote" style="margin:0;padding:0;border:0">` + defuseRefs(q) + "</blockquote>"
+	}
 	return src, nil
 }
 

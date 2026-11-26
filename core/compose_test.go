@@ -94,6 +94,50 @@ func TestReplyAllDraft(t *testing.T) {
 	assert.Less(t, strings.Index(d.HTML, "Godwit"), strings.Index(d.HTML, `data-godwit="quote"`), "signature above the quote")
 }
 
+func TestDraftOutlookQuoteStyle(t *testing.T) {
+	e := newSendEnv(t, false)
+	e.put(t, "INBOX", eml("o@x", "Bob <bob@example.com>", "alice@example.com, Carol <carol@example.com>", "plan",
+		day, "the plan", "Cc: dan@example.com"))
+	e.sync(t)
+
+	st, err := e.s.GetSettings(bg)
+	require.NoError(t, err)
+	st.QuoteStyle = QuoteStyleOutlook
+	_, err = e.s.SetSettings(bg, st)
+	require.NoError(t, err)
+
+	srcID := e.idOf(t, "o@x")
+	for _, mode := range []string{"reply", "reply_all", "forward"} {
+		d, err := e.s.NewDraft(bg, e.acc.ID, mode, srcID)
+		require.NoError(t, err, mode)
+		assert.Contains(t, d.HTML, `<div data-godwit="quote">`, mode)
+		assert.NotContains(t, d.HTML, `<blockquote data-godwit="quote"`, mode)
+		assert.NotContains(t, d.HTML, "<blockquote", mode)
+		assert.Contains(t, d.HTML, `<b>发件人:</b> Bob &lt;<a href="mailto:bob@example.com">bob@example.com</a>&gt;`, mode)
+		assert.Contains(t, d.HTML, "<b>发送时间:</b>", mode)
+		assert.Contains(t, d.HTML, `<b>收件人:</b> <a href="mailto:alice@example.com">alice@example.com</a>; Carol &lt;<a href="mailto:carol@example.com">carol@example.com</a>&gt;`, mode)
+		assert.Contains(t, d.HTML, `<b>抄送:</b> <a href="mailto:dan@example.com">dan@example.com</a>`, mode)
+		assert.Contains(t, d.HTML, "<b>主题:</b> plan", mode)
+		assert.Contains(t, d.HTML, "the plan", mode)
+
+		_, quote, _ := mail.SplitDraft(d.HTML)
+		assert.Contains(t, quote, `<div data-godwit="quote">`, mode)
+		shown, err := e.s.QuoteShown(bg, d.ID, quote)
+		require.NoError(t, err, mode)
+		assert.Contains(t, shown, "border-top: 1.0pt solid #e1e1e1", mode)
+		assert.Contains(t, shown, `href="mailto:bob@example.com"`, mode)
+		assert.NotContains(t, shown, `data-godwit="quote"`, mode)
+	}
+
+	st.QuoteStyle = QuoteStyleIndented
+	_, err = e.s.SetSettings(bg, st)
+	require.NoError(t, err)
+	indented, err := e.s.NewDraft(bg, e.acc.ID, "reply", srcID)
+	require.NoError(t, err)
+	assert.Contains(t, indented.HTML, `<blockquote data-godwit="quote" style="margin: 0; padding: 0; border: 0">`)
+	assert.Contains(t, indented.HTML, "写道：")
+}
+
 // A sent reply has new text, signature, then the quote, in its HTML and text part.
 func TestReplySignatureAboveQuote(t *testing.T) {
 	e := newSendEnv(t, false)

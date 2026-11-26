@@ -249,7 +249,9 @@ function markOutlookQuote(wrap: HTMLElement): HTMLElement | null {
   // The older mails follow the header: a ruled box of "Label: value" lines at the very end (a
   // signature) has nothing after it, and is no reply header.
   let rest = "";
-  for (let n = start.nextSibling; n; n = n.nextSibling) rest += n.textContent ?? "";
+  for (let cur: Element | null = head; cur; cur = cur === start ? null : cur.parentElement) {
+    for (let n = cur.nextSibling; n; n = n.nextSibling) rest += n.textContent ?? "";
+  }
   if (rest.trim() === "" && head !== web) return null;
   const box = wrap.ownerDocument.createElement("div");
   box.setAttribute("data-godwit-outlook-quote", "");

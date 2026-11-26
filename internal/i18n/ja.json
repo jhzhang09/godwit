@@ -2679,5 +2679,9 @@
   "compose_image_remove": "Remove image",
   "compose_image_too_large": "Image exceeds 5 MB limit or is unsupported: {arg1}",
   "reader_attachments_preview": "Preview",
-  "reader_attachments_open": "Open"
+  "reader_attachments_open": "Open",
+  "settings_quote_style": "返信の引用スタイル",
+  "settings_quote_style_help": "返信や転送時に元のメールをどのように整形するか",
+  "settings_quote_style_indented": "縦線インデント",
+  "settings_quote_style_outlook": "上部ヘッダー重ね (Outlook)"
 }

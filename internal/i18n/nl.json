@@ -2679,5 +2679,9 @@
   "compose_image_remove": "Remove image",
   "compose_image_too_large": "Image exceeds 5 MB limit or is unsupported: {arg1}",
   "reader_attachments_preview": "Preview",
-  "reader_attachments_open": "Open"
+  "reader_attachments_open": "Open",
+  "settings_quote_style": "Citaatstijl bij beantwoorden",
+  "settings_quote_style_help": "Hoe het oorspronkelijke bericht wordt opgemaakt bij beantwoorden en doorsturen",
+  "settings_quote_style_indented": "Ingesprongen citaat",
+  "settings_quote_style_outlook": "Gestapelde koptekst (Outlook)"
 }

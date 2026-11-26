@@ -4649,5 +4649,9 @@
   "smime_sig_detail_field_digest": "Digest algorithm",
   "smime_sig_detail_field_sigalg": "Signature algorithm",
   "smime_sig_detail_field_time": "Signing time",
-  "smime_sig_detail_view": "Verification details"
+  "smime_sig_detail_view": "Verification details",
+  "settings_quote_style": "Reply quote style",
+  "settings_quote_style_help": "How replies and forwards format the original message",
+  "settings_quote_style_indented": "Indented quote",
+  "settings_quote_style_outlook": "Stacked header (Outlook)"
 }

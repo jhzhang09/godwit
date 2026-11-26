@@ -2679,5 +2679,9 @@
   "compose_image_remove": "Remove image",
   "compose_image_too_large": "Image exceeds 5 MB limit or is unsupported: {arg1}",
   "reader_attachments_preview": "Preview",
-  "reader_attachments_open": "Open"
+  "reader_attachments_open": "Open",
+  "settings_quote_style": "Stile citazione nelle risposte",
+  "settings_quote_style_help": "Come formattare il messaggio originale nelle risposte e negli inoltri",
+  "settings_quote_style_indented": "Citazione rientrata",
+  "settings_quote_style_outlook": "Intestazione impilata (Outlook)"
 }

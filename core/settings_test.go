@@ -435,11 +435,13 @@ func TestSettingsLayout(t *testing.T) {
 	assert.Equal(t, []string{"views", "labels", "accounts"}, SidebarOrder(st), "the default order")
 
 	st.SidebarOrder, st.ListRowOrder, st.ReaderWidth = "accounts,labels,views", ListRowSubject, ReaderWidthWide
+	st.QuoteStyle = QuoteStyleOutlook
 	got, err := s.SetSettings(t.Context(), st)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"accounts", "labels", "views"}, SidebarOrder(got))
 	assert.Equal(t, ListRowSubject, got.ListRowOrder)
 	assert.Equal(t, ReaderWidthWide, got.ReaderWidth)
+	assert.Equal(t, QuoteStyleOutlook, got.QuoteStyle)
 
 	for name, mod := range map[string]func(*Settings){
 		"a section missing":  func(x *Settings) { x.SidebarOrder = "accounts,labels" },
@@ -447,6 +449,7 @@ func TestSettingsLayout(t *testing.T) {
 		"an unknown section": func(x *Settings) { x.SidebarOrder = "accounts,labels,folders" },
 		"list rows":          func(x *Settings) { x.ListRowOrder = "date" },
 		"reader width":       func(x *Settings) { x.ReaderWidth = "huge" },
+		"quote style":        func(x *Settings) { x.QuoteStyle = "fancy" },
 	} {
 		in := got
 		mod(&in)

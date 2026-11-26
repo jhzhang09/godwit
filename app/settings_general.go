@@ -337,6 +337,17 @@ func (p *settingsPage) generalView(c *ui.Context) {
 		sw(&st.ThreadView, i18n.T("settings.thread_view"), i18n.T("settings.thread_view.help")),
 		sw(&st.ThreadCollapse, i18n.T("settings.thread_collapse"), i18n.T("settings.thread_collapse.help")),
 		sw(&st.CollapseQuotes, i18n.T("settings.collapse_quotes"), i18n.T("settings.collapse_quotes.help")),
+		sel(i18n.T("settings.quote_style"), i18n.T("settings.quote_style.help"), func() ui.Element {
+			cur := cmp.Or(st.QuoteStyle, core.QuoteStyleIndented)
+			el := settingSelect(c, i18n.T("settings.quote_style"), &cur, []kit.Option[string]{
+				{Value: core.QuoteStyleIndented, Label: i18n.T("settings.quote_style.indented")},
+				{Value: core.QuoteStyleOutlook, Label: i18n.T("settings.quote_style.outlook")},
+			})
+			if cur != cmp.Or(st.QuoteStyle, core.QuoteStyleIndented) {
+				st.QuoteStyle = cur
+			}
+			return el
+		}),
 		func() {
 			if !st.ThreadCollapse {
 				return

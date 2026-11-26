@@ -2679,5 +2679,9 @@
   "compose_image_remove": "Remove image",
   "compose_image_too_large": "Image exceeds 5 MB limit or is unsupported: {arg1}",
   "reader_attachments_preview": "Preview",
-  "reader_attachments_open": "Open"
+  "reader_attachments_open": "Open",
+  "settings_quote_style": "Yanıt alıntı stili",
+  "settings_quote_style_help": "Yanıt ve iletmelerde özgün iletinin nasıl biçimlendirileceği",
+  "settings_quote_style_indented": "Girintili alıntı",
+  "settings_quote_style_outlook": "Üst üste başlık (Outlook)"
 }

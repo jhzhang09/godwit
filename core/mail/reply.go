@@ -65,23 +65,38 @@ func FromSelf(from, replyTo, self string) bool {
 // left rail and spacing in external clients and uncollapsed readers.
 const quoteBlockquoteStyle = "margin: 8px 0; padding-left: 12px; border-left: 2px solid rgba(127, 127, 127, 0.28)"
 
+// Quote formatting styles matching core.Settings.QuoteStyle.
+const (
+	QuoteStyleIndented = "indented"
+	QuoteStyleOutlook  = "outlook"
+)
+
 // QuoteHTML returns the "on {date}, {from} wrote:" line plus the original in a blockquote.
 func QuoteHTML(orig *Parsed) string { return QuoteHTMLIn(orig, "") }
 
 // QuoteHTMLIn formats QuoteHTML with the attribution line in lang ("" or zh-Hans defaults to Simplified Chinese).
 func QuoteHTMLIn(orig *Parsed, lang string) string {
+	return QuoteHTMLInStyle(orig, lang, QuoteStyleIndented)
+}
+
+// QuoteHTMLInStyle formats QuoteHTML in lang using style (QuoteStyleIndented or QuoteStyleOutlook).
+func QuoteHTMLInStyle(orig *Parsed, lang, style string) string {
 	body := StripMarkers(SanitizeCompose(InlineQuoteCSS(orig.HTML))) // the quoted mail's own markers are content
 	if orig.HTML == "" {
 		body = strings.ReplaceAll(html.EscapeString(strings.ReplaceAll(orig.Text, "\r\n", "\n")), "\n", "<br>")
 	}
-	date, from := i18n.FullDateIn(orig.Date, cmp.Or(lang, "zh-Hans"))+orig.Date.Format(" 15:04"), html.EscapeString(orig.From)
-	return "<p>" + quoteLead(lang, date, from) + `</p><blockquote style="` + quoteBlockquoteStyle + `">` + body + "</blockquote>"
+	return formatQuoteHTML(orig, lang, style, body)
 }
 
 // QuoteHTMLWith formats the reply/forward quote with attribution in lang,
 // inlining safe <style> rules and extracting valid cid: (from inline) and
 // data:image/... images as content-addressed quote-<hash>@godwit attachments.
 func QuoteHTMLWith(orig *Parsed, lang string, inline map[string]Attachment) (string, []Attachment) {
+	return QuoteHTMLWithStyle(orig, lang, QuoteStyleIndented, inline)
+}
+
+// QuoteHTMLWithStyle formats QuoteHTMLWith in lang using style (QuoteStyleIndented or QuoteStyleOutlook).
+func QuoteHTMLWithStyle(orig *Parsed, lang, style string, inline map[string]Attachment) (string, []Attachment) {
 	var body string
 	var images []Attachment
 	if orig.HTML == "" {
@@ -89,8 +104,129 @@ func QuoteHTMLWith(orig *Parsed, lang string, inline map[string]Attachment) (str
 	} else {
 		body, images = PrepareQuoteHTML(orig.HTML, inline)
 	}
-	date, from := i18n.FullDateIn(orig.Date, cmp.Or(lang, "zh-Hans"))+orig.Date.Format(" 15:04"), html.EscapeString(orig.From)
-	return "<p>" + quoteLead(lang, date, from) + `</p><blockquote style="` + quoteBlockquoteStyle + `">` + body + "</blockquote>", images
+	return formatQuoteHTML(orig, lang, style, body), images
+}
+
+func formatQuoteHTML(orig *Parsed, lang, style, body string) string {
+	if style == QuoteStyleOutlook {
+		return formatOutlookQuoteHTML(orig, lang, body)
+	}
+	date, from := i18n.FullDateIn(orig.Date, cmp.Or(lang, "zh-Hans"))+orig.Date.Format(" 15:04"), formatAddressHTML(orig.From)
+	return "<p>" + quoteLead(lang, date, from) + `</p><blockquote style="` + quoteBlockquoteStyle + `">` + body + "</blockquote>"
+}
+
+func formatOutlookQuoteHTML(orig *Parsed, lang, body string) string {
+	fromLbl, sentLbl, toLbl, ccLbl, subjLbl := outlookLabels(lang)
+	var lines []string
+	addHTML := func(lbl, val string) {
+		if val = strings.TrimSpace(val); val != "" {
+			lines = append(lines, "<b>"+lbl+":</b> "+val)
+		}
+	}
+	addText := func(lbl, val string) {
+		if val = strings.TrimSpace(val); val != "" {
+			lines = append(lines, "<b>"+lbl+":</b> "+html.EscapeString(val))
+		}
+	}
+	addHTML(fromLbl, formatAddressHTML(orig.From))
+	if !orig.Date.IsZero() {
+		addText(sentLbl, i18n.FullDateIn(orig.Date, cmp.Or(lang, "zh-Hans"))+orig.Date.Format(" 15:04"))
+	}
+	addHTML(toLbl, formatAddressListHTML(orig.To, "; "))
+	addHTML(ccLbl, formatAddressListHTML(orig.Cc, "; "))
+	addText(subjLbl, orig.Subject)
+	return `<div style="border-top: 1.0pt solid #e1e1e1; padding-top: 8px; margin-top: 12px"><p style="margin: 0">` +
+		strings.Join(lines, "<br>") +
+		`</p></div><div style="margin-top: 12px">` + body + "</div>"
+}
+
+func formatAddressListHTML(items []string, sep string) string {
+	var out []string
+	for _, item := range items {
+		if formatted := formatAddressHTML(item); formatted != "" {
+			out = append(out, formatted)
+		}
+	}
+	return strings.Join(out, sep)
+}
+
+func formatAddressHTML(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return ""
+	}
+	name, addr := splitDisplayAddress(s)
+	if addr == "" {
+		return html.EscapeString(s)
+	}
+	escAddr := html.EscapeString(addr)
+	link := `<a href="mailto:` + escAddr + `">` + escAddr + `</a>`
+	if name == "" {
+		return link
+	}
+	return html.EscapeString(name) + " &lt;" + link + "&gt;"
+}
+
+func splitDisplayAddress(s string) (name, addr string) {
+	if a, err := mail.ParseAddress(s); err == nil && safeMailtoAddr(a.Address) {
+		return strings.TrimSpace(a.Name), strings.TrimSpace(a.Address)
+	}
+	if i := strings.LastIndex(s, "<"); i >= 0 && strings.HasSuffix(s, ">") {
+		inner := strings.TrimSpace(s[i+1 : len(s)-1])
+		if a, err := mail.ParseAddress(inner); err == nil && safeMailtoAddr(a.Address) {
+			n := strings.TrimSpace(s[:i])
+			if len(n) >= 2 && strings.HasPrefix(n, `"`) && strings.HasSuffix(n, `"`) {
+				n = strings.TrimSpace(n[1 : len(n)-1])
+			}
+			return n, strings.TrimSpace(a.Address)
+		}
+	}
+	return "", ""
+}
+
+func safeMailtoAddr(addr string) bool {
+	return addr != "" &&
+		strings.Contains(addr, "@") &&
+		!strings.ContainsAny(addr, "?#\"'<> \t\r\n") &&
+		openable("mailto:"+addr)
+}
+
+func outlookLabels(lang string) (from, sent, to, cc, subject string) {
+	t := strings.ToLower(strings.TrimSpace(lang))
+	if strings.HasPrefix(t, "zh-tw") || strings.HasPrefix(t, "zh-hant") || strings.HasPrefix(t, "zh-hk") || strings.HasPrefix(t, "zh-mo") {
+		return "寄件者", "傳送時間", "收件者", "副本", "主旨"
+	}
+	base, _, _ := strings.Cut(t, "-")
+	switch base {
+	case "", "zh":
+		return "发件人", "发送时间", "收件人", "抄送", "主题"
+	case "ja":
+		return "差出人", "送信日時", "宛先", "CC", "件名"
+	case "ko":
+		return "보낸 사람", "보낸 날짜", "받는 사람", "참조", "제목"
+	case "de":
+		return "Von", "Gesendet", "An", "Cc", "Betreff"
+	case "fr":
+		return "De", "Envoyé", "À", "Cc", "Objet"
+	case "es":
+		return "De", "Enviado", "Para", "CC", "Asunto"
+	case "pt":
+		return "De", "Enviada em", "Para", "Cc", "Assunto"
+	case "it":
+		return "Da", "Inviato", "A", "Cc", "Oggetto"
+	case "ru":
+		return "От", "Отправлено", "Кому", "Копия", "Тема"
+	case "nl":
+		return "Van", "Verzonden", "Aan", "CC", "Onderwerp"
+	case "pl":
+		return "Od", "Wysłano", "Do", "DW", "Temat"
+	case "tr":
+		return "Kimden", "Gönderildi", "Kime", "Bilgi", "Konu"
+	case "vi":
+		return "Từ", "Đã gửi", "Đến", "Cc", "Chủ đề"
+	default:
+		return "From", "Sent", "To", "Cc", "Subject"
+	}
 }
 
 // PrepareQuoteHTML inlines safe <style> rules in htmlBody, converts valid cid:

@@ -2679,5 +2679,9 @@
   "compose_image_remove": "Remove image",
   "compose_image_too_large": "Image exceeds 5 MB limit or is unsupported: {arg1}",
   "reader_attachments_preview": "Preview",
-  "reader_attachments_open": "Open"
+  "reader_attachments_open": "Open",
+  "settings_quote_style": "답장 인용 스타일",
+  "settings_quote_style_help": "답장 및 전달 시 원본 메일의 서식 지정 방식",
+  "settings_quote_style_indented": "들여쓰기 인용",
+  "settings_quote_style_outlook": "상단 머리글 누적 (Outlook)"
 }

@@ -130,6 +130,11 @@ type Settings struct {
 	// CollapseQuotes folds the quoted text of a mail (what it replies to or forwards)
 	// behind a button in the reader, leaving what its sender wrote.
 	CollapseQuotes bool
+	// QuoteStyle chooses how replies and forwards format the quoted original:
+	// QuoteStyleIndented (the default; "" too) puts it in a left-bordered
+	// blockquote under "On ..., X wrote:", while QuoteStyleOutlook stacks a
+	// ruled From/Sent/To/Cc/Subject header above the original body.
+	QuoteStyle string
 	// ImageRetentionDays deletes a cached remote image that has gone unread this
 	// many days: 0 keeps it until the cache is full, then evicts the least
 	// recently used (MaxBytes). Attachments are not in that cache.
@@ -266,6 +271,12 @@ const (
 	ReaderWidthFull   = "full"
 )
 
+// How replies and forwards format the quoted original (Settings.QuoteStyle).
+const (
+	QuoteStyleIndented = "indented"
+	QuoteStyleOutlook  = "outlook"
+)
+
 // MinThreadCollapse and MaxThreadCollapse bound ThreadCollapseThreshold.
 const (
 	MinThreadCollapse     = 2
@@ -334,6 +345,8 @@ func (st Settings) validate(kept []mask.Rule) error {
 		return fmt.Errorf("invalid background receive %q", st.BackgroundReceive)
 	case !in(st.ReaderWidth, "", ReaderWidthNormal, ReaderWidthWide, ReaderWidthFull):
 		return fmt.Errorf("invalid reader width %q", st.ReaderWidth)
+	case !in(st.QuoteStyle, "", QuoteStyleIndented, QuoteStyleOutlook):
+		return fmt.Errorf("invalid quote style %q", st.QuoteStyle)
 	case st.FontSize < 10 || st.FontSize > 32, st.BodyFontSize != 0 && (st.BodyFontSize < 10 || st.BodyFontSize > 32):
 		return fmt.Errorf("font size must be between 10 and 32")
 	case st.SidebarWidth != 0 && (st.SidebarWidth < 240 || st.SidebarWidth > 480):

@@ -731,3 +731,32 @@ test("a Word signature box of Label: value lines at the end of the mail is no re
   expect(w.querySelector("details")).toBeNull();
   expect(w.textContent).toContain("Email:");
 });
+
+test("Godwit Outlook-style stacked quote folds cleanly when collapsed, and stays open when alone", () => {
+  const quoteHTML =
+    '<div><div style="border-top: 1.0pt solid #e1e1e1; padding-top: 8px; margin-top: 12px"><p style="margin: 0">' +
+    '<b>发件人:</b> 李明 &lt;<a data-href="mailto:mli@tendyron.com">mli@tendyron.com</a>&gt;<br>' +
+    "<b>发送时间:</b> 2026/11/25 10:07<br>" +
+    '<b>收件人:</b> 张红博 &lt;<a data-href="mailto:hbzhang@tendyron.com">hbzhang@tendyron.com</a>&gt;<br>' +
+    "<b>主题:</b> 需求变更</p></div>" +
+    '<div style="margin-top: 12px"><p>原邮件正文</p></div></div>';
+
+  const w = folded({ html: `<p>好的，收到。</p>${quoteHTML}` });
+  const fold = w.querySelector("details.godwit-quote-fold");
+  expect(fold).not.toBeNull();
+  expect(fold?.textContent).toContain("发件人:");
+  expect(fold?.textContent).toContain("原邮件正文");
+  expect(w.textContent?.startsWith("好的，收到。")).toBe(true);
+
+  const alone = folded({ html: quoteHTML });
+  expect(alone.querySelector("details")).toBeNull();
+  expect(alone.textContent).toContain("原邮件正文");
+
+  const wrappedSig = folded({
+    html:
+      "<div><p>Hi</p><div>" +
+      '<div style="border-top:1.0pt solid #000"><b>Tel:</b> 1<br><b>Mob:</b> 2<br><b>Email:</b> a@x</div>' +
+      "</div></div>",
+  });
+  expect(wrappedSig.querySelector("details")).toBeNull();
+});

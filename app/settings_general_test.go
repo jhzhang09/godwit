@@ -466,3 +466,23 @@ func TestSettingsSummaryOnArrivalAsksFirst(t *testing.T) {
 	h.click(i18n.T("settings.summary.arrive.confirm"))
 	h.until("saved", func() bool { return mode() == core.SummaryArrive })
 }
+
+func TestSettingsQuoteStyle(t *testing.T) {
+	h, _ := withAccount(t)
+	h.openSettings("general")
+	h.see(i18n.T("settings.quote_style"))
+	h.see(i18n.T("settings.quote_style.indented"))
+
+	st := h.app.settings
+	st.QuoteStyle = core.QuoteStyleOutlook
+	h.app.changeSettings(st)
+	h.openSettings("general")
+	h.see(i18n.T("settings.quote_style.outlook"))
+	got, err := h.env.Svc.GetSettings(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.QuoteStyle != core.QuoteStyleOutlook {
+		t.Fatalf("QuoteStyle = %q, want %q", got.QuoteStyle, core.QuoteStyleOutlook)
+	}
+}
