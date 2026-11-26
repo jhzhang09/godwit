@@ -640,3 +640,20 @@ func TestSanitizeDraftFormatting(t *testing.T) {
 	assert.NotContains(t, out, "<script")
 	assert.NotContains(t, out, "track.png")
 }
+
+func TestCompactParagraphs(t *testing.T) {
+	assert.Equal(t, `<p style="margin: 0">a</p><p style="margin: 0">b</p>`,
+		mail.CompactParagraphs(`<p>a</p><p>b</p>`))
+	assert.Equal(t, `<p style="text-align: center; margin: 0">c</p>`,
+		mail.CompactParagraphs(`<p style="text-align: center">c</p>`))
+	assert.Equal(t, `<p style="margin-left: 24px; margin-top: 0; margin-bottom: 0">indented</p>`,
+		mail.CompactParagraphs(`<p style="margin-left: 24px">indented</p>`))
+	assert.Equal(t, `<p style="margin-bottom: 8px; margin-top: 0">spaced</p>`,
+		mail.CompactParagraphs(`<p style="margin-bottom: 8px">spaced</p>`))
+	assert.Equal(t, `<p style="margin: 4px 0">explicit</p>`,
+		mail.CompactParagraphs(`<p style="margin: 4px 0">explicit</p>`))
+
+	once := mail.CompactParagraphs(`<p>a</p><p style="text-align: center">b</p>`)
+	assert.Equal(t, once, mail.CompactParagraphs(once), "idempotent")
+	assert.Equal(t, once, mail.SanitizeDraft(once, nil), "SanitizeDraft preserves compact margin")
+}

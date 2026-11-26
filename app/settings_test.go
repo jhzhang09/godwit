@@ -1444,9 +1444,15 @@ func TestAccountDefaultSignature(t *testing.T) {
 	h.click("不使用签名")
 	h.click("Work")
 	h.until("picked", func() bool { return h.account(acc.ID).SignatureID == sig.ID })
-	h.see("Alice at work")
+	h.until("signature preview delivered to reader", func() bool {
+		body := h.plat.secureBody(sigPreviewKey)
+		return strings.Contains(body, "Alice at work") && strings.Contains(body, "margin: 0")
+	})
 	h.click("设置 › 签名")
 	h.until("opened", func() bool { return h.app.route.Settings == "signatures" })
+	h.until("signature preview closed on leave", func() bool {
+		return h.plat.view(sigPreviewKey) == nil
+	})
 }
 
 // 隐私与安全 lists the trusted senders; 移除 stops trusting one.

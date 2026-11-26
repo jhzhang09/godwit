@@ -2570,9 +2570,24 @@ func (a *App) readerOf(v ui.NativeWebView) *reader {
 	return r
 }
 
+// previewOf returns the htmlPreview and sentinel key owning view, if any.
+func (a *App) previewOf(view ui.NativeWebView) (*htmlPreview, int64) {
+	if a.mail != nil && a.mail.draftBody.view != nil && a.mail.draftBody.view == view {
+		return &a.mail.draftBody, draftPreviewKey
+	}
+	if sp, ok := a.pages[PageSettings].(*settingsPage); ok && sp.sigPrev.view != nil && sp.sigPrev.view == view {
+		return &sp.sigPrev, sigPreviewKey
+	}
+	return nil, 0
+}
+
 // BodyHeight is told the height, in CSS pixels, of message's body as its
 // page laid it out: its element takes it.
 func (a *App) BodyHeight(view ui.NativeWebView, message int64, px int) {
+	if pv, key := a.previewOf(view); pv != nil && key == message {
+		pv.height = px
+		return
+	}
 	if b := a.readerOf(view).shown(view, message); b != nil {
 		b.height = px
 		b.glassSet = false // the page listens now: what it was told before it loaded was dropped
@@ -2583,6 +2598,10 @@ func (a *App) BodyHeight(view ui.NativeWebView, message int64, px int) {
 // BodyLink opens a link of a body's page as one of the native reader's:
 // http(s) after the confirmation, mailto in a compose window.
 func (a *App) BodyLink(view ui.NativeWebView, link string) {
+	if pv, _ := a.previewOf(view); pv != nil {
+		a.openLink(link)
+		return
+	}
 	if a.readerOf(view).current(view) {
 		a.openLink(link)
 	}
@@ -2590,6 +2609,10 @@ func (a *App) BodyLink(view ui.NativeWebView, link string) {
 
 // BodyNavigate goes back or forward for a body's page (⌘[ and ⌘]).
 func (a *App) BodyNavigate(view ui.NativeWebView, dir int) {
+	if pv, _ := a.previewOf(view); pv != nil {
+		a.Navigate(dir)
+		return
+	}
 	if a.readerOf(view).current(view) {
 		a.Navigate(dir)
 	}
@@ -2597,6 +2620,10 @@ func (a *App) BodyNavigate(view ui.NativeWebView, dir int) {
 
 // BodySearch opens the search palette for a body's page (⌘F, ⌘K).
 func (a *App) BodySearch(view ui.NativeWebView) {
+	if pv, _ := a.previewOf(view); pv != nil {
+		a.openPalette()
+		return
+	}
 	if a.readerOf(view).current(view) {
 		a.openPalette()
 	}

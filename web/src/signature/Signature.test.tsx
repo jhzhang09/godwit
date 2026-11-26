@@ -112,17 +112,71 @@ describe("SignatureEditor", () => {
     render(<SignatureEditor initial={img().repeat(4)} onChange={vi.fn()} pickImage={none} t={t} />);
     expect(screen.getByRole("button", { name: "settings.account.signature.image" })).toBeDisabled();
   });
+
+  it("applies font family, font size, and text color via the toolbar", async () => {
+    const onChange = vi.fn();
+    render(<SignatureEditor initial="<p>Bob</p>" onChange={onChange} pickImage={none} t={t} />);
+    const box = screen.getByLabelText("settings.account.signature.label");
+
+    await selectAll(box);
+    fireEvent.click(screen.getByRole("button", { name: "compose.font_size" }));
+    fireEvent.click(await screen.findByText("9 pt"));
+    await waitFor(() =>
+      expect(onChange).toHaveBeenLastCalledWith('<p><span style="font-size: 9pt">Bob</span></p>'),
+    );
+
+    await selectAll(box);
+    fireEvent.click(screen.getByRole("button", { name: "compose.font_family" }));
+    fireEvent.click(await screen.findByText("Georgia"));
+    await waitFor(() =>
+      expect(onChange).toHaveBeenLastCalledWith(
+        '<p><span style="font-size: 9pt; font-family: Georgia, serif">Bob</span></p>',
+      ),
+    );
+
+    await selectAll(box);
+    fireEvent.click(screen.getByRole("button", { name: "compose.color" }));
+    fireEvent.click(await screen.findByRole("button", { name: "#6b7280" }));
+    await waitFor(() =>
+      expect(onChange).toHaveBeenLastCalledWith(
+        '<p><span style="font-size: 9pt; font-family: Georgia, serif; color: #6b7280">Bob</span></p>',
+      ),
+    );
+  });
+
+  it("keeps inline font/color spans in RichEditor rather than LayoutEditor", () => {
+    render(
+      <SignatureEditor
+        initial='<p><span style="font-size: 9pt; color: #6b7280"><em>Bob</em></span></p>'
+        onChange={vi.fn()}
+        pickImage={none}
+        t={t}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "compose.bold" })).toBeEnabled();
+    expect(screen.queryByText("settings.account.signature.layout")).not.toBeInTheDocument();
+  });
 });
 
 describe("hasLayout", () => {
-  it("is a table or any attribute but <a href> and <img src>", () => {
+  it("is a table or any attribute but <a href>, <img src>, and editable <span style>", () => {
     expect(hasLayout(`<p><strong>Bob</strong> <a href="https://x.example">x</a></p>${img()}`)).toBe(
       false,
     );
+    expect(hasLayout('<p><span style="font-size: 9pt; color: #6b7280">Bob</span></p>')).toBe(false);
+    expect(
+      hasLayout(
+        '<p><span style="font-family: Georgia, serif; background-color: #fef08a">Bob</span></p>',
+      ),
+    ).toBe(false);
     expect(hasLayout("<table><tbody><tr><td>Bob</td></tr></tbody></table>")).toBe(true);
     expect(hasLayout('<p style="color:red">Bob</p>')).toBe(true);
     expect(hasLayout('<img src="x" width="48">')).toBe(true);
     expect(hasLayout('<a href="x" title="t">x</a>')).toBe(true);
+    expect(hasLayout('<p><span style="color: red; padding: 4px">Bob</span></p>')).toBe(true);
+    expect(hasLayout('<p><span style="font-size: 200px">Bob</span></p>')).toBe(true);
+    expect(hasLayout('<p><span style="color: red !important">Bob</span></p>')).toBe(true);
+    expect(hasLayout('<p><span style="unknown-prop: 1">Bob</span></p>')).toBe(true);
   });
 });
 

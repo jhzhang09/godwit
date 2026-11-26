@@ -580,6 +580,18 @@ test("folding is off unless asked, and leaves the markup as it came", () => {
   expect(w?.innerHTML).toBe(html);
 });
 
+test("bare blockquotes get the 2px quote bar even when collapseQuotes is off, without overriding inline border:0", () => {
+  const html =
+    '<p>OK</p><blockquote id="bare">q</blockquote><blockquote id="wrapped" style="margin:0;padding:0;border:0">w</blockquote>';
+  const doc = parse(buildSrcdoc(body({ html, collapseQuotes: false }), theme()));
+  const styleText = doc.querySelector("style")?.textContent ?? "";
+  expect(styleText).toContain(":where(#godwit-body blockquote)");
+  const bare = doc.getElementById("bare");
+  const wrapped = doc.getElementById("wrapped");
+  expect(bare).not.toBeNull();
+  expect(wrapped?.getAttribute("style")).toContain("border:0");
+});
+
 test("a leading style stays when a quote folds", () => {
   const w = folded({ html: "<style>p{color:red}</style><p>OK</p><blockquote>q</blockquote>" });
   expect(w?.querySelector("style")?.textContent).toBe("p{color:red}");

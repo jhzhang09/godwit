@@ -1,4 +1,5 @@
 import {
+  type RemixiconComponentType,
   RiAddLine,
   RiAlignCenter,
   RiAlignLeft,
@@ -8,6 +9,8 @@ import {
   RiDeleteColumn,
   RiDeleteRow,
   RiFontColor,
+  RiFontFamily,
+  RiFontSize,
   RiFormatClear,
   RiImageAddLine,
   RiIndentDecrease,
@@ -75,12 +78,164 @@ const HIGHLIGHT_COLORS = [
 const TRIGGER_CLS =
   "inline-flex size-7 items-center justify-center rounded-md text-foreground/80 hover:bg-accent hover:text-accent-foreground disabled:opacity-50";
 
+export const FONT_SIZES = [
+  { label: "", value: "" }, // compose.size_default
+  { label: "9 pt", value: "9pt" },
+  { label: "10 pt", value: "10pt" },
+  { label: "11 pt", value: "11pt" },
+  { label: "12 pt", value: "12pt" },
+  { label: "13 pt", value: "13pt" },
+  { label: "14 pt", value: "14pt" },
+  { label: "18 pt", value: "18pt" },
+  { label: "24 pt", value: "24pt" },
+  { label: "36 pt", value: "36pt" },
+];
+
+export const FONTS = [
+  { label: "", value: "" }, // compose.font_default
+  { label: "Arial", value: "Arial, sans-serif" },
+  { label: "Courier New", value: "'Courier New', Courier, monospace" },
+  { label: "Georgia", value: "Georgia, serif" },
+  { label: "Helvetica", value: "Helvetica, Arial, sans-serif" },
+  { label: "Palatino", value: "Palatino, 'Palatino Linotype', serif" },
+  { label: "Tahoma", value: "Tahoma, Verdana, sans-serif" },
+  { label: "Times New Roman", value: "'Times New Roman', Times, serif" },
+  { label: "Trebuchet MS", value: "'Trebuchet MS', sans-serif" },
+  { label: "Verdana", value: "Verdana, sans-serif" },
+];
+
+// The browser re-quotes a font list it reads back (`'A B'` becomes `"A B"`), so compare without quotes.
+const unquoted = (s: string) => s.replace(/["']/g, "");
+
 type MenuProps = {
   t: T;
   saved: RefObject<TRange | null>;
+  triggerClassName?: string;
 };
 
-export function ColorMenu({ t, saved }: MenuProps) {
+function FontMenu({
+  t,
+  saved,
+  mark,
+  label,
+  Icon,
+  options,
+  defaultLabel,
+  className,
+  triggerClassName,
+}: MenuProps & {
+  mark: "fontFamily" | "fontSize";
+  label: string;
+  Icon: RemixiconComponentType;
+  options: { label: string; value: string }[];
+  defaultLabel: string;
+  className: string;
+}) {
+  const editor = useEditorRef();
+  const readOnly = useEditorReadOnly();
+  const current = useEditorSelector((e) => {
+    const m = e.selection ? e.api.marks() : null;
+    return String(m?.[mark] ?? "");
+  }, []);
+
+  const applyMark = (val: string) => {
+    if (saved.current) editor.tf.select(saved.current);
+    if (val) editor.tf.addMark(mark, val);
+    else editor.tf.removeMark(mark);
+    saved.current = editor.selection; // the mark split the text: the old range points elsewhere
+    editor.tf.focus();
+  };
+
+  return (
+    <DropdownMenu
+      modal={false}
+      highlightItemOnHover={false}
+      onOpenChange={(open) => {
+        if (open) {
+          saved.current = editor.selection;
+        } else {
+          setTimeout(() => {
+            if (saved.current) editor.tf.select(saved.current);
+            editor.tf.focus();
+          }, 0);
+        }
+      }}
+    >
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <DropdownMenuTrigger
+              aria-label={t(label)}
+              disabled={readOnly}
+              onMouseDown={(e) => {
+                saved.current = editor.selection;
+                e.preventDefault();
+              }}
+              className={triggerClassName ?? TRIGGER_CLS}
+            >
+              <Icon className="size-3.75" />
+            </DropdownMenuTrigger>
+          }
+        />
+        <TooltipContent>{t(label)}</TooltipContent>
+      </Tooltip>
+      <DropdownMenuContent
+        align="start"
+        className={`w-auto max-h-[min(15rem,var(--available-height))] overflow-y-auto ${className}`}
+        onMouseDown={(e) => e.preventDefault()}
+      >
+        {options.map((o) => (
+          <DropdownMenuItem
+            key={o.value}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => applyMark(o.value)}
+            style={mark === "fontFamily" ? { fontFamily: o.value || "inherit" } : undefined}
+            className="flex items-center justify-between gap-3"
+          >
+            <span className="whitespace-nowrap">{o.label || defaultLabel}</span>
+            {unquoted(current) === unquoted(o.value) && (
+              <RiCheckLine className="ml-2 size-3.5 shrink-0 text-primary" />
+            )}
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+export function FontFamilyMenu({ t, saved, triggerClassName }: MenuProps) {
+  return (
+    <FontMenu
+      t={t}
+      saved={saved}
+      mark="fontFamily"
+      label="compose.font_family"
+      Icon={RiFontFamily}
+      options={FONTS}
+      defaultLabel={t("compose.font_default")}
+      className="min-w-56"
+      triggerClassName={triggerClassName}
+    />
+  );
+}
+
+export function FontSizeMenu({ t, saved, triggerClassName }: MenuProps) {
+  return (
+    <FontMenu
+      t={t}
+      saved={saved}
+      mark="fontSize"
+      label="compose.font_size"
+      Icon={RiFontSize}
+      options={FONT_SIZES}
+      defaultLabel={t("compose.size_default", "14 pt")}
+      className="min-w-44"
+      triggerClassName={triggerClassName}
+    />
+  );
+}
+
+export function ColorMenu({ t, saved, triggerClassName }: MenuProps) {
   const editor = useEditorRef();
   const readOnly = useEditorReadOnly();
   const [open, setOpen] = useState(false);
@@ -121,7 +276,7 @@ export function ColorMenu({ t, saved }: MenuProps) {
                     saved.current = editor.selection;
                     e.preventDefault();
                   }}
-                  className={`${TRIGGER_CLS} relative`}
+                  className={`${triggerClassName ?? TRIGGER_CLS} relative`}
                 >
                   <RiFontColor className="size-3.75" />
                   <span
@@ -135,7 +290,11 @@ export function ColorMenu({ t, saved }: MenuProps) {
         />
         <TooltipContent>{t("compose.color")}</TooltipContent>
       </Tooltip>
-      <PopoverContent align="start" className="w-56 p-2.5" onMouseDown={(e) => e.preventDefault()}>
+      <PopoverContent
+        align="start"
+        className="w-56 max-h-(--available-height) overflow-y-auto p-2.5"
+        onMouseDown={(e) => e.preventDefault()}
+      >
         <div className="space-y-2.5">
           <div>
             <div className="mb-1.5 flex items-center justify-between text-[11px] text-muted-foreground">

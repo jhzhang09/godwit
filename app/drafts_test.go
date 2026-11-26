@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/egoist/mygo/ui"
@@ -54,7 +55,9 @@ func TestDraftSelectShowsPane(t *testing.T) {
 	h.click("Draft hello")
 	h.see("继续编辑")
 	h.see("删除草稿")
-	h.see("body of Draft hello")
+	h.until("draft body delivered to reader", func() bool {
+		return strings.Contains(h.plat.secureBody(draftPreviewKey), "body of Draft hello")
+	})
 	h.see("草稿已保存 " + ds[0].UpdatedAt.In(h.clock.Now().Location()).Format("15:04"))
 	h.see("bob@example.com")
 	h.noCompose()
@@ -212,12 +215,54 @@ func TestDraftPaneShowsSignatureImages(t *testing.T) {
 	h.waitMail("the drafts folder", func() bool { return h.tt.HasText("草稿") })
 	h.click("草稿")
 	h.see("With logo")
-	for _, b := range h.app.pages[PageMail].(*mailPage).draftView[d.ID].doc.Blocks {
-		if b.Image != nil && b.Image.Src == "data:image/png;base64,"+png {
-			return
-		}
+	h.click("With logo")
+	h.until("signature image delivered to reader", func() bool {
+		return strings.Contains(h.plat.secureBody(draftPreviewKey), "data:image/png;base64,"+png)
+	})
+}
+
+func TestDraftPaneRendersSignatureAndQuoteInReaderAndCloses(t *testing.T) {
+	h, accs := mailHarness(t, nil, "alice@example.com")
+	if err := h.env.IMAP(accs[0].ID).User.Create("Drafts", nil); err != nil {
+		t.Fatal(err)
 	}
-	t.Fatal("the pane does not show the signature image")
+	h.syncNow(accs[0])
+	sig := core.SignatureHTMLPrefix + `<p><span style="font-size: 9pt; color: #6b7280">Alice</span></p><p>Acme</p>`
+	if _, err := h.env.Svc.UpdateAccount(context.Background(), accs[0].ID, core.AccountPatch{Signature: &sig}); err != nil {
+		t.Fatal(err)
+	}
+	d, err := h.env.Svc.NewDraft(context.Background(), accs[0].ID, "new", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Subject = "Styled reply"
+	d.HTML = `<p>Hi</p><blockquote data-godwit="quote" style="margin:0;padding:0;border:0"><blockquote style="margin: 8px 0; padding-left: 12px; border-left: 2px solid rgba(127, 127, 127, 0.28)"><p>Orig</p></blockquote></blockquote>` + d.HTML
+	if d, err = h.env.Svc.SaveDraft(context.Background(), d); err != nil {
+		t.Fatal(err)
+	}
+	h.waitMail("the drafts folder", func() bool { return h.tt.HasText("草稿") })
+	h.click("草稿")
+	h.click("Styled reply")
+	h.until("styled draft delivered to reader", func() bool {
+		body := h.plat.secureBody(draftPreviewKey)
+		return strings.Contains(body, `font-size: 9pt`) &&
+			strings.Contains(body, `color: #6b7280`) &&
+			strings.Contains(body, `margin: 0`) &&
+			strings.Contains(body, `border-left: 2px solid`)
+	})
+	v := h.plat.view(draftPreviewKey)
+	if v == nil {
+		t.Fatal("expected draft preview body view")
+	}
+	h.post(func() { h.app.BodyHeight(v, draftPreviewKey, 420) })
+	h.drain()
+	if got := h.app.pages[PageMail].(*mailPage).draftBody.height; got != 420 {
+		t.Fatalf("draftBody.height = %d, want 420", got)
+	}
+	h.post(func() { h.app.navigate(Route{Page: PageMail, View: core.View{Unified: "inbox"}}) })
+	h.until("draft preview view closed on leave", func() bool {
+		return h.plat.view(draftPreviewKey) == nil
+	})
 }
 
 func (h *harness) draftQueued(id int64) {

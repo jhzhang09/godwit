@@ -111,6 +111,7 @@ type mailPage struct {
 	draftList                *ui.ListState           // replaced, never zeroed: the last frame's tree still points at the old one
 	draftSel                 int64                   // the draft the pane shows; 0 for none
 	draftView                map[int64]draftInfo     // by draft, made when the drafts load
+	draftBody                htmlPreview             // the draft pane's reader.html WebView
 	sending                  draftSend               // the pane's send in flight, or awaiting warnings' acknowledgement
 	accOpen                  map[int64]*bool         // account groups unfolded in the sidebar, by account
 	accOpenSeen              map[int64]bool          // what accOpen last was when it was saved, by account
@@ -268,6 +269,7 @@ func (p *mailPage) reload() {
 		p.main.reset()
 		p.closeSearch()
 		p.draftList, p.draftSel = &ui.ListState{}, 0
+		p.closeDraftView()
 		p.sending.ask = false // a warnings dialog does not outlive its view
 		want, toEnd = 0, false
 	}

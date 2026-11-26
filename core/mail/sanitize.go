@@ -692,3 +692,41 @@ func Blank(src string) bool {
 // JoinDraft is the draft body of its parts, as SplitDraft returns them: the
 // signature sits under the new text, above the quoted mail.
 func JoinDraft(editable, quote, signature string) string { return editable + signature + quote }
+
+// CompactParagraphs zeroes default paragraph margins on <p> elements in src
+// without overriding explicit margins, so multi-paragraph HTML signatures
+// render with compact line spacing in email clients and the reader.
+func CompactParagraphs(src string) string {
+	root := parseBody(src)
+	walkNodes(root, func(n *html.Node) {
+		if n.Type != html.ElementNode || n.DataAtom != atom.P {
+			return
+		}
+		decls := styleDecls(n)
+		if decls["margin"] != "" {
+			return
+		}
+		rawStyle, _ := attr(n, "style")
+		base := strings.TrimRight(strings.TrimSpace(rawStyle), "; \t\r\n")
+		var add []string
+		if decls["margin-top"] == "" && decls["margin-bottom"] == "" && decls["margin-left"] == "" && decls["margin-right"] == "" {
+			add = append(add, "margin: 0")
+		} else {
+			if decls["margin-top"] == "" {
+				add = append(add, "margin-top: 0")
+			}
+			if decls["margin-bottom"] == "" {
+				add = append(add, "margin-bottom: 0")
+			}
+		}
+		if len(add) == 0 {
+			return
+		}
+		if base != "" {
+			setAttr(n, "style", base+"; "+strings.Join(add, "; "))
+		} else {
+			setAttr(n, "style", strings.Join(add, "; "))
+		}
+	})
+	return render(root)
+}

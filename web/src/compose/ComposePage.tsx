@@ -306,7 +306,7 @@ function QuotePreview({ html }: { html: string }) {
     <div
       ref={ref}
       data-slot="quote-preview"
-      className="mt-2 overflow-x-auto text-xs leading-relaxed text-muted-foreground [&_a]:underline [&_blockquote]:border-l-2 [&_blockquote]:pl-3 [&_img]:h-auto [&_img]:max-w-full [&_ol]:list-decimal [&_ol]:pl-6 [&_table]:max-w-full [&_ul]:list-disc [&_ul]:pl-6"
+      className="mt-2 overflow-x-auto text-sm leading-[1.5] text-foreground [&_a]:text-primary [&_a]:underline [&_blockquote]:my-2 [&_blockquote]:border-l-2 [&_blockquote]:border-[rgba(127,127,127,0.28)] [&_blockquote]:pl-3 [&_hr]:my-2 [&_hr]:border-t [&_hr]:border-border [&_img]:h-auto [&_img]:max-w-full [&_ol]:list-decimal [&_ol]:pl-6 [&_p]:my-[1em] [&_table]:max-w-full [&_ul]:list-disc [&_ul]:pl-6"
       // biome-ignore lint/security/noDangerouslySetInnerHtml: Go sanitized it (QuoteShown) before inlining its images
       dangerouslySetInnerHTML={{ __html: html }}
     />
@@ -1000,7 +1000,7 @@ function Compose({
       {signature && (
         <div
           data-slot="signature-preview"
-          className="text-xs text-muted-foreground [&_a]:underline [&_img]:max-w-full"
+          className="text-sm leading-[1.5] text-foreground [&_a]:text-primary [&_a]:underline [&_img]:max-w-full"
           // biome-ignore lint/security/noDangerouslySetInnerHtml: Go sanitized it (SanitizeDraft) before inlining its images
           dangerouslySetInnerHTML={{ __html: signature }}
         />

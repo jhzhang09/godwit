@@ -37,6 +37,43 @@ const SAFE_CSS_VALUE = /^([a-z0-9#%.,/\s'"\-+_]|rgba?\([0-9.,\s%]*\))+$/i;
 const SAFE_CSS_COLOR =
   /^(#[0-9a-f]{3,8}|rgb\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*\)|rgba\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*(0|1|0?\.\d+)\s*\)|[a-z]{3,20})$/i;
 const SAFE_ALIGN = new Set(["left", "center", "right"]);
+const EDITABLE_SPAN_PROPS = new Set(["font-size", "font-family", "color", "background-color"]);
+
+/**
+ * Whether a <span>'s inline style contains only the formats the rich signature editor can edit
+ * (font-size, font-family, color, background-color) with safe values and no !important.
+ */
+export function isEditableSpanStyle(el: HTMLElement): boolean {
+  const raw = el.getAttribute("style");
+  if (!raw?.trim()) return true;
+  const rawDecls = raw
+    .split(";")
+    .map((d) => d.trim())
+    .filter(Boolean);
+  for (const decl of rawDecls) {
+    const colon = decl.indexOf(":");
+    if (colon <= 0) return false;
+    const prop = decl.slice(0, colon).trim().toLowerCase();
+    const val = decl.slice(colon + 1).trim();
+    if (!EDITABLE_SPAN_PROPS.has(prop) || /!important/i.test(val)) return false;
+    if (!el.style.getPropertyValue(prop)) return false;
+  }
+  for (let i = 0; i < el.style.length; i++) {
+    const prop = el.style[i];
+    if (!EDITABLE_SPAN_PROPS.has(prop) || el.style.getPropertyPriority(prop) !== "") return false;
+  }
+  if (el.style.fontSize && !inSizeRange(el.style.fontSize)) return false;
+  if (el.style.fontFamily && !SAFE_CSS_VALUE.test(el.style.fontFamily)) return false;
+  if (el.style.color && !SAFE_CSS_COLOR.test(el.style.color.trim())) return false;
+  if (
+    el.style.backgroundColor &&
+    (el.style.backgroundColor.trim() === "transparent" ||
+      !SAFE_CSS_COLOR.test(el.style.backgroundColor.trim()))
+  ) {
+    return false;
+  }
+  return true;
+}
 
 function indentPx(v: string): string {
   const m = v.trim().match(/^(\d+(?:\.\d+)?)px$/i);

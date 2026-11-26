@@ -4,12 +4,15 @@ import {
   type RemixiconComponentType,
   RiBold,
   RiCodeSSlashLine,
+  RiFontColor,
+  RiFontFamily,
+  RiFontSize,
   RiImageLine,
   RiItalic,
   RiLink,
   RiUnderline,
 } from "@remixicon/react";
-import type { SlateEditor, Value } from "platejs";
+import type { SlateEditor, TRange, Value } from "platejs";
 import {
   createPlatePlugin,
   Plate,
@@ -23,8 +26,16 @@ import {
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/button";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
-import { fromHTML, IMAGE_SRC, toHTML, toText } from "@/compose/editor/html";
-import { linkPlugin, SafePastePlugin } from "@/compose/editor/plugins";
+import { ColorMenu, FontFamilyMenu, FontSizeMenu } from "@/compose/editor/FormatMenus";
+import { fromHTML, IMAGE_SRC, isEditableSpanStyle, toHTML, toText } from "@/compose/editor/html";
+import {
+  BackgroundColorPlugin,
+  FontColorPlugin,
+  FontFamilyPlugin,
+  FontSizePlugin,
+  linkPlugin,
+  SafePastePlugin,
+} from "@/compose/editor/plugins";
 import { SignaturePage as api, events, type SignatureState } from "@/mygo";
 import { type T, useT } from "@/shared/i18n";
 import { applyTheme, type Theme as PageTheme } from "@/shared/theme";
@@ -64,11 +75,15 @@ const ImagePlugin = createPlatePlugin({
   },
 });
 
-// The signature's formats: bold, italic, underline, link, image. No lists.
+// The signature's formats: bold, italic, underline, font family/size/color, link, image. No lists.
 const plugins = [
   BoldPlugin,
   ItalicPlugin,
   UnderlinePlugin,
+  FontSizePlugin,
+  FontFamilyPlugin,
+  FontColorPlugin,
+  BackgroundColorPlugin,
   linkPlugin,
   ImagePlugin,
   SafePastePlugin,
@@ -91,7 +106,8 @@ function active(e: SlateEditor): string {
     .join(" ");
 }
 
-const button = "size-7 min-w-7 rounded-md px-0 text-muted-foreground";
+const button =
+  "inline-flex size-7 min-w-7 items-center justify-center rounded-md px-0 text-muted-foreground hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-50";
 
 const item = (
   t: T,
@@ -156,12 +172,26 @@ function Rule() {
 /** The formats, greyed out: a layout signature edits only its text. */
 function Disabled({ t }: { t: T }) {
   return (
-    <ToggleGroup multiple value={[]} size="sm" spacing={0.5}>
-      {marks.map((m) => item(t, m.key, m.label, m.Icon, undefined, true))}
+    <div className="flex items-center gap-0.5">
+      <ToggleGroup multiple value={[]} size="sm" spacing={0.5}>
+        {marks.map((m) => item(t, m.key, m.label, m.Icon, undefined, true))}
+      </ToggleGroup>
       <span className="mx-1 h-4 border-l-[0.5px]" />
-      {item(t, "link", "compose.link", RiLink, undefined, true)}
-      {item(t, "image", "settings.account.signature.image", RiImageLine, undefined, true)}
-    </ToggleGroup>
+      <button type="button" disabled aria-label={t("compose.font_family")} className={button}>
+        <RiFontFamily className="size-4" />
+      </button>
+      <button type="button" disabled aria-label={t("compose.font_size")} className={button}>
+        <RiFontSize className="size-4" />
+      </button>
+      <button type="button" disabled aria-label={t("compose.color")} className={button}>
+        <RiFontColor className="size-4" />
+      </button>
+      <span className="mx-1 h-4 border-l-[0.5px]" />
+      <ToggleGroup multiple value={[]} size="sm" spacing={0.5}>
+        {item(t, "link", "compose.link", RiLink, undefined, true)}
+        {item(t, "image", "settings.account.signature.image", RiImageLine, undefined, true)}
+      </ToggleGroup>
+    </div>
   );
 }
 
@@ -181,6 +211,7 @@ function Toolbar(props: {
 }) {
   const { t, mode, pickImage, askLink } = props;
   const editor = useEditorRef();
+  const saved = useRef<TRange | null>(null);
   const value = useEditorSelector(active, []).split(" ").filter(Boolean);
   const full = useEditorSelector((e) => images(e.children) >= MAX_IMAGES, []);
   const [refused, setRefused] = useState(false);
@@ -191,59 +222,67 @@ function Toolbar(props: {
       t={t}
       mode={{ ...mode, alert: refused ? "settings.account.signature.image_invalid" : mode.alert }}
     >
-      <ToggleGroup multiple value={value} size="sm" spacing={0.5}>
-        {marks.map((m) =>
-          item(t, m.key, m.label, m.Icon, () => {
-            editor.tf.toggleMark(m.key);
-            editor.tf.focus();
-          }),
-        )}
-        <span className="mx-1 h-4 border-l-[0.5px]" />
-        {item(t, "link", "compose.link", RiLink, () => {
-          const at = editor.selection;
-          const above = editor.api.above({ match: { type: "a" } });
-          askLink(above ? String(above[0].url ?? "") : "").then(
-            ({ url, ok }) => {
-              if (ok) {
-                if (at) editor.tf.select(at);
-                if (url) upsertLink(editor, { url });
-                else unwrapLink(editor);
-              }
+      <div className="flex items-center gap-0.5">
+        <ToggleGroup multiple value={value} size="sm" spacing={0.5}>
+          {marks.map((m) =>
+            item(t, m.key, m.label, m.Icon, () => {
+              editor.tf.toggleMark(m.key);
               editor.tf.focus();
-            },
-            () => {},
-          );
-        })}
-        {item(
-          t,
-          "image",
-          "settings.account.signature.image",
-          RiImageLine,
-          () => {
-            setRefused(false);
+            }),
+          )}
+        </ToggleGroup>
+        <span className="mx-1 h-4 border-l-[0.5px]" />
+        <FontFamilyMenu t={t} saved={saved} triggerClassName={button} />
+        <FontSizeMenu t={t} saved={saved} triggerClassName={button} />
+        <ColorMenu t={t} saved={saved} triggerClassName={button} />
+        <span className="mx-1 h-4 border-l-[0.5px]" />
+        <ToggleGroup multiple value={value} size="sm" spacing={0.5}>
+          {item(t, "link", "compose.link", RiLink, () => {
             const at = editor.selection;
-            pickImage().then(
-              (url) => {
-                if (!url || images(editor.children) >= MAX_IMAGES) return;
-                editor.tf.insertNodes(
-                  { type: "img", url, children: [{ text: "" }] },
-                  at ? { at, select: true } : { at: [editor.children.length], select: true },
-                );
+            const above = editor.api.above({ match: { type: "a" } });
+            askLink(above ? String(above[0].url ?? "") : "").then(
+              ({ url, ok }) => {
+                if (ok) {
+                  if (at) editor.tf.select(at);
+                  if (url) upsertLink(editor, { url });
+                  else unwrapLink(editor);
+                }
                 editor.tf.focus();
               },
-              () => setRefused(true),
+              () => {},
             );
-          },
-          full,
-        )}
-      </ToggleGroup>
+          })}
+          {item(
+            t,
+            "image",
+            "settings.account.signature.image",
+            RiImageLine,
+            () => {
+              setRefused(false);
+              const at = editor.selection;
+              pickImage().then(
+                (url) => {
+                  if (!url || images(editor.children) >= MAX_IMAGES) return;
+                  editor.tf.insertNodes(
+                    { type: "img", url, children: [{ text: "" }] },
+                    at ? { at, select: true } : { at: [editor.children.length], select: true },
+                  );
+                  editor.tf.focus();
+                },
+                () => setRefused(true),
+              );
+            },
+            full,
+          )}
+        </ToggleGroup>
+      </div>
     </Bar>
   );
 }
 
 /**
  * Whether html (sanitized by Go) holds what the editor's formats cannot keep: a table, or an
- * attribute other than <a href> and <img src> (a style, a color, a width…).
+ * attribute other than <a href>, <img src>, and editable <span style> (font/color).
  */
 export function hasLayout(html: string): boolean {
   const body = new DOMParser().parseFromString(html, "text/html").body;
@@ -251,7 +290,14 @@ export function hasLayout(html: string): boolean {
   return [...body.querySelectorAll("*")].some((el) =>
     [...el.attributes].some(
       (a) =>
-        !((el.tagName === "A" && a.name === "href") || (el.tagName === "IMG" && a.name === "src")),
+        !(
+          (el.tagName === "A" && a.name === "href") ||
+          (el.tagName === "IMG" && a.name === "src") ||
+          (el.tagName === "SPAN" &&
+            a.name === "style" &&
+            el instanceof HTMLElement &&
+            isEditableSpanStyle(el))
+        ),
     ),
   );
 }
@@ -383,7 +429,18 @@ function RichEditor(props: {
         <div className="min-h-0 flex-1 overflow-auto bg-background">
           <PlateContent
             aria-label={t("settings.account.signature.label")}
-            className="min-h-full px-4 py-2.5 leading-[1.6] outline-none [&_a]:text-primary [&_a]:underline"
+            onKeyDown={(e) => {
+              if (
+                e.key === "Enter" &&
+                e.shiftKey &&
+                !e.nativeEvent.isComposing &&
+                e.target === e.currentTarget
+              ) {
+                e.preventDefault();
+                editor.tf.insertText("\n");
+              }
+            }}
+            className="min-h-full px-4 py-2.5 text-sm leading-[1.5] text-foreground outline-none [&_a]:text-primary [&_a]:underline"
           />
         </div>
       </div>

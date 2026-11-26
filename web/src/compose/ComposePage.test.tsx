@@ -644,6 +644,22 @@ test("a signature laid out with a table shows as its HTML, table kept", async ()
   expect(screen.getByText("CEO").tagName).toBe("TD");
 });
 
+test("signature preview matches body typography and keeps inline font/color styles", async () => {
+  vi.mocked(api.load).mockResolvedValue({
+    ...state,
+    signatureHtml:
+      '<p style="margin: 0"><span style="font-size: 9pt; color: #6b7280">Alice</span></p>',
+  });
+  render(<ComposePage />);
+  const span = await screen.findByText("Alice");
+  const preview = span.closest('[data-slot="signature-preview"]');
+  expect(preview).toHaveClass("text-sm", "leading-[1.5]", "text-foreground");
+  expect(preview).not.toHaveClass("text-xs");
+  expect(preview).not.toHaveClass("text-muted-foreground");
+  expect(span.getAttribute("style")).toContain("font-size: 9pt");
+  expect(span.getAttribute("style")).toContain("color:");
+});
+
 test("an account switch that conflicts reverts the pill", async () => {
   vi.mocked(api.setAccount).mockResolvedValue({
     revision: 0,
@@ -896,6 +912,9 @@ test("renders formatted quoteHtml with images and inert links when expanded", as
   await userEvent.click(screen.getByRole("button", { name: "显示引用的原邮件（助手只读）" }));
   const preview = document.querySelector('[data-slot="quote-preview"]');
   expect(preview).toBeInTheDocument();
+  expect(preview).toHaveClass("text-sm", "leading-[1.5]", "text-foreground");
+  expect(preview).not.toHaveClass("text-xs");
+  expect(preview).not.toHaveClass("text-muted-foreground");
   expect(preview?.querySelector("table")).toBeInTheDocument();
   expect(preview?.querySelector("strong")).toHaveTextContent("Table Cell");
   expect(preview?.querySelector("img")).toHaveAttribute("src", "data:image/png;base64,AAAA");

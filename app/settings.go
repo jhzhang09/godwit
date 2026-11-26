@@ -109,6 +109,7 @@ type settingsPage struct {
 	sigForm   sigForm          // the shown signature's name
 	sigDelete bool             // its delete confirmation is open
 	sigDocs   map[int64]sigDoc // the account pages' signature previews
+	sigPrev   htmlPreview      // the account page's reader.html WebView
 	sigLink   *sigLink         // the signature page's link dialog, while it asks
 
 	// The About page's bird, made as the page shows and closed as it goes

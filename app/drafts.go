@@ -10,12 +10,76 @@ import (
 
 	"github.com/egoist/mygo/ui"
 	"github.com/godwit-email/godwit/core"
+	gomail "github.com/godwit-email/godwit/core/mail"
 	"github.com/godwit-email/godwit/internal/i18n"
 	"github.com/godwit-email/godwit/internal/icons"
 	"github.com/godwit-email/godwit/internal/kit"
 	"github.com/godwit-email/godwit/internal/richtext"
 	"github.com/godwit-email/godwit/internal/theme"
 )
+
+const (
+	draftPreviewKey int64 = -1
+	sigPreviewKey   int64 = -2
+)
+
+// htmlPreview hosts a read-only reader.html WebView (NewBodyView + ShowSecureBody)
+// for non-message HTML previews such as the drafts pane and account signature preview.
+type htmlPreview struct {
+	view   ui.NativeWebView
+	close  func()
+	posted bool
+	err    error
+	height int
+	shown  string
+	has    bool
+}
+
+func (p *htmlPreview) closeView() {
+	if p.close != nil {
+		p.close()
+	}
+	p.view, p.close, p.height, p.shown, p.has, p.err = nil, nil, 0, "", false, nil
+}
+
+func (p *htmlPreview) show(a *App, key int64, html string, stillActive func() (string, bool)) {
+	if p.view != nil {
+		if !p.has || p.shown != html {
+			p.shown, p.has = html, true
+			a.plat.ShowSecureBody(key, html, "", false)
+		}
+		return
+	}
+	if p.posted || p.err != nil {
+		return
+	}
+	p.posted = true
+	a.onUI(func() {
+		p.posted = false
+		if a.ctx.Err() != nil {
+			return
+		}
+		curHTML, ok := stillActive()
+		if !ok {
+			return
+		}
+		v, closeView, err := a.plat.NewBodyView(key)
+		curHTML, ok = stillActive()
+		if !ok || a.ctx.Err() != nil || p.view != nil {
+			if err == nil {
+				closeView()
+			}
+			return
+		}
+		if err != nil {
+			p.err = err
+			return
+		}
+		p.view, p.close = v, closeView
+		p.shown, p.has = curHTML, true
+		a.plat.ShowSecureBody(key, curHTML, "", false)
+	})
+}
 
 // draftsView lists the account's local drafts in the inbox's row layout. A
 // click chooses one for the pane beside; a double click, Enter or 继续编辑
@@ -54,6 +118,7 @@ func (p *mailPage) draftsView(c *ui.Context) {
 // draftInfo is what a draft's row and pane show, worked out once per load.
 type draftInfo struct {
 	preview string
+	html    string
 	doc     richtext.Doc
 	editing bool // a compose window has it
 	cut     bool // doc is not all of the draft: too long to show, so not to approve here
@@ -66,13 +131,17 @@ func (p *mailPage) setDrafts() {
 	found := false
 	for _, d := range p.drafts {
 		doc, cut := richtext.FromComposeHTMLCut(d.HTML)
-		p.draftView[d.ID] = draftInfo{strings.Join(strings.Fields(doc.PlainText()), " "), doc, p.a.plat.ComposeOpen(d.ID), cut}
+		safe, _, _ := gomail.Sanitize(d.HTML, nil, false)
+		p.draftView[d.ID] = draftInfo{strings.Join(strings.Fields(doc.PlainText()), " "), safe, doc, p.a.plat.ComposeOpen(d.ID), cut}
 		found = found || d.ID == p.draftSel
 	}
 	if !found {
 		p.draftSel = 0
+		p.closeDraftView()
 	}
 }
+
+func (p *mailPage) closeDraftView() { p.draftBody.closeView() }
 
 // accountByID is the loaded account with id.
 func (a *App) accountByID(id int64) (core.Account, bool) {
@@ -143,6 +212,7 @@ func (p *mailPage) draftPane(c *ui.Context) {
 	col := ui.Column(c).Grow(1).Shrink(1)
 	i := slices.IndexFunc(p.drafts, func(d core.Draft) bool { return d.ID == p.draftSel })
 	if i < 0 {
+		p.closeDraftView()
 		col.Center().Children(func() {
 			ui.Icon(c, icons.Bird).Size(theme.Watermark, theme.Watermark).TextColor(t.Border)
 		})
@@ -150,6 +220,16 @@ func (p *mailPage) draftPane(c *ui.Context) {
 	}
 	d := p.drafts[i]
 	info := p.draftView[d.ID]
+	p.draftBody.show(p.a, draftPreviewKey, info.html, func() (string, bool) {
+		if p.a.route.Page != PageMail || p.draftSel == 0 {
+			return "", false
+		}
+		if _, ok := draftsOf(p.folders, p.view); !ok {
+			return "", false
+		}
+		di, ok := p.draftView[p.draftSel]
+		return di.html, ok
+	})
 	col.Children(func() {
 		p.sendDialog(c)
 		p.draftBar(c, d, info)
@@ -159,7 +239,14 @@ func (p *mailPage) draftPane(c *ui.Context) {
 					kit.Text(c, cmp.Or(d.Subject, i18n.T("mail.no_subject")), t.Text.Xl).FontWeight(600)
 					p.draftFields(c, d)
 					ui.Column(c).Padding(th.Space(4), 0, 0, 0).BorderWidth(theme.Hairline, 0, 0, 0).BorderColor(t.Border).Children(func() {
-						richtext.Render(c, info.doc, richtext.RenderOptions{OnLink: p.a.openLink})
+						switch {
+						case p.draftBody.view != nil:
+							kit.WebView(c, p.draftBody.view).FillWidth().Height(max(float32(p.draftBody.height), th.Space(6)))
+						case p.draftBody.err != nil:
+							richtext.Render(c, info.doc, richtext.RenderOptions{OnLink: p.a.openLink})
+						default:
+							ui.Box(c).FillWidth().Height(th.Space(6))
+						}
 					})
 					draftAttachments(c, d.Attachments)
 				})
@@ -309,6 +396,7 @@ func (p *mailPage) doSend(id, rev int64, call func(context.Context) error) {
 		case err == nil:
 			a.plat.DraftDeleted(id)
 			p.draftSel = 0
+			p.closeDraftView()
 		case errors.As(err, &warn):
 			p.sending.ask, p.sending.id, p.sending.rev, p.sending.warnings = true, id, rev, warn.Check
 			return

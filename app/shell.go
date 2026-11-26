@@ -6,6 +6,7 @@ import (
 	"math"
 	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -110,9 +111,13 @@ func (a *App) setRoute(r Route) {
 	a.mail.closeViewEditor()
 	if r.Page != PageMail {
 		a.mail.stopOlder() // older mail is fetched only while the list shows
+		a.mail.closeDraftView()
 	}
 	if r.Page != PageSettings || r.Settings != "about" {
 		a.pages[PageSettings].(*settingsPage).closeBird() // its WebGL runs only while About shows
+	}
+	if r.Page != PageSettings || !strings.HasPrefix(r.Settings, "account:") {
+		a.pages[PageSettings].(*settingsPage).closeSigPreview()
 	}
 	a.route = r
 	a.gen++

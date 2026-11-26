@@ -384,9 +384,10 @@ type fakePlatform struct {
 	dataDir   string // DataDir
 	customDir bool
 
-	views     map[int64]*fakeBodyView // the body pages open, by message
-	onNewView func(message int64)     // runs inside NewBodyView, as the event loop may run there
-	viewErr   error                   // NewBodyView's error
+	views        map[int64]*fakeBodyView // the body pages open, by message
+	secureBodies map[int64]string        // ShowSecureBody HTML, by message
+	onNewView    func(message int64)     // runs inside NewBodyView, as the event loop may run there
+	viewErr      error                   // NewBodyView's error
 
 	composing map[int64]bool // the drafts whose compose window is open (ComposeOpen)
 
@@ -531,6 +532,7 @@ func (p *fakePlatform) NewBodyView(message int64) (ui.NativeWebView, func(), err
 		}
 		v.closed = true
 		delete(p.views, message)
+		delete(p.secureBodies, message)
 	}, nil
 }
 
@@ -554,6 +556,18 @@ func (p *fakePlatform) TranslateBody(message int64, texts map[string]string) {
 
 func (p *fakePlatform) ShowSecureBody(id int64, html, text string, truncated bool) {
 	p.record("ShowSecureBody", fmt.Sprint(id))
+	p.mu.Lock()
+	if p.secureBodies == nil {
+		p.secureBodies = map[int64]string{}
+	}
+	p.secureBodies[id] = html
+	p.mu.Unlock()
+}
+
+func (p *fakePlatform) secureBody(id int64) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.secureBodies[id]
 }
 
 func (p *fakePlatform) Print(message int64) {

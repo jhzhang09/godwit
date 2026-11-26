@@ -11,6 +11,7 @@ import (
 	"github.com/egoist/mygo/ui"
 	"github.com/egoist/mygo/ui/editor"
 	"github.com/godwit-email/godwit/core"
+	gomail "github.com/godwit-email/godwit/core/mail"
 	"github.com/godwit-email/godwit/internal/i18n"
 	"github.com/godwit-email/godwit/internal/icons"
 	"github.com/godwit-email/godwit/internal/kit"
@@ -350,20 +351,21 @@ func (p *settingsPage) setAccountSignature(accountID, id int64) {
 	p.patch(accountID, core.AccountPatch{SignatureID: &id}, nil)
 }
 
-// sigDoc is a signature's preview: its editor HTML (images as data:) as a
-// richtext document, for the stored HTML it was read for.
+// sigDoc is a signature's preview: its editor HTML (images as data:) sanitized
+// for reader.html (safe) and as a richtext fallback document, for sig.HTML.
 type sigDoc struct {
 	html string
+	safe string
 	doc  richtext.Doc
 	ok   bool
 }
 
 // signaturePreview is sig's preview, read once per stored HTML; false
 // until read.
-func (p *settingsPage) signaturePreview(sig core.Signature) (richtext.Doc, bool) {
+func (p *settingsPage) signaturePreview(sig core.Signature) (sigDoc, bool) {
 	a := p.a
 	if d, ok := p.sigDocs[sig.ID]; ok && d.html == sig.HTML {
-		return d.doc, d.ok
+		return d, d.ok
 	}
 	p.sigDocs[sig.ID] = sigDoc{html: sig.HTML}
 	var html string
@@ -372,11 +374,15 @@ func (p *settingsPage) signaturePreview(sig core.Signature) (richtext.Doc, bool)
 		return err
 	}, func(err error) {
 		if d := p.sigDocs[sig.ID]; err == nil && d.html == sig.HTML {
-			p.sigDocs[sig.ID] = sigDoc{html: sig.HTML, doc: richtext.FromComposeHTML(html), ok: true}
+			compact := gomail.CompactParagraphs(html)
+			safe, _, _ := gomail.Sanitize(compact, nil, false)
+			p.sigDocs[sig.ID] = sigDoc{html: sig.HTML, safe: safe, doc: richtext.FromComposeHTML(html), ok: true}
 		}
 	})
-	return richtext.Doc{}, false
+	return sigDoc{}, false
 }
+
+func (p *settingsPage) closeSigPreview() { p.sigPrev.closeView() }
 
 // accountSignatureView is the account page's 签名: its default signature
 // (or none), a read-only preview, and where signatures are edited.
@@ -405,15 +411,42 @@ func (p *settingsPage) accountSignatureView(c *ui.Context, acc core.Account) {
 			return field
 		})
 	}}
-	if cur != nil {
+	if cur == nil {
+		p.closeSigPreview()
+	} else {
+		sd, ok := p.signaturePreview(*cur)
+		if ok {
+			p.sigPrev.show(a, sigPreviewKey, sd.safe, func() (string, bool) {
+				if a.route.Page != PageSettings || a.route.Settings != accountRoute(acc.ID) {
+					return "", false
+				}
+				for _, ac := range a.accounts {
+					if ac.ID != acc.ID {
+						continue
+					}
+					for _, s := range a.signatures {
+						if s.ID == ac.SignatureID {
+							if d, has := p.sigDocs[s.ID]; has && d.ok && d.html == s.HTML {
+								return d.safe, true
+							}
+							return "", false
+						}
+					}
+				}
+				return "", false
+			})
+		}
 		rows = append(rows, func() {
 			settingBlock(c, func() {
 				kit.Text(c, i18n.T("settings.account.signature.preview"), t.Text.Xs).TextColor(t.Muted)
-				kit.Block(c, ui.Column(c), kit.ToneRaised).FillWidth().Padding(th.Space(2.5), th.Space(3)).Children(func() {
-					if doc, ok := p.signaturePreview(*cur); ok {
-						richtext.Render(c, doc, richtext.RenderOptions{OnLink: a.openLink})
-					} else {
-						kit.Text(c, " ", t.Text.Sm)
+				kit.Block(c, ui.Column(c), kit.ToneOutline).Background(t.Background).FillWidth().Padding(th.Space(2.5), th.Space(3)).Children(func() {
+					switch {
+					case ok && p.sigPrev.view != nil:
+						kit.WebView(c, p.sigPrev.view).FillWidth().Height(max(float32(p.sigPrev.height), th.Space(6)))
+					case ok && p.sigPrev.err != nil:
+						richtext.Render(c, sd.doc, richtext.RenderOptions{OnLink: a.openLink})
+					default:
+						ui.Box(c).FillWidth().Height(th.Space(6))
 					}
 				})
 			})

@@ -276,7 +276,7 @@ type App struct {
 	latest                       string  // a newer version the update feed offers (watchLatest); "" none
 	recentSearches               []recentSearch
 	recentSearchesLoaded         bool
-	latestInstalls               bool    // it installs itself and waits for a relaunch
+	latestInstalls               bool // it installs itself and waits for a relaunch
 
 	dirty             []events.Event // events since the last refresh
 	refreshStop       func()         // the pending throttled refresh; nil when none
@@ -620,7 +620,9 @@ func (a *App) MailReady() bool {
 func (a *App) Close() {
 	a.cancel() // the event pump unsubscribes as it stops
 	a.mail.reader.closeViews()
+	a.mail.closeDraftView()
 	a.pages[PageSettings].(*settingsPage).closeSignature()
+	a.pages[PageSettings].(*settingsPage).closeSigPreview()
 	a.pages[PageSettings].(*settingsPage).closeBird()
 	a.tempMu.Lock()
 	defer a.tempMu.Unlock()

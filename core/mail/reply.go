@@ -61,6 +61,10 @@ func FromSelf(from, replyTo, self string) bool {
 	return key != "" && AddrKey(from) == key && (replyTo == "" || AddrKey(replyTo) == key)
 }
 
+// quoteBlockquoteStyle gives generated reply/forward blockquotes a standard 2 px
+// left rail and spacing in external clients and uncollapsed readers.
+const quoteBlockquoteStyle = "margin: 8px 0; padding-left: 12px; border-left: 2px solid rgba(127, 127, 127, 0.28)"
+
 // QuoteHTML returns the "on {date}, {from} wrote:" line plus the original in a blockquote.
 func QuoteHTML(orig *Parsed) string { return QuoteHTMLIn(orig, "") }
 
@@ -71,7 +75,7 @@ func QuoteHTMLIn(orig *Parsed, lang string) string {
 		body = strings.ReplaceAll(html.EscapeString(strings.ReplaceAll(orig.Text, "\r\n", "\n")), "\n", "<br>")
 	}
 	date, from := i18n.FullDateIn(orig.Date, cmp.Or(lang, "zh-Hans"))+orig.Date.Format(" 15:04"), html.EscapeString(orig.From)
-	return "<p>" + quoteLead(lang, date, from) + "</p><blockquote>" + body + "</blockquote>"
+	return "<p>" + quoteLead(lang, date, from) + `</p><blockquote style="` + quoteBlockquoteStyle + `">` + body + "</blockquote>"
 }
 
 // QuoteHTMLWith formats the reply/forward quote with attribution in lang,
@@ -86,7 +90,7 @@ func QuoteHTMLWith(orig *Parsed, lang string, inline map[string]Attachment) (str
 		body, images = PrepareQuoteHTML(orig.HTML, inline)
 	}
 	date, from := i18n.FullDateIn(orig.Date, cmp.Or(lang, "zh-Hans"))+orig.Date.Format(" 15:04"), html.EscapeString(orig.From)
-	return "<p>" + quoteLead(lang, date, from) + "</p><blockquote>" + body + "</blockquote>", images
+	return "<p>" + quoteLead(lang, date, from) + `</p><blockquote style="` + quoteBlockquoteStyle + `">` + body + "</blockquote>", images
 }
 
 // PrepareQuoteHTML inlines safe <style> rules in htmlBody, converts valid cid:

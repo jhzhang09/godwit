@@ -89,9 +89,9 @@ func TestReplyAllDraft(t *testing.T) {
 	assert.Equal(t, []string{"Bob <bob@example.com>"}, d.To)
 	assert.Equal(t, []string{"Carol <carol@example.com>", "dan@example.com"}, d.Cc)
 	assert.Equal(t, "Re: plan", d.Subject)
-	assert.Contains(t, d.HTML, "<blockquote>the plan")
+	assert.Contains(t, d.HTML, `border-left: 2px solid rgba(127, 127, 127, 0.28)">the plan`)
 	assert.Contains(t, d.HTML, "Godwit")
-	assert.Less(t, strings.Index(d.HTML, "Godwit"), strings.Index(d.HTML, "<blockquote>"), "signature above the quote")
+	assert.Less(t, strings.Index(d.HTML, "Godwit"), strings.Index(d.HTML, `data-godwit="quote"`), "signature above the quote")
 }
 
 // A sent reply has new text, signature, then the quote, in its HTML and text part.
@@ -733,8 +733,8 @@ func TestSignatureHTMLMarked(t *testing.T) {
 	sig := SignatureHTMLPrefix + `<p><b>Bob</b> <a href="https://x.com">site</a><script>alert(1)</script>` +
 		`<img src="https://x.com/t.png" onerror="alert(2)"></p><div data-godwit="quote">q</div>`
 	got := signatureHTML(sig, nil, true)
-	assert.True(t, strings.HasPrefix(got, `<div data-godwit="signature"><p>-- </p><p><b>Bob</b>`), got)
-	assert.True(t, strings.HasPrefix(signatureHTML(sig, nil, false), `<div data-godwit="signature"><p><b>Bob</b>`), "no delimiter by default")
+	assert.True(t, strings.HasPrefix(got, `<div data-godwit="signature"><p style="margin: 0">-- </p><p style="margin: 0"><b>Bob</b>`), got)
+	assert.True(t, strings.HasPrefix(signatureHTML(sig, nil, false), `<div data-godwit="signature"><p style="margin: 0"><b>Bob</b>`), "no delimiter by default")
 	assert.Equal(t, 1, strings.Count(got, "data-godwit"), got)
 	assert.Contains(t, got, "<b>Bob</b>")
 	assert.Contains(t, got, `href="https://x.com"`)
@@ -742,6 +742,33 @@ func TestSignatureHTMLMarked(t *testing.T) {
 		assert.NotContains(t, got, bad)
 	}
 	assert.Equal(t, "", signatureHTML(SignatureHTMLPrefix, nil, true))
+}
+
+func TestSignatureHTMLCompactAndInlineStyles(t *testing.T) {
+	e := newSendEnv(t, false)
+	sig := SignatureHTMLPrefix + `<p><span style="font-size: 9pt; color: #6b7280"><em>Alice</em></span></p><p>Acme Corp</p><p style="margin: 8px 0">Note</p>`
+	got := signatureHTML(sig, nil, true)
+	assert.Equal(t,
+		`<div data-godwit="signature"><p style="margin: 0">-- </p><p style="margin: 0"><span style="font-size: 9pt; color: #6b7280"><em>Alice</em></span></p><p style="margin: 0">Acme Corp</p><p style="margin: 8px 0">Note</p></div>`,
+		got)
+
+	_, err := e.s.UpdateAccount(bg, e.acc.ID, AccountPatch{Signature: &sig})
+	require.NoError(t, err)
+	st, err := e.s.GetSettings(bg)
+	require.NoError(t, err)
+	st.SignatureDelimiter = true
+	_, err = e.s.SetSettings(bg, st)
+	require.NoError(t, err)
+
+	d, err := e.s.NewDraft(bg, e.acc.ID, "new", 0)
+	require.NoError(t, err)
+	d.To = []string{"bob@example.com"}
+	d, err = e.s.SaveDraft(bg, d)
+	require.NoError(t, err)
+	d, err = e.s.GetDraft(bg, d.ID)
+	require.NoError(t, err)
+	_, _, block := mail.SplitDraft(d.HTML)
+	assert.Equal(t, got, block)
 }
 
 // Settings.SignatureDelimiter: off (the default) a new draft's signature has

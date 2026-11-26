@@ -322,11 +322,12 @@ func signatureHTML(sig string, cids map[string]bool, delim bool) string {
 		return `<div data-godwit="signature"><p>` + escapeLines(sig) + "</p></div>"
 	}
 	body := SignatureEditorHTML(sig, cids)
-	switch {
-	case body == "":
+	if body == "" {
 		return ""
-	case delim:
-		return `<div data-godwit="signature"><p>-- </p>` + body + "</div>" // the delimiter a plain one has; the body is blocks
+	}
+	body = mail.CompactParagraphs(body)
+	if delim {
+		return `<div data-godwit="signature"><p style="margin: 0">-- </p>` + body + "</div>" // the delimiter a plain one has; the body is blocks
 	}
 	return `<div data-godwit="signature">` + body + "</div>"
 }
