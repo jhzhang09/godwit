@@ -12,7 +12,7 @@ export default {
   name: "Godwit",
   identifier: "email.godwit.app",
   // 本地功能预览版使用独立版本号，避免界面连接到已安装版本的旧后端。
-  version: env.GODWIT_BUILD_VERSION || "1.40.1", // x-release-please-version
+  version: env.GODWIT_BUILD_VERSION || "1.40.2", // x-release-please-version
   copyright: "© 2026 The Godwit Authors",
   icon: "assets/icon.png",
   main: "./cmd/godwit",

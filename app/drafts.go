@@ -27,7 +27,7 @@ const (
 // for non-message HTML previews such as the drafts pane and account signature preview.
 type htmlPreview struct {
 	view   ui.NativeWebView
-	close  func()
+	close  func(reuse bool)
 	posted bool
 	err    error
 	height int
@@ -37,7 +37,7 @@ type htmlPreview struct {
 
 func (p *htmlPreview) closeView() {
 	if p.close != nil {
-		p.close()
+		p.close(true)
 	}
 	p.view, p.close, p.height, p.shown, p.has, p.err = nil, nil, 0, "", false, nil
 }
@@ -63,11 +63,11 @@ func (p *htmlPreview) show(a *App, key int64, html string, stillActive func() (s
 		if !ok {
 			return
 		}
-		v, closeView, err := a.plat.NewBodyView(key)
+		v, closeView, err := a.plat.NewBodyView(key, nil)
 		curHTML, ok = stillActive()
 		if !ok || a.ctx.Err() != nil || p.view != nil {
 			if err == nil {
-				closeView()
+				closeView(a.ctx.Err() == nil)
 			}
 			return
 		}

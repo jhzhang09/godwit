@@ -64,15 +64,13 @@ type Platform interface {
 	DraftDeleted(id int64)
 	// SettingsChanged is told the settings after every change.
 	SettingsChanged(st core.Settings)
-	// NewBodyView makes a reader page in the main window showing message's
-	// body (bound to it before it loads); close unbinds and destroys it.
-	// The page reports to BodyHeight, BodyLink, BodyNavigate, BodyBuilt and
-	// BodyFailed with the view. UI thread only; it may run the event loop.
-	NewBodyView(message int64) (view ui.NativeWebView, close func(), err error)
-	// AllowImages lets the pages showing message load its remote images
-	// (加载图片). Call it after NewBodyView: it forgets once the last page
-	// of the message closes.
-	AllowImages(message int64)
+	// NewBodyView binds a reader page to message. initial, when non-nil, is the
+	// fresh sanitized read with remote images blocked. Release revokes the
+	// binding; reuse lets the platform keep the empty shell. UI thread only.
+	NewBodyView(message int64, initial *core.Message) (view ui.NativeWebView, release func(reuse bool), err error)
+	// ReloadImages retries the bound body's images under the current policy.
+	// Only manual (加载图片 for this message) may override that policy.
+	ReloadImages(message int64, manual bool)
 	// BodyGlass tells a body's page what the reader's frosted surfaces cover of
 	// it, in CSS pixels: top for the collapsing sticky header and bottom for the
 	// floating reply card. Used when system native glass is unavailable. UI thread only.
@@ -713,6 +711,9 @@ func (a *App) BeforeClose(proceed func()) {
 // SetForeground records whether the window is in front, and tells the
 // backend, which notifies new mail and narrows background syncs by it.
 func (a *App) SetForeground(on bool) {
+	if a.foreground && !on {
+		a.mail.reader.pausePaint()
+	}
 	a.foreground = on
 	if on {
 		a.checkLoginItem() // the user may come back from the system's login items
