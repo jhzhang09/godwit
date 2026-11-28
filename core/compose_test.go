@@ -234,7 +234,7 @@ func TestSendHTMLWithBcc(t *testing.T) {
 	require.NoError(t, err)
 	src := filepath.Join(t.TempDir(), "notes.txt")
 	require.NoError(t, os.WriteFile(src, []byte("notes"), 0o600))
-	_, err = e.s.AddAttachment(bg, d.ID, src)
+	_, err = e.s.AddAttachment(bg, d.ID, src, false)
 	require.NoError(t, err)
 	draftDir := filepath.Join(e.dir, "drafts", strconv.FormatInt(d.ID, 10))
 	require.DirExists(t, draftDir)
@@ -509,12 +509,12 @@ func TestSendValidates(t *testing.T) {
 	t.Cleanup(func() { attachLimit = old })
 	src := filepath.Join(t.TempDir(), "a.bin")
 	require.NoError(t, os.WriteFile(src, make([]byte, 200), 0o600))
-	_, err = e.s.AddAttachment(bg, d.ID, src)
+	_, err = e.s.AddAttachment(bg, d.ID, src, false)
 	assert.ErrorIs(t, err, ErrTooLarge)
 	require.NoError(t, os.WriteFile(src, make([]byte, 100), 0o600))
-	a1, err := e.s.AddAttachment(bg, d.ID, src)
+	a1, err := e.s.AddAttachment(bg, d.ID, src, false)
 	require.NoError(t, err)
-	_, err = e.s.AddAttachment(bg, d.ID, src)
+	_, err = e.s.AddAttachment(bg, d.ID, src, false)
 	require.NoError(t, err)
 	assert.ErrorIs(t, e.s.Send(bg, d.ID), ErrTooLarge)
 	check()
@@ -545,7 +545,7 @@ func TestSendRejectsOversizeEncodedMessage(t *testing.T) {
 	require.NoError(t, err)
 	src := filepath.Join(t.TempDir(), "a.bin")
 	require.NoError(t, os.WriteFile(src, make([]byte, 900), 0o600)) // under the limit; base64 and headers push it over
-	_, err = e.s.AddAttachment(bg, d.ID, src)
+	_, err = e.s.AddAttachment(bg, d.ID, src, false)
 	require.NoError(t, err)
 	assert.ErrorIs(t, e.s.Send(bg, d.ID), ErrTooLarge)
 	assert.Equal(t, 1, e.count(t, "SELECT count(*) FROM drafts"))
@@ -1146,40 +1146,26 @@ func TestDraftBodyInlineImages(t *testing.T) {
 	d, err := e.s.NewDraft(bg, e.acc.ID, "new", 0)
 	require.NoError(t, err)
 	d.To = []string{"bob@example.com"}
-	d.Subject = "inline body image"
-	d.HTML = `<p>hello</p><img src="data:image/png;base64,` + pngB64 + `">`
+	d.Subject = "legacy inline body image"
 
-	saved, err := e.s.SaveDraft(bg, d)
+	// Legacy drafts with stored body-* rows in draft_images remain readable, sendable, and prunable.
+	extracted, imgs := extractBodyDataImages(`<p>hello</p><img src="data:image/png;base64,` + pngB64 + `">`)
+	require.Len(t, imgs, 1)
+	d.HTML = extracted
+	saved, err := e.s.saveDraftWithImages(bg, d, imgs)
 	require.NoError(t, err)
 	assert.Contains(t, saved.HTML, `src="cid:body-`)
-	assert.NotContains(t, saved.HTML, "data:image/png")
 
 	cids := e.rows(t, "SELECT cid FROM draft_images WHERE draft_id = ?", d.ID)
 	require.Len(t, cids, 1)
 	assert.True(t, strings.HasPrefix(cids[0][0].(string), "body-"))
 
-	// Re-saving with the same data: image deduplicates instead of duplicating rows.
-	saved.HTML = `<p>updated</p><img src="data:image/png;base64,` + pngB64 + `">`
-	saved, err = e.s.SaveDraft(bg, saved)
-	require.NoError(t, err)
-	cids = e.rows(t, "SELECT cid FROM draft_images WHERE draft_id = ?", d.ID)
-	require.Len(t, cids, 1)
-
-	// InlineDraftImages expands cid:body-... back to data: for the UI.
+	// InlineDraftImages expands legacy cid:body-... back to data: for the UI.
 	shown, err := e.s.InlineDraftImages(bg, saved.ID, saved.HTML)
 	require.NoError(t, err)
 	assert.Contains(t, shown, "data:image/png;base64,")
 
-	// Removing the image from the body prunes the unused body-* row.
-	saved.HTML = "<p>no image</p>"
-	saved, err = e.s.SaveDraft(bg, saved)
-	require.NoError(t, err)
-	assert.Empty(t, e.rows(t, "SELECT cid FROM draft_images WHERE draft_id = ?", d.ID))
-
-	// Put the image back and send: outgoing MIME includes multipart/related inline attachment.
-	saved.HTML = `<p>send</p><img src="data:image/png;base64,` + pngB64 + `">`
-	saved, err = e.s.SaveDraft(bg, saved)
-	require.NoError(t, err)
+	// Sending a draft with legacy body-* image includes multipart/related inline attachment.
 	require.NoError(t, e.s.Send(bg, saved.ID))
 	e.clock.Advance(UndoSendWindow)
 	e.sync(t)
@@ -1190,4 +1176,16 @@ func TestDraftBodyInlineImages(t *testing.T) {
 	parsed, err := mail.Parse(got[0].Data)
 	require.NoError(t, err)
 	assert.NotEmpty(t, parsed.Attachments)
+
+	// Removing a legacy body-* image from another draft prunes the unused row.
+	d2, err := e.s.NewDraft(bg, e.acc.ID, "new", 0)
+	require.NoError(t, err)
+	d2.HTML = extracted
+	saved2, err := e.s.saveDraftWithImages(bg, d2, imgs)
+	require.NoError(t, err)
+	require.Len(t, e.rows(t, "SELECT cid FROM draft_images WHERE draft_id = ?", d2.ID), 1)
+	saved2.HTML = "<p>no image</p>"
+	_, err = e.s.SaveDraft(bg, saved2)
+	require.NoError(t, err)
+	assert.Empty(t, e.rows(t, "SELECT cid FROM draft_images WHERE draft_id = ?", d2.ID))
 }

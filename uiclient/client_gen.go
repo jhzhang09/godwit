@@ -25,8 +25,8 @@ func (cl *Client) AddAddressBook(ctx context.Context, in core.AddressBookInput) 
 	return call[core.AddressBook](cl, ctx, "AddAddressBook", in)
 }
 
-func (cl *Client) AddAttachmentAt(ctx context.Context, draftID int64, revision int64, srcPath string) (core.DraftAttachment, int64, error) {
-	return call2[core.DraftAttachment, int64](cl, ctx, "AddAttachmentAt", draftID, revision, srcPath)
+func (cl *Client) AddAttachmentAt(ctx context.Context, draftID int64, revision int64, srcPath string, inline bool) (core.DraftAttachment, int64, error) {
+	return call2[core.DraftAttachment, int64](cl, ctx, "AddAttachmentAt", draftID, revision, srcPath, inline)
 }
 
 func (cl *Client) AddLocalArchive(ctx context.Context, name string) (core.Account, error) {
@@ -271,6 +271,10 @@ func (cl *Client) DraftForApproval(ctx context.Context, approvalID int64) (int64
 
 func (cl *Client) DraftFromQuickReply(ctx context.Context, messageID int64, r core.QuickReply) (core.Draft, error) {
 	return call[core.Draft](cl, ctx, "DraftFromQuickReply", messageID, r)
+}
+
+func (cl *Client) DraftImageFiles(ctx context.Context, draftID int64, cids []string) ([]core.InlineImage, error) {
+	return call[[]core.InlineImage](cl, ctx, "DraftImageFiles", draftID, cids)
 }
 
 func (cl *Client) DraftSMIMEStatus(ctx context.Context, draftID int64) (core.DraftSMIMEStatus, error) {
@@ -839,6 +843,10 @@ func (cl *Client) SetDraftModel(ctx context.Context, draftID int64, model string
 
 func (cl *Client) SetDraftSMIME(ctx context.Context, draftID int64, sign *bool, encrypt *bool, pinnedCerts map[string]string) (core.DraftSMIMEStatus, error) {
 	return call[core.DraftSMIMEStatus](cl, ctx, "SetDraftSMIME", draftID, sign, encrypt, pinnedCerts)
+}
+
+func (cl *Client) SetDraftSignature(ctx context.Context, id int64, signatureID int64, revision int64) (core.Draft, error) {
+	return call[core.Draft](cl, ctx, "SetDraftSignature", id, signatureID, revision)
 }
 
 func (cl *Client) SetFlags(ctx context.Context, ids []int64, add []string, remove []string) error {

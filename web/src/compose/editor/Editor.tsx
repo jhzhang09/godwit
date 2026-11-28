@@ -1,3 +1,4 @@
+import { isMyGo } from "mygo-runtime";
 import { isHotkey, RangeApi, type TRange } from "platejs";
 import { createPlatePlugin, Plate, PlateContent, usePlateEditor } from "platejs/react";
 import {
@@ -8,52 +9,16 @@ import {
   useContext,
   useEffect,
   useImperativeHandle,
+  useLayoutEffect,
   useRef,
   useState,
 } from "react";
 import { createPortal } from "react-dom";
 import type { T } from "@/shared/i18n";
 import { deserialize, fromHTML, offsetOf, toHTML, toText } from "./html";
-import { BodyImagePlugin, plugins } from "./plugins";
+import { DraftImages, plugins, SafePastePlugin } from "./plugins";
 import { Toolbar } from "./Toolbar";
-import { insertBodyImages, isInTable, moveTableCell, stepBlockIndent } from "./table";
-
-const MAX_BODY_IMAGE_BYTES = 5 * 1024 * 1024;
-const BODY_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
-
-function readImageFiles(
-  files: File[],
-  onInsert: (urls: string[]) => void,
-  onError?: (names: string[]) => void,
-) {
-  const valid: File[] = [];
-  const failed: string[] = [];
-  for (const f of files) {
-    if (!BODY_IMAGE_TYPES.has(f.type) || f.size === 0 || f.size > MAX_BODY_IMAGE_BYTES) {
-      failed.push(f.name || "image");
-    } else {
-      valid.push(f);
-    }
-  }
-  if (failed.length > 0) onError?.(failed);
-  if (valid.length === 0) return;
-  Promise.all(
-    valid.map(
-      (file) =>
-        new Promise<string>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(String(reader.result ?? ""));
-          reader.onerror = () => reject(reader.error);
-          reader.readAsDataURL(file);
-        }),
-    ),
-  )
-    .then((urls) => {
-      const clean = urls.filter(Boolean);
-      if (clean.length > 0) onInsert(clean);
-    })
-    .catch(() => {});
-}
+import { isInTable, moveTableCell, stepBlockIndent } from "./table";
 
 /** A ⌘K on a selection: the body's plain text (toText) and the selection's [start, end) in it. */
 export type CmdKSelection = {
@@ -90,7 +55,6 @@ const HeldBlockPlugin = createPlatePlugin({
   },
 });
 
-/** The page's hold on a mounted editor: `setValue` replaces the body as one undoable step, unreported. */
 // Letters and digits only, lowercase, without accents or marks: "dall'Agenzia" and
 // "dall’Agenzia" fold to the same string.
 const fold = (s: string) =>
@@ -116,10 +80,15 @@ function resembles(word: string, text: string): boolean {
   return row[b.length] <= Math.max(2, Math.floor(Math.max(a.length, b.length) / 3));
 }
 
-export type EditorHandle = {
-  setValue(html: string): void;
-  insertImages(urls: string[]): void;
-};
+/**
+ * The page's hold on a mounted editor: `setValue` replaces the body as one undoable step, unreported;
+ * `insertImages` puts the draft's images (by Content-ID or data: URL) at the selection, or at the end.
+ */
+export type EditorHandle = { setValue(html: string): void; insertImages(cids: string[]): void };
+
+// The image files of a paste or drop, the ones the page may put in the body (Go sniffs them again).
+const imageFiles = (d: DataTransfer | null) =>
+  [...(d?.files ?? [])].filter((f) => /^image\/(png|jpeg|gif|webp)$/.test(f.type));
 
 /**
  * The compose body: a Plate editor over the native page's formats, loaded from `initial` (read at
@@ -127,7 +96,9 @@ export type EditorHandle = {
  * slot, renders into `toolbarSlot` (the page's bottom bar; still in the editor's Plate context), else
  * above it. IME compositions are reported so saving can wait for them. ⌘K on a selection goes
  * to `onCmdK` when set (Wit), else opens the link popover. While a `popover` is given (⌘K's), it
- * shows right under the block the selection ends in, and the selection ⌘K took stays marked.
+ * shows right under the block the selection ends in, and the selection ⌘K took stays marked. The
+ * draft's images show from `images` (cid → data: URL); image files pasted (without text) or dropped
+ * go to `onImageFiles`, which adds them and calls `insertImages`.
  */
 export function Editor(props: {
   initial: string;
@@ -143,14 +114,19 @@ export function Editor(props: {
   toolbarSlot?: HTMLElement | null;
   popover?: ReactNode;
   ref?: Ref<EditorHandle>;
+  images?: Record<string, string>;
+  onImageFiles?(files: File[]): void;
 }) {
   const { initial, readOnly, placeholder, onChange, onComposing, t, attach, onCmdK } = props;
-  const { onPickImages, onImageError, toolbarSlot, popover, ref } = props;
+  const { onPickImages, toolbarSlot, popover, ref, images, onImageFiles } = props;
   const held = !!popover;
   const editor = usePlateEditor({
-    plugins: [...plugins, BodyImagePlugin, HeldBlockPlugin],
+    plugins: [...plugins, HeldBlockPlugin],
     value: (e) => fromHTML(e, initial, true),
   });
+  useLayoutEffect(() => {
+    editor.setOption(SafePastePlugin, "images", images ?? {});
+  }, [editor, images]);
   // The body setValue made, the page's own and no edit. Slate reports changes a microtask later, so the
   // next report is matched against it, never assumed to be it.
   const set = useRef<string | null>(null);
@@ -161,9 +137,21 @@ export function Editor(props: {
         editor.tf.withNewBatch(() => editor.tf.setValue(deserialize(editor, html, true)));
         set.current = toHTML(editor.children);
       },
-      insertImages(urls) {
-        insertBodyImages(editor, urls);
-        editor.tf.focus();
+      insertImages(cids) {
+        if (cids.length === 0) return;
+        const nodes = cids.map((c) => ({
+          type: "img",
+          url: c.startsWith("data:") ? c : `cid:${c}`,
+          children: [{ text: "" }],
+        }));
+        editor.tf.insertNodes(nodes, { select: true });
+        // A line after an image that ends the body, to type on.
+        if (editor.children.at(-1)?.type === "img") {
+          editor.tf.insertNodes(
+            { type: "p", children: [{ text: "" }] },
+            { at: [editor.children.length], select: true },
+          );
+        }
       },
     }),
     [editor],
@@ -269,114 +257,112 @@ export function Editor(props: {
   }, [handleReplacementText]);
 
   return (
-    <HeldContext.Provider value={held ? { ...mark, slot: setSlot } : null}>
-      <Plate
-        editor={editor}
-        readOnly={readOnly}
-        onValueChange={({ value }) => {
-          const html = toHTML(value);
-          const own = html === set.current;
-          set.current = null;
-          if (!own) onChange(html);
-        }}
-      >
-        <div className="flex flex-col">
-          {toolbarSlot ? createPortal(toolbar, toolbarSlot) : toolbar}
-          {/* No overflow on the editable itself: WebKit (WKWebView) stops repainting a contenteditable
+    <DraftImages.Provider value={images ?? {}}>
+      <HeldContext.Provider value={held ? { ...mark, slot: setSlot } : null}>
+        <Plate
+          editor={editor}
+          readOnly={readOnly}
+          onValueChange={({ value }) => {
+            const html = toHTML(value);
+            const own = html === set.current;
+            set.current = null;
+            if (!own) onChange(html);
+          }}
+        >
+          <div className="flex flex-col">
+            {toolbarSlot ? createPortal(toolbar, toolbarSlot) : toolbar}
+            {/* No overflow on the editable itself: WebKit (WKWebView) stops repainting a contenteditable
             that is also a scroll container — typed text appeared only after a relayout. The page's
             wrapper around the fields and the body scrolls instead. */}
-          <PlateContent
-            ref={editableRef}
-            aria-label={t("compose.body")}
-            placeholder={placeholder}
-            decorate={decorate}
-            onCompositionStart={() => onComposing(true)}
-            onCompositionEnd={() => onComposing(false)}
-            onPaste={(e) => {
-              if (readOnly) return;
-              const files = Array.from(e.clipboardData?.files ?? []);
-              const hasText =
-                Boolean(e.clipboardData?.getData("text/html")) ||
-                Boolean(e.clipboardData?.getData("text/plain"));
-              if (!hasText && files.some((f) => f.type.startsWith("image/"))) {
+            <PlateContent
+              ref={editableRef}
+              aria-label={t("compose.body")}
+              placeholder={placeholder}
+              decorate={decorate}
+              onPaste={(e) => {
+                // A copied text (from Word, say) may carry a picture of itself: text wins.
+                const files = imageFiles(e.clipboardData);
+                if (readOnly || !onImageFiles || !files.length) return;
+                if (e.clipboardData.getData("text/plain")) return;
                 e.preventDefault();
-                e.stopPropagation();
-                readImageFiles(files, (urls) => insertBodyImages(editor, urls), onImageError);
-              }
-            }}
-            onDrop={(e) => {
-              if (readOnly) return;
-              const files = Array.from(e.dataTransfer?.files ?? []);
-              if (files.length > 0 && files.every((f) => f.type.startsWith("image/"))) {
+                onImageFiles(files);
+              }}
+              onDrop={(e) => {
+                // In Godwit's window the file manager's drops come by path (the page's useFileDrop).
+                const files = isMyGo() ? [] : imageFiles(e.dataTransfer);
+                if (readOnly || !onImageFiles || !files.length) return;
                 e.preventDefault();
-                e.stopPropagation();
-                readImageFiles(files, (urls) => insertBodyImages(editor, urls), onImageError);
-              }
-            }}
-            onKeyDown={(e) => {
-              if (e.key === "Tab" && !e.nativeEvent.isComposing && e.target === e.currentTarget) {
-                if (isInTable(editor)) {
+                const at = editor.api.findEventRange(e);
+                if (at) editor.tf.select(at);
+                onImageFiles(files);
+              }}
+              onCompositionStart={() => onComposing(true)}
+              onCompositionEnd={() => onComposing(false)}
+              onKeyDown={(e) => {
+                if (e.key === "Tab" && !e.nativeEvent.isComposing && e.target === e.currentTarget) {
+                  if (isInTable(editor)) {
+                    e.preventDefault();
+                    moveTableCell(editor, e.shiftKey);
+                    return;
+                  }
+                  if (!readOnly) {
+                    e.preventDefault();
+                    stepBlockIndent(editor, e.shiftKey ? -1 : 1);
+                    return;
+                  }
+                }
+                if (
+                  e.key === "Enter" &&
+                  !e.shiftKey &&
+                  !e.nativeEvent.isComposing &&
+                  Date.now() - lastReplacementTime.current < 250
+                ) {
+                  lastReplacementTime.current = 0; // swallow the one Enter that accepted it, no more
                   e.preventDefault();
-                  moveTableCell(editor, e.shiftKey);
+                  e.stopPropagation();
                   return;
                 }
-                if (!readOnly) {
+                if (
+                  e.key === "Enter" &&
+                  e.shiftKey &&
+                  !e.nativeEvent.isComposing &&
+                  e.target === e.currentTarget
+                ) {
                   e.preventDefault();
-                  stepBlockIndent(editor, e.shiftKey ? -1 : 1);
+                  if (readOnly) return;
+                  editor.tf.insertText("\n");
                   return;
                 }
-              }
-              if (
-                e.key === "Enter" &&
-                !e.shiftKey &&
-                !e.nativeEvent.isComposing &&
-                Date.now() - lastReplacementTime.current < 250
-              ) {
-                lastReplacementTime.current = 0; // swallow the one Enter that accepted it, no more
-                e.preventDefault();
-                e.stopPropagation();
-                return;
-              }
-              if (
-                e.key === "Enter" &&
-                e.shiftKey &&
-                !e.nativeEvent.isComposing &&
-                e.target === e.currentTarget
-              ) {
+                // ⌘K on a selection: Wit's rewrite when offered, else the link popover. Not from
+                // inside the popover, which sits in the editable's DOM.
+                if (
+                  e.target !== e.currentTarget ||
+                  e.nativeEvent.isComposing ||
+                  !isHotkey("mod+k", { byKey: true }, e.nativeEvent)
+                )
+                  return;
                 e.preventDefault();
                 if (readOnly) return;
-                editor.tf.insertText("\n");
-                return;
-              }
-              // ⌘K on a selection: Wit's rewrite when offered, else the link popover. Not from
-              // inside the popover, which sits in the editable's DOM.
-              if (
-                e.target !== e.currentTarget ||
-                e.nativeEvent.isComposing ||
-                !isHotkey("mod+k", { byKey: true }, e.nativeEvent)
-              )
-                return;
-              e.preventDefault();
-              if (readOnly) return;
-              // Wit only for a non-empty selection; anything else is the link popover.
-              if (!onCmdK || !editor.selection || !editor.api.isExpanded())
-                return setLinkOpen(true);
-              taken.current = editor.selection;
-              const [a, b] = RangeApi.edges(editor.selection);
-              const top = b.path[0];
-              setMark({
-                block: top,
-                whole:
-                  a.path[0] === top && editor.api.isStart(a, [top]) && editor.api.isEnd(b, [top]),
-              });
-              const v = editor.children;
-              onCmdK({ text: toText(v), start: offsetOf(v, a), end: offsetOf(v, b) });
-            }}
-            className="text-sm leading-[1.75] outline-none [&>*+*]:mt-3 [&_a]:text-[#0b57d0] dark:[&_a]:text-[#8ab4f8] [&_a]:underline [&_blockquote]:border-l-2 [&_blockquote]:pl-3 [&_blockquote]:text-muted-foreground [&_ol]:list-decimal [&_ol]:pl-6 [&_ul]:list-disc [&_ul]:pl-6"
-          />
-        </div>
-        {popover && slot && createPortal(popover, slot)}
-      </Plate>
-    </HeldContext.Provider>
+                // Wit only for a non-empty selection; anything else is the link popover.
+                if (!onCmdK || !editor.selection || !editor.api.isExpanded())
+                  return setLinkOpen(true);
+                taken.current = editor.selection;
+                const [a, b] = RangeApi.edges(editor.selection);
+                const top = b.path[0];
+                setMark({
+                  block: top,
+                  whole:
+                    a.path[0] === top && editor.api.isStart(a, [top]) && editor.api.isEnd(b, [top]),
+                });
+                const v = editor.children;
+                onCmdK({ text: toText(v), start: offsetOf(v, a), end: offsetOf(v, b) });
+              }}
+              className="text-sm leading-[1.75] outline-none [&>*+*]:mt-3 [&_a]:text-[#0b57d0] dark:[&_a]:text-[#8ab4f8] [&_a]:underline [&_blockquote]:border-l-2 [&_blockquote]:pl-3 [&_blockquote]:text-muted-foreground [&_ol]:list-decimal [&_ol]:pl-6 [&_ul]:list-disc [&_ul]:pl-6"
+            />
+          </div>
+          {popover && slot && createPortal(popover, slot)}
+        </Plate>
+      </HeldContext.Provider>
+    </DraftImages.Provider>
   );
 }

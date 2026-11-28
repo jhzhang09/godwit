@@ -54,7 +54,7 @@ func (s *Service) draftImages(ctx context.Context, draftID int64, data bool) (ma
 }
 
 func (s *Service) draftAllowedCIDs(ctx context.Context, draftID int64, extra ...map[string]bool) (map[string]bool, error) {
-	out, err := s.signatureCIDs(ctx)
+	out, err := s.draftCIDs(ctx, draftID)
 	if err != nil {
 		return nil, err
 	}
@@ -119,10 +119,11 @@ func (s *Service) saveDraftImages(ctx context.Context, draftID int64, imgs []mai
 }
 
 func (s *Service) inlineCIDMap(ctx context.Context, draftID int64, html string, maxRawBytes int) (string, error) {
-	if len(mail.CIDs(html)) == 0 {
+	cids := mail.CIDs(html)
+	if len(cids) == 0 {
 		return html, nil
 	}
-	sigImgs, err := s.signatureImages(ctx, true)
+	sigImgs, err := s.signatureImages(ctx, cids, true)
 	if err != nil {
 		return "", err
 	}

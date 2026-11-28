@@ -208,6 +208,7 @@ SetAddressBookCollectionEnabled
 SetConversationModel
 SetDraftAccount
 SetDraftModel
+SetDraftSignature
 SetFlags
 SetLabel
 SetMCPServerEnabled

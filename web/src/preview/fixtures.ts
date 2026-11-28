@@ -48,6 +48,7 @@ const html = (ps: string[]) => ps.map((p) => `<p>${p}</p>`).join("");
 export const compose = (mode: "light" | "dark", withBody: boolean): ComposeState => ({
   draftId: 1,
   accounts: [{ id: 1, email: "you@example.com" }],
+  signatures: [],
   from: 1,
   to: ["Lena Fischer <lena@partner.example>"],
   cc: [],
@@ -60,6 +61,7 @@ export const compose = (mode: "light" | "dark", withBody: boolean): ComposeState
   quoteHtml: "",
   signatureHtml: "",
   attachments: [],
+  images: {},
   revision: 1,
   theme: theme(mode),
   updatedAt: new Date().setHours(9, 52, 0, 0),

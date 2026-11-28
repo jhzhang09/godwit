@@ -1,8 +1,11 @@
 package webui
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
+	"image"
+	"image/png"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -285,9 +288,9 @@ func TestComposeBoundSurface(t *testing.T) {
 		names = append(names, typ.Method(i).Name)
 	}
 	sort.Strings(names)
-	assert.Equal(t, []string{"AddAttachments", "Answer", "Ask", "CheckCited", "Closed", "Decide", "DecideAll", "DecideWithArgs", "Finish", "Follow", "ImportSMIMECertificate", "Latest", "Load",
+	assert.Equal(t, []string{"AddAttachments", "AddImage", "Answer", "Ask", "AttachDropped", "CheckCited", "Closed", "Decide", "DecideAll", "DecideWithArgs", "Finish", "Follow", "ImportSMIMECertificate", "Latest", "Load",
 		"Models", "OpenCited", "OpenLink", "OpenModels", "PickBodyImages", "PopupMenu", "RemoveAttachment", "Review", "Rewrite", "SMIMEStatus", "Save", "SearchContacts", "SearchMail", "Send", "SendLater", "SetAccount",
-		"SetModel", "SetSMIME", "Skill", "Stop", "TitleBar", "Toast", "ToastBar", "Undo", "WitInfo"}, names)
+		"SetModel", "SetSMIME", "SetSignature", "Skill", "Stop", "TitleBar", "Toast", "ToastBar", "Undo", "WitInfo"}, names)
 }
 
 func ptr[T any](v T) *T { return &v }
@@ -407,6 +410,40 @@ func TestComposeSetAccountStale(t *testing.T) {
 	assert.Equal(t, f.acc.ID, f.stored(t, d.ID).AccountID)
 }
 
+func TestComposeSetSignature(t *testing.T) {
+	f := newFixture(t)
+	work, err := f.e.Svc.CreateSignature(t.Context(), "Work")
+	require.NoError(t, err)
+	_, err = f.e.Svc.UpdateSignature(t.Context(), work.ID, core.SignaturePatch{HTML: ptr("Acme\nCorp")})
+	require.NoError(t, err)
+	d := f.replyDraft(t)
+	f.c.Attach(1, d.ID)
+	st, err := f.page.Load(f.ctx(1))
+	require.NoError(t, err)
+	assert.Contains(t, st.Signatures, SignatureChoice{ID: work.ID, Name: "Work"})
+	res, err := f.page.Save(f.ctx(1), ComposeEdit{Body: "<p>B</p>", Revision: st.Revision})
+	require.NoError(t, err)
+
+	ch, err := f.page.SetSignature(f.ctx(1), work.ID, res.Revision)
+	require.NoError(t, err)
+	assert.False(t, ch.Conflict)
+	assert.Contains(t, ch.SignatureHTML, "Acme")
+	assert.NotContains(t, ch.SignatureHTML, "Godwit")
+	stored := f.stored(t, d.ID)
+	assert.Equal(t, f.acc.ID, stored.AccountID, "the sender stays")
+	ed, _, _ := splitOf(stored.HTML)
+	assert.Equal(t, "<p>B</p>", ed)
+	// The next save keeps the chosen signature.
+	_, err = f.page.Save(f.ctx(1), ComposeEdit{Body: "<p>B2</p>", Revision: ch.Revision})
+	require.NoError(t, err)
+	_, _, sig := splitOf(f.stored(t, d.ID).HTML)
+	assert.Contains(t, sig, "Acme")
+
+	stale, err := f.page.SetSignature(f.ctx(1), 0, res.Revision)
+	require.NoError(t, err)
+	assert.True(t, stale.Conflict)
+}
+
 func TestComposeAttachments(t *testing.T) {
 	f := newFixture(t)
 	d := f.draft(t, "new", 0)
@@ -419,7 +456,7 @@ func TestComposeAttachments(t *testing.T) {
 	require.NoError(t, fh.Truncate(26<<20)) // sparse
 	require.NoError(t, fh.Close())
 	f.pick = func() ([]string, error) { return []string{small, big}, nil }
-	res, err := f.page.AddAttachments(f.ctx(1), d.Revision)
+	res, err := f.page.AddAttachments(f.ctx(1), d.Revision, false)
 	require.NoError(t, err)
 	assert.False(t, res.Conflict)
 	require.Len(t, res.Attachments, 1)
@@ -438,10 +475,48 @@ func TestComposeAttachments(t *testing.T) {
 	assert.Equal(t, f.stored(t, d.ID).UpdatedAt.UnixMilli(), ch.UpdatedAt)
 
 	f.pick = func() ([]string, error) { return nil, nil } // cancelled
-	res, err = f.page.AddAttachments(f.ctx(1), ch.Revision)
+	res, err = f.page.AddAttachments(f.ctx(1), ch.Revision, false)
 	require.NoError(t, err)
 	assert.Equal(t, ch.Revision, res.Revision)
 	assert.Empty(t, res.Attachments)
+}
+
+// TestComposeAttachDropped checks that files dropped on the window are
+// attached as picked ones are, and that a folder, a file over the limit and
+// a path never dropped there are refused by name.
+func TestComposeAttachDropped(t *testing.T) {
+	f := newFixture(t)
+	d := f.draft(t, "new", 0)
+	f.c.Attach(1, d.ID)
+	f.c.Attach(2, f.draft(t, "new", 0).ID)
+	dir := t.TempDir()
+	a, b, big, folder := filepath.Join(dir, "a.txt"), filepath.Join(dir, "b.png"), filepath.Join(dir, "big.bin"), filepath.Join(dir, "Photos")
+	require.NoError(t, os.WriteFile(a, []byte("aa"), 0o600))
+	require.NoError(t, os.WriteFile(b, []byte("bbb"), 0o600))
+	require.NoError(t, os.Mkdir(folder, 0o700))
+	fh, err := os.Create(big)
+	require.NoError(t, err)
+	require.NoError(t, fh.Truncate(26<<20)) // sparse
+	require.NoError(t, fh.Close())
+	f.c.Dropped(1, []string{a, b, big, folder})
+	f.c.Dropped(2, []string{"/etc/hosts"}) // another window's drop is not this one's
+
+	res, err := f.page.AttachDropped(f.ctx(1), d.Revision, []string{a, b, big, folder, "/etc/hosts"}, false)
+	require.NoError(t, err)
+	assert.False(t, res.Conflict)
+	var names []string
+	for _, x := range res.Attachments {
+		names = append(names, x.Filename)
+	}
+	assert.Equal(t, []string{"a.txt", "b.png"}, names)
+	assert.Equal(t, []string{"big.bin"}, res.TooLarge)
+	assert.Equal(t, []string{"hosts", "Photos"}, res.Failed)
+	assert.Equal(t, f.stored(t, d.ID).Revision, res.Revision)
+
+	stale, err := f.page.AttachDropped(f.ctx(1), d.Revision, []string{a}, false)
+	require.NoError(t, err)
+	assert.True(t, stale.Conflict)
+	assert.Len(t, f.stored(t, d.ID).Attachments, 2)
 }
 
 func TestComposeAttachStale(t *testing.T) {
@@ -449,7 +524,7 @@ func TestComposeAttachStale(t *testing.T) {
 	d := f.draft(t, "new", 0)
 	f.c.Attach(1, d.ID)
 	f.pick = func() ([]string, error) { t.Fatal("no dialog for a stale revision"); return nil, nil }
-	res, err := f.page.AddAttachments(f.ctx(1), d.Revision+1)
+	res, err := f.page.AddAttachments(f.ctx(1), d.Revision+1, false)
 	require.NoError(t, err)
 	assert.True(t, res.Conflict)
 	ch, err := f.page.RemoveAttachment(f.ctx(1), 1, d.Revision+1)
@@ -465,7 +540,7 @@ func TestComposeAttachPartial(t *testing.T) {
 	ok := filepath.Join(dir, "ok.txt")
 	require.NoError(t, os.WriteFile(ok, []byte("ok"), 0o600))
 	f.pick = func() ([]string, error) { return []string{ok, filepath.Join(dir, "missing.txt")}, nil }
-	res, err := f.page.AddAttachments(f.ctx(1), d.Revision)
+	res, err := f.page.AddAttachments(f.ctx(1), d.Revision, false)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"missing.txt"}, res.Failed)
 	assert.Empty(t, res.TooLarge)
@@ -622,7 +697,7 @@ func TestComposeReleaseDeletesEmpty(t *testing.T) {
 	withAttachment := f.draft(t, "new", 0)
 	src := filepath.Join(t.TempDir(), "a.txt")
 	require.NoError(t, os.WriteFile(src, []byte("a"), 0o600))
-	_, err := f.e.Svc.AddAttachment(t.Context(), withAttachment.ID, src)
+	_, err := f.e.Svc.AddAttachment(t.Context(), withAttachment.ID, src, false)
 	require.NoError(t, err)
 	deleted := map[string]core.Draft{
 		"new":              f.draft(t, "new", 0),
@@ -682,7 +757,7 @@ func TestComposeAttachExternalEditConflicts(t *testing.T) {
 			require.NoError(t, err)
 			return picked, nil
 		}
-		res, err := f.page.AddAttachments(f.ctx(1), cur.Revision)
+		res, err := f.page.AddAttachments(f.ctx(1), cur.Revision, false)
 		require.NoError(t, err)
 		assert.True(t, res.Conflict, "%v", picked)
 		assert.Empty(t, f.stored(t, d.ID).Attachments)
@@ -706,7 +781,7 @@ func TestComposeReleaseDuringDialog(t *testing.T) {
 		f.pick = func() ([]string, error) { close(inDialog); <-picked; return []string{src}, nil }
 		done := make(chan error)
 		go func() {
-			_, err := f.page.AddAttachments(f.ctx(win), d.Revision)
+			_, err := f.page.AddAttachments(f.ctx(win), d.Revision, false)
 			done <- err
 		}()
 		<-inDialog
@@ -819,16 +894,61 @@ func TestComposePickBodyImagesAndLoad(t *testing.T) {
 	require.Len(t, res.URLs, 1)
 	assert.True(t, strings.HasPrefix(res.URLs[0], "data:image/png;base64,"))
 	assert.Equal(t, []string{"bad.txt"}, res.Failed)
+}
 
-	// Saving body with data: URL stores cid:, and Load returns data: URL back to the editor.
-	_, err = f.page.Save(f.ctx(1), ComposeEdit{
-		Revision: d.Revision,
-		Body:     `<p>hi</p><img src="` + res.URLs[0] + `">`,
-	})
+// An image for the body: picked or pasted, it is shown from Images, never
+// listed with the files, and survives a save and a reopen as cid:.
+func TestComposeInlineImages(t *testing.T) {
+	f := newFixture(t)
+	d := f.draft(t, "new", 0)
+	f.c.Attach(1, d.ID)
+	var b bytes.Buffer
+	require.NoError(t, png.Encode(&b, image.NewGray(image.Rect(0, 0, 2, 2))))
+	dir := t.TempDir()
+	shot, notes := filepath.Join(dir, "shot.png"), filepath.Join(dir, "notes.txt")
+	require.NoError(t, os.WriteFile(shot, b.Bytes(), 0o600))
+	require.NoError(t, os.WriteFile(notes, []byte("notes"), 0o600))
+	f.pick = func() ([]string, error) { return []string{shot, notes}, nil }
+	res, err := f.page.AddAttachments(f.ctx(1), d.Revision, true)
 	require.NoError(t, err)
+	assert.False(t, res.Conflict)
+	assert.Equal(t, []string{"notes.txt"}, res.NotImage)
+	require.Len(t, res.Images, 1)
+	img := res.Images[0]
+	assert.Equal(t, "data:image/png;base64,"+base64.StdEncoding.EncodeToString(b.Bytes()), img.URL)
+	assert.Empty(t, res.Attachments, "shown in the body, not listed")
 
+	var g bytes.Buffer
+	require.NoError(t, png.Encode(&g, image.NewGray(image.Rect(0, 0, 3, 3))))
+	pasted, err := f.page.AddImage(f.ctx(1), res.Revision, "../../Pasted.png", base64.StdEncoding.EncodeToString(g.Bytes()))
+	require.NoError(t, err)
+	require.Len(t, pasted.Images, 1)
+	assert.Equal(t, pasted.Revision, f.stored(t, d.ID).Revision)
+	names := []string{}
+	for _, a := range f.stored(t, d.ID).Attachments {
+		names = append(names, a.Filename)
+	}
+	assert.Equal(t, []string{"shot.png", "Pasted.png"}, names, "a base name only")
+
+	// An image dropped on the body from the file manager.
+	dropped := filepath.Join(dir, "dropped.png")
+	var h bytes.Buffer
+	require.NoError(t, png.Encode(&h, image.NewGray(image.Rect(0, 0, 4, 4))))
+	require.NoError(t, os.WriteFile(dropped, h.Bytes(), 0o600))
+	f.c.Dropped(1, []string{dropped})
+	drop, err := f.page.AttachDropped(f.ctx(1), pasted.Revision, []string{dropped}, true)
+	require.NoError(t, err)
+	require.Len(t, drop.Images, 1)
+	assert.Empty(t, drop.Attachments)
+	pasted.Revision = drop.Revision
+
+	body := `<p>See:</p><img src="cid:` + img.CID + `"><img src="cid:` + pasted.Images[0].CID + `">`
+	saved, err := f.page.Save(f.ctx(1), ComposeEdit{To: []string{"bob@example.com"}, Body: body, Revision: pasted.Revision})
+	require.NoError(t, err)
+	assert.False(t, saved.Conflict)
 	st, err := f.page.Load(f.ctx(1))
 	require.NoError(t, err)
-	assert.Contains(t, st.Body, "data:image/png;base64,")
-	assert.NotContains(t, st.Body, "cid:body-")
+	assert.Equal(t, []string{img.CID, pasted.Images[0].CID}, mail.CIDs(st.Body))
+	assert.Equal(t, map[string]string{img.CID: img.URL, pasted.Images[0].CID: pasted.Images[0].URL}, st.Images)
+	assert.Empty(t, st.Attachments)
 }

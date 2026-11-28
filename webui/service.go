@@ -11,7 +11,7 @@ import (
 
 // Service is the subset of the mail engine the web UI pages call.
 type Service interface {
-	AddAttachmentAt(ctx context.Context, draftID, revision int64, srcPath string) (core.DraftAttachment, int64, error)
+	AddAttachmentAt(ctx context.Context, draftID, revision int64, srcPath string, inline bool) (core.DraftAttachment, int64, error)
 	AnswerQuestion(ctx context.Context, id int64, round int, answers [][]string) error
 	ApplyEditedProposal(ctx context.Context, approvalID int64, edited string) error
 	AskAgain(ctx context.Context, conversationID int64, turn string, input string, quoted []int64) (<-chan core.WitEvent, error)
@@ -25,6 +25,7 @@ type Service interface {
 	CompactConversation(ctx context.Context, id int64) error
 	DeleteDraftIfEmpty(ctx context.Context, id, revision int64) (deleted bool, err error)
 	DraftForApproval(ctx context.Context, approvalID int64) (int64, error)
+	DraftImageFiles(ctx context.Context, draftID int64, cids []string) ([]core.InlineImage, error)
 	DraftSMIMEStatus(ctx context.Context, draftID int64) (core.DraftSMIMEStatus, error)
 	EditProposedRule(ctx context.Context, id int64) (core.Rule, error)
 	FailQuestion(ctx context.Context, conv int64, question string, quoted []int64, reason string) error
@@ -38,6 +39,7 @@ type Service interface {
 	InlineDraftImages(ctx context.Context, draftID int64, html string) (string, error)
 	InlineImages(ctx context.Context, id int64, each func(cid string, a mail.Attachment)) error
 	ListAccounts(ctx context.Context) ([]core.Account, error)
+	ListSignatures(ctx context.Context) ([]core.Signature, error)
 	ListApprovals(ctx context.Context, conversationID int64) ([]core.Approval, error)
 	ListConversations(ctx context.Context, kind string) ([]core.Conversation, error)
 	ListModelServices(ctx context.Context) ([]core.ModelService, error)
@@ -65,6 +67,7 @@ type Service interface {
 	SenderAvatar(ctx context.Context, messageID int64, allowRemote bool) (core.Avatar, error)
 	SetConversationModel(ctx context.Context, id int64, ref, effort string) error
 	SetDraftAccount(ctx context.Context, id, accountID, revision int64) (core.Draft, error)
+	SetDraftSignature(ctx context.Context, id, signatureID, revision int64) (core.Draft, error)
 	SetDraftModel(ctx context.Context, draftID int64, model string) error
 	SetDraftSMIME(ctx context.Context, draftID int64, sign, encrypt *bool, pinnedCerts map[string]string) (core.DraftSMIMEStatus, error)
 	SignatureEditor(ctx context.Context, id int64) (string, error)

@@ -7,6 +7,13 @@ type Account struct {
 	Email string `json:"email"`
 }
 
+// SignatureChoice is a signature the page can put in the draft.
+type SignatureChoice struct {
+	// ID and Name identify the signature; Name is the user's.
+	ID   int64  `json:"id"`
+	Name string `json:"name"`
+}
+
 // ComposeSMIMECertChainNode summarizes one certificate in a resolved X.509 trust chain,
 // ordered top-down from root/highest CA to leaf.
 type ComposeSMIMECertChainNode struct {
@@ -117,6 +124,8 @@ type ComposeState struct {
 	// DraftID is the window's draft; Accounts are the senders to pick from.
 	DraftID  int64     `json:"draftId"`
 	Accounts []Account `json:"accounts"`
+	// Signatures are the signatures to pick from, oldest first.
+	Signatures []SignatureChoice `json:"signatures"`
 	// From is the sending account's ID.
 	From int64 `json:"from"`
 	// To, Cc, Bcc, ReplyTo and Subject are the header fields as stored.
@@ -135,8 +144,11 @@ type ComposeState struct {
 	Quote         string `json:"quote"`
 	QuoteHTML     string `json:"quoteHtml"`
 	SignatureHTML string `json:"signatureHtml"`
-	// Attachments are the draft's files.
-	Attachments []Attachment `json:"attachments"`
+	// Attachments are the draft's files, its images in the body not among
+	// them; Images are those images as data: URLs by Content-ID, for showing
+	// the Body's cid: sources (core.Service.DraftImageFiles).
+	Attachments []Attachment      `json:"attachments"`
+	Images      map[string]string `json:"images"`
 	// Revision is what the next save must pass; Theme styles the page.
 	Revision int64 `json:"revision"`
 	Theme    Theme `json:"theme"`
@@ -199,6 +211,18 @@ type AttachResult struct {
 	// for another reason (logged).
 	TooLarge []string `json:"tooLarge"`
 	Failed   []string `json:"failed"`
+	// Images are the images added for the body, in order; NotImage the files
+	// refused for it, not being a png, jpeg, gif or webp.
+	Images   []InlineImage `json:"images"`
+	NotImage []string      `json:"notImage"`
+}
+
+// InlineImage is an image the draft's body may show.
+type InlineImage struct {
+	// CID is its Content-ID: the body shows it as <img src="cid:CID">. URL
+	// is it as a data: URL, for showing only (never saved).
+	CID string `json:"cid"`
+	URL string `json:"url"`
 }
 
 // PickBodyImagesResult is the outcome of picking inline images for the compose

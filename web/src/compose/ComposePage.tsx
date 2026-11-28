@@ -1,4 +1,4 @@
-import { RiArrowRightSLine, RiAttachment2, RiRefreshLine } from "@remixicon/react";
+import { RiArrowRightSLine, RiAttachment2, RiImageLine, RiRefreshLine } from "@remixicon/react";
 import { cn } from "cn";
 import { type RefObject, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
@@ -35,6 +35,7 @@ import { ProgramBanner, WitBanner } from "./Banner";
 import { type CmdKSelection, Editor, type EditorHandle } from "./editor/Editor";
 import { IdleToolbar } from "./editor/Toolbar";
 import { Fields, type FieldsEdit, type FieldsHandle } from "./fields/Fields";
+import { useFileDrop } from "./fileDrop";
 import { Notices } from "./Notices";
 import { CmdK } from "./review/CmdK";
 import { BODY, Review, reviewSummary, Static } from "./review/Review";
@@ -215,6 +216,21 @@ const pendingEdit = (a: Approval) =>
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
+/** A file the body can show, by its name (Go sniffs its content again). */
+const IMAGE_PATH = /\.(png|jpe?g|gif|webp)$/i;
+
+/** A file's bytes in base64, as ComposePage.AddImage takes them. */
+const base64 = (f: Blob) =>
+  new Promise<string>((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => {
+      const url = String(r.result);
+      resolve(url.slice(url.indexOf(",") + 1));
+    };
+    r.onerror = () => reject(r.error);
+    r.readAsDataURL(f);
+  });
+
 /** update_draft's HTML from its call's JSON arguments; "" for none. */
 function draftHTML(args: string): string {
   try {
@@ -389,6 +405,7 @@ function Compose({
   const [fieldsKey, setFieldsKey] = useState(0); // remounts the fields
   const [from, setFrom] = useState(state.from);
   const [accounts, setAccounts] = useState(state.accounts);
+  const [signatures, setSignatures] = useState(state.signatures);
   const [fromProgram, setFromProgram] = useState(state.fromProgram); // ADR 0043: check before sending
   const [signature, setSignature] = useState(sigOf(state));
   const [quote, setQuote] = useState(state.quote);
@@ -403,6 +420,10 @@ function Compose({
   const rcptKeyRef = useRef(JSON.stringify([state.to, state.cc, state.bcc]));
   const [tooLarge, setTooLarge] = useState<string[]>([]);
   const [failed, setFailed] = useState<string[]>([]);
+  const [notImage, setNotImage] = useState<string[]>([]);
+  // The draft's images by Content-ID, as data: URLs: the body shows them. A draft only gains images.
+  const [images, setImages] = useState<Record<string, string>>(state.images);
+  const addImages = (more: Record<string, string>) => setImages((m) => ({ ...m, ...more }));
   // at: the Send later time (unix ms) the warnings were for; 0 for a send of now.
   const [warnings, setWarnings] = useState<{ list: SendWarning[]; digest: string; at: number }>({
     list: [],
@@ -528,6 +549,7 @@ function Compose({
     flushSync(() => {
       setF(cur.current);
       setAccounts(l.accounts); // the account may be one added since the window opened
+      setSignatures(l.signatures);
       setFrom(l.from);
       setFromProgram(l.fromProgram);
       setSignature(sigOf(l));
@@ -538,6 +560,7 @@ function Compose({
         ++smimeSeq.current;
         setSmime(l.smime);
       }
+      if ("images" in l) addImages(l.images);
       setSavedAt(fmt(new Date(l.updatedAt)));
     });
     rcptKeyRef.current = JSON.stringify([l.to, l.cc, l.bcc]);
@@ -799,6 +822,17 @@ function Compose({
       setSmimeImporting(false);
     }
   };
+  const onSignature = async (id: number) => {
+    if (!sv) return;
+    try {
+      const r = await sv.run((rev) => api.setSignature(id, rev));
+      if (!r || r.conflict) return;
+      setSignature(sigOf(r));
+      setSavedAt(fmt(new Date(r.updatedAt)));
+    } catch (e) {
+      failure(e);
+    }
+  };
   const change = async (op: (rev: number) => ReturnType<typeof api.addAttachments>) => {
     if (!sv) return;
     try {
@@ -811,10 +845,32 @@ function Compose({
       }
       setTooLarge(r.tooLarge ?? []);
       setFailed(r.failed ?? []);
+      setNotImage(r.notImage ?? []);
+      if (r.images?.length) {
+        flushSync(() => addImages(Object.fromEntries(r.images.map((i) => [i.cid, i.url]))));
+        editorRef.current?.insertImages(r.images.map((i) => i.cid)); // the body's save follows
+      }
     } catch (e) {
       failure(e);
     }
   };
+  // Image files pasted or dropped on the body, added one after the other.
+  const onImageFiles = async (files: File[]) => {
+    for (const file of files) {
+      await change((rev) => base64(file).then((data) => api.addImage(rev, file.name, data)));
+    }
+  };
+  // Files dropped on the window are attached as the attach button's are, and only when it is enabled.
+  // Image files dropped on the body go in it (#812), as a pasted one does; the rest are attached.
+  const dragging = useFileDrop(!locked && !witLocked, ({ paths, x, y }) => {
+    const onBody = !!document.elementFromPoint?.(x, y)?.closest("[data-body]");
+    const images = onBody ? paths.filter((p) => IMAGE_PATH.test(p)) : [];
+    const rest = paths.filter((p) => !images.includes(p));
+    void (async () => {
+      if (images.length) await change((rev) => api.attachDropped(rev, images, true));
+      if (rest.length) await change((rev) => api.attachDropped(rev, rest, false));
+    })();
+  });
   // A body operation (a decision, undo) in the saver's queue; its BodyChange is adopted at once.
   const bodyOp = async (op: () => Promise<BodyChange>) => {
     if (!sv) return null;
@@ -940,6 +996,7 @@ function Compose({
       setLatestFailed(false);
       flushSync(() => {
         setAccounts(l.accounts);
+        setSignatures(l.signatures);
         setFrom(l.from);
         setFromProgram(l.fromProgram);
         setSignature(sigOf(l));
@@ -950,6 +1007,7 @@ function Compose({
           ++smimeSeq.current;
           setSmime(l.smime);
         }
+        addImages(l.images);
       });
       rcptKeyRef.current = JSON.stringify([l.to, l.cc, l.bcc]);
       if (mine) {
@@ -982,9 +1040,21 @@ function Compose({
       className="size-7 rounded-md text-foreground/80 disabled:opacity-100"
       aria-label={t("compose.attach")}
       disabled={locked || witLocked} // an attachment bumps the revision: a waiting edit would go stale
-      onClick={() => change((rev) => api.addAttachments(rev))}
+      onClick={() => change((rev) => api.addAttachments(rev, false))}
     >
       <RiAttachment2 className="size-3.75" />
+    </Button>
+  );
+  const insertImage = (
+    <Button
+      variant="ghost"
+      size="icon-sm"
+      className="size-7 rounded-md text-foreground/80 disabled:opacity-100"
+      aria-label={t("compose.image")}
+      disabled={locked || witLocked}
+      onClick={() => change((rev) => api.addAttachments(rev, true))}
+    >
+      <RiImageLine className="size-3.75" />
     </Button>
   );
   const title = f.subject.trim() || t("compose.new");
@@ -1084,6 +1154,8 @@ function Compose({
                 menu={api.popupMenu}
                 from={from}
                 onFrom={onFrom}
+                signatures={signatures}
+                onSignature={onSignature}
                 to={f.to}
                 cc={f.cc}
                 bcc={f.bcc}
@@ -1132,6 +1204,7 @@ function Compose({
                   <Review
                     key={reviewing.approval}
                     review={reviewing}
+                    images={images}
                     busy={deciding}
                     onDecide={(accept) => decide((id) => api.decide(id, accept), accept)}
                     onFinish={(ds) => decide((id) => api.finish(id, ds), ds.includes(1))}
@@ -1144,6 +1217,7 @@ function Compose({
                 <div
                   data-locked={running || undefined}
                   hidden={!!reviewing}
+                  data-body
                   className={`${BODY} data-locked:bg-sidebar`}
                   onMouseDown={(e) => {
                     if (e.target !== e.currentTarget) return;
@@ -1170,26 +1244,17 @@ function Compose({
                       onPickImages={
                         locked || witLocked
                           ? undefined
-                          : () => {
-                              api
-                                .pickBodyImages()
-                                .then((res) => {
-                                  if (res.urls.length > 0)
-                                    editorRef.current?.insertImages(res.urls);
-                                  if (res.failed.length > 0) {
-                                    toast.error(
-                                      t("compose.image_too_large", res.failed.join(", ")),
-                                    );
-                                  }
-                                })
-                                .catch(failure);
-                            }
-                      }
-                      onImageError={(names) =>
-                        toast.error(t("compose.image_too_large", names.join(", ")))
+                          : () => void change((rev) => api.addAttachments(rev, true))
                       }
                       toolbarSlot={showEditor ? toolbarSlot : null}
-                      attach={attach}
+                      attach={
+                        <>
+                          {insertImage}
+                          {attach}
+                        </>
+                      }
+                      images={images}
+                      onImageFiles={locked || witLocked ? undefined : (fs) => void onImageFiles(fs)}
                       popover={
                         cmdk &&
                         !locked &&
@@ -1211,12 +1276,17 @@ function Compose({
                   items={attachments}
                   tooLarge={tooLarge}
                   failed={failed}
+                  notImage={notImage}
                   frozen={locked}
                   onRemove={(id) =>
                     change((rev) =>
-                      api
-                        .removeAttachment(id, rev)
-                        .then((c) => ({ ...c, tooLarge: [], failed: [] })),
+                      api.removeAttachment(id, rev).then((c) => ({
+                        ...c,
+                        tooLarge: [],
+                        failed: [],
+                        images: [],
+                        notImage: [],
+                      })),
                     )
                   }
                   t={t}
@@ -1368,6 +1438,16 @@ function Compose({
           </ResizablePanel>
         )}
       </ResizablePanelGroup>
+      {dragging && (
+        // Shows where files go without taking the drop: the editor's own drop still reaches it.
+        <div
+          role="status"
+          className="pointer-events-none fixed inset-2 z-50 flex items-center justify-center gap-2 rounded-xl border-2 border-primary border-dashed bg-background/85 text-primary text-sm"
+        >
+          <RiAttachment2 className="size-4" aria-hidden />
+          {t("compose.attach.drop")}
+        </div>
+      )}
       <NativeToasts api={api} bar={dock.bar} input={dock.send} />
     </main>
   );

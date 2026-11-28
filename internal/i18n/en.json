@@ -86,6 +86,7 @@
   "common_retry": "Retry",
   "common_save": "Save",
   "compose_attach": "Attach files",
+  "compose_attach_drop": "Drop files to attach",
   "compose_attach_failed": "Couldn''t attach: {arg1}",
   "@compose_attach_failed": {
     "placeholders": {
@@ -96,6 +97,15 @@
   },
   "compose_attach_too_large": "Attachments can be at most {arg1}",
   "@compose_attach_too_large": {
+    "placeholders": {
+      "arg1": {
+        "type": "String"
+      }
+    }
+  },
+  "compose_image": "Insert image",
+  "compose_image_invalid": "Only a PNG, JPEG, GIF or WebP image can go in the message: {arg1}",
+  "@compose_image_invalid": {
     "placeholders": {
       "arg1": {
         "type": "String"
@@ -116,6 +126,9 @@
   "compose_format": "Formatting",
   "compose_from": "From",
   "compose_from_select": "Sending account",
+  "compose_signature": "Signature",
+  "compose_signature_select": "Signature to use",
+  "compose_signature_none": "No signature",
   "compose_invalid": "Invalid address: {arg1}",
   "@compose_invalid": {
     "placeholders": {
@@ -2523,6 +2536,7 @@
   "settings_show_tray_icon_help": "Sign-in code banners and recent codes need this icon. Without it, open Godwit from the Dock or taskbar.",
   "settings_unread_in_menu_bar": "Show the unread count in the menu bar",
   "settings_unread_on_app_icon": "Show the unread count on the app icon",
+  "settings_unread_on_app_icon_help": "Not shown while the main window is closed: Godwit then stays in the menu bar only, without a Dock icon.",
   "shell_back": "Back",
   "shell_forward": "Forward",
   "shell_nav_back_to": "Back to {arg1}",

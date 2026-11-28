@@ -866,7 +866,7 @@ func (s *Service) prepareDraft(ctx context.Context, _ Conversation, args json.Ra
 	if err != nil {
 		return prepared{}, err
 	}
-	if in.HTML, err = s.sanitizeDraft(ctx, mail.StripMarkers(ensureHTML(in.HTML))+d.HTML); err != nil {
+	if in.HTML, err = s.sanitizeDraft(ctx, 0, mail.StripMarkers(ensureHTML(in.HTML))+d.HTML); err != nil {
 		return prepared{}, err
 	}
 	b, err := json.Marshal(in)
